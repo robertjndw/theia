@@ -14,7 +14,7 @@
 // SPDX-License-Identifier: EPL-2.0 OR GPL-2.0-only WITH Classpath-exception-2.0
 // *****************************************************************************
 
-import { ContributionFilterRegistry, FilterContribution, bindContribution } from '@theia/core/lib/common';
+import { ContributionFilterRegistry, FilterContribution } from '@theia/core/lib/common';
 import { injectable, interfaces } from '@theia/core/shared/inversify';
 import { SearchInWorkspaceFrontendContribution } from '@theia/search-in-workspace/lib/browser/search-in-workspace-frontend-contribution';
 
@@ -29,6 +29,5 @@ export class FilterNonCompatibleBrowserOnlyContribution implements FilterContrib
 }
 
 export function bindSampleFilteredCommandContribution(bind: interfaces.Bind): void {
-    bind(FilterNonCompatibleBrowserOnlyContribution).toSelf().inSingletonScope();
-    bindContribution(bind, FilterNonCompatibleBrowserOnlyContribution, [FilterContribution]);
+    bind(FilterContribution).to(FilterNonCompatibleBrowserOnlyContribution).inSingletonScope();
 }
