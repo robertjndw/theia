@@ -69,6 +69,7 @@
     "compute-references": "node scripts/compile-references.js",
     "docs": "rimraf gh-pages/docs/next && typedoc --tsconfig tsconfig.json --options configs/typedoc.json .",
     "download:plugins": "theia download:plugins",
+    "download:plugins:browser-only": "cd examples/browser-only && npm run download:plugins",
     "license:check": "node scripts/check_3pp_licenses.js",
     "license:check:review": "node scripts/check_3pp_licenses.js --review",
     "lint": "lerna run lint",
