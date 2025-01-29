@@ -20,8 +20,8 @@ jobs:
 
       - name: Install packages
         run: |
-          apt update
-          apt install -y libxkbfile-dev libsecret-1-dev
+          sudo apt update
+          sudo apt install -y libxkbfile-dev libsecret-1-dev
 
       - name: Set Up Node.js
         uses: actions/setup-node@v4
