@@ -39,6 +39,11 @@ jobs:
         run: |
           npm run build:browser-only
 
+      - name: List files
+        run: |
+          ls -l
+          ls -l examples/browser-only/lib/frontend
+
       - name: Upload static files as artifact
         id: deployment
         uses: actions/upload-pages-artifact@v3 # or specific "vX.X.X" version tag for this action
