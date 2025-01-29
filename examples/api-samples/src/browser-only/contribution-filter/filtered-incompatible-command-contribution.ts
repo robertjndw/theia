@@ -16,8 +16,7 @@
 
 import { ContributionFilterRegistry, FilterContribution, bindContribution } from '@theia/core/lib/common';
 import { injectable, interfaces } from '@theia/core/shared/inversify';
-import { SearchInWorkspaceFrontendContribution } from '@theia/search-in-workspace/src/browser/search-in-workspace-frontend-contribution';
-
+import { SearchInWorkspaceFrontendContribution } from '@theia/search-in-workspace/lib/browser/search-in-workspace-frontend-contribution';
 
 @injectable()
 export class FilterNonCompatibleBrowserOnlyContribution implements FilterContribution {
