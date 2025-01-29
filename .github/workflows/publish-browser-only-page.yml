@@ -18,6 +18,11 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
+      - name: Install packages
+        run: |
+          apt update
+          apt install -y libxkbfile-dev libsecret-1-dev
+
       - name: Set Up Node.js
         uses: actions/setup-node@v4
         with:
