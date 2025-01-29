@@ -15,14 +15,6 @@
     }
   },
   "dependencies": {
-    // "@theia/ai-chat": "1.57.0",
-    // "@theia/ai-chat-ui": "1.57.0",
-    // "@theia/ai-code-completion": "1.57.0",
-    // "@theia/ai-core": "1.57.0",
-    // "@theia/ai-history": "1.57.0",
-    // "@theia/ai-ollama": "1.57.0",
-    // "@theia/ai-openai": "1.57.0",
-    // "@theia/ai-scanoss": "1.57.0",
     "@theia/api-samples": "1.57.0",
     "@theia/bulk-edit": "1.57.0",
     "@theia/callhierarchy": "1.57.0",
@@ -35,7 +27,6 @@
     "@theia/file-search": "1.57.0",
     "@theia/filesystem": "1.57.0",
     "@theia/getting-started": "1.57.0",
-    // "@theia/git": "1.57.0",
     "@theia/keymaps": "1.57.0",
     "@theia/markers": "1.57.0",
     "@theia/memory-inspector": "1.57.0",
@@ -57,7 +48,6 @@
     "@theia/scanoss": "1.57.0",
     "@theia/scm": "1.57.0",
     "@theia/scm-extra": "1.57.0",
-    // "@theia/search-in-workspace": "1.57.0",
     "@theia/secondary-window": "1.57.0",
     "@theia/task": "1.57.0",
     "@theia/terminal": "1.57.0",
@@ -66,7 +56,6 @@
     "@theia/typehierarchy": "1.57.0",
     "@theia/userstorage": "1.57.0",
     "@theia/variable-resolver": "1.57.0",
-    // "@theia/vsx-registry": "1.57.0",
     "@theia/workspace": "1.57.0"
   },
   "scripts": {
