@@ -17,13 +17,14 @@
 import { ContributionFilterRegistry, FilterContribution, bindContribution } from '@theia/core/lib/common';
 import { injectable, interfaces } from '@theia/core/shared/inversify';
 import { SearchInWorkspaceFrontendContribution } from '@theia/search-in-workspace/lib/browser/search-in-workspace-frontend-contribution';
+import { GitContribution } from '@theia/git/lib/browser/git-contribution';
 
 @injectable()
 export class FilterNonCompatibleBrowserOnlyContribution implements FilterContribution {
     registerContributionFilters(registry: ContributionFilterRegistry): void {
         registry.addFilters('*', [
             // filter a contribution based on its class type
-            contrib => !(contrib instanceof SearchInWorkspaceFrontendContribution)
+            contrib => !(contrib instanceof SearchInWorkspaceFrontendContribution || contrib instanceof GitContribution)
         ]);
     }
 }
