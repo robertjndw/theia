@@ -30,7 +30,9 @@ jobs:
           cache: 'npm'
 
       - name: Install Dependencies
-        run: cd examples/browser-only && npm install
+        run: |
+          npm install
+          cd examples/browser-only && npm install
 
       - name: Build Theia
         id: build
