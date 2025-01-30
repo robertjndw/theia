@@ -21,7 +21,8 @@
     "octicons": "^7.1.0",
     "p-queue": "^8.0.1",
     "ts-md5": "^1.2.2",
-    "tslib": "^2.6.2"
+    "tslib": "^2.6.2",
+    "isomorphic-git": "^1.29.0"
   },
   "publishConfig": {
     "access": "public"
@@ -38,6 +39,9 @@
     {
       "frontend": "lib/browser/prompt/git-prompt-module",
       "frontendElectron": "lib/electron-browser/prompt/electron-git-prompt-module"
+    },
+    {
+      "frontendOnly": "lib/browser-only/browser-only-git-frontend-module"
     }
   ],
   "keywords": [
