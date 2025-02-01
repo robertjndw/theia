@@ -67,7 +67,7 @@ export interface PluginPackage {
 }
 export namespace PluginPackage {
     export function toPluginUrl(pck: PluginPackage | PluginModel, relativePath: string): string {
-        return `theia/hostedPlugin/${getPluginId(pck)}/${encodeURIComponent(relativePath)}`;
+        return `hostedPlugin/${getPluginId(pck)}/${encodeURIComponent(relativePath)}`;
     }
 }
 
