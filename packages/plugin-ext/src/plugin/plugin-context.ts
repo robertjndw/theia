@@ -1630,7 +1630,7 @@ export class Plugin<T> implements theia.Plugin<T> {
 
         if (this.pluginType === 'frontend') {
             const ownURI = new Endpoint().getRestUrl();
-            this.pluginUri = URI.parse(ownURI.parent + PluginPackage.toPluginUrl(plugin.model, ''));
+            this.pluginUri = URI.parse(ownURI.parent + "/" + PluginPackage.toPluginUrl(plugin.model, ''));
         } else {
             this.pluginUri = URI.parse(plugin.pluginUri);
         }
