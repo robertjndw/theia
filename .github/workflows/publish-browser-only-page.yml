@@ -39,6 +39,7 @@ jobs:
       - name: Build Theia
         id: build
         run: |
+          npm run download:plugins:browser-only
           npm run build:browser-only
 
       - name: Upload static files as artifact
