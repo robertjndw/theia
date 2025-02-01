@@ -16,7 +16,7 @@
 
 import { injectable, inject } from '@theia/core/shared/inversify';
 import { FileSearchService, WHITESPACE_QUERY_SEPARATOR } from '../common/file-search-service';
-import { FileSystemProvider, FileType } from '@theia/filesystem/lib/common/files';;
+import { FileSystemProvider, FileType } from '@theia/filesystem/lib/common/files';
 import { CancellationTokenSource, CancellationToken, ILogger, URI } from '@theia/core';
 import { minimatch } from 'minimatch';
 
@@ -69,9 +69,9 @@ export class FileSearchServiceImpl implements FileSearchService {
                         const patternExists = patterns.every(pattern => candidatePattern.includes(pattern));
 
                         // Add exact or fuzzy matches
-                        if (patternExists) {
+                        if (!searchPattern || searchPattern === '*') {
                             exactMatches.add(candidate);
-                        } else if (!searchPattern || searchPattern === '*') {
+                        } else if (patternExists) {
                             exactMatches.add(candidate);
                         } else if (opts.fuzzyMatch && this.isFuzzyMatch(patterns, candidatePattern)) {
                             fuzzyMatches.add(candidate);
@@ -83,7 +83,7 @@ export class FileSearchServiceImpl implements FileSearchService {
                         }
                     }, token);
                 } catch (e) {
-                    console.error('Failed to search:', root, e);
+                    this.logger.error('Failed to search:', root, e);
                 }
             })
         );
