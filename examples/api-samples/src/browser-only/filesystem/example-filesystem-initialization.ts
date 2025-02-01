@@ -19,6 +19,9 @@ import { inject, injectable, interfaces } from '@theia/core/shared/inversify';
 import { EncodingService } from '@theia/core/lib/common/encoding-service';
 import { OPFSInitialization, DefaultOPFSInitialization } from '@theia/filesystem/lib/browser-only/opfs-filesystem-initialization';
 import { OPFSFileSystemProvider } from '@theia/filesystem/lib/browser-only/opfs-filesystem-provider';
+import { exerciseFiles } from './example-exercise';
+import { solutionFiles } from './example-solution';
+
 
 @injectable()
 export class ExampleOPFSInitialization extends DefaultOPFSInitialization {
@@ -28,18 +31,22 @@ export class ExampleOPFSInitialization extends DefaultOPFSInitialization {
 
     override async initializeFS(provider: OPFSFileSystemProvider): Promise<void> {
         // Check whether the directory exists
-        if (await provider.exists(new URI('/home/workspace'))) {
-            await provider.readdir(new URI('/home/workspace'));
+        if (await provider.exists(new URI('/home/exercise'))) {
+            await provider.readdir(new URI('/home/exercise'));
         } else {
-            await provider.mkdir(new URI('/home/workspace'));
-            await provider.writeFile(new URI('/home/workspace/my-file.txt'), this.encodingService.encode('foo').buffer, { create: true, overwrite: false });
+            await provider.mkdir(new URI('/home/exercise'));
+            for (const file of exerciseFiles) {
+                await provider.writeFile(new URI(`/home/exercise/${file.name}`), this.encodingService.encode(file.content).buffer, { create: true, overwrite: false });
+            }
         }
 
-        if (await provider.exists(new URI('/home/workspace2'))) {
-            await provider.readdir(new URI('/home/workspace2'));
+        if (await provider.exists(new URI('/home/solution'))) {
+            await provider.readdir(new URI('/home/solution'));
         } else {
-            await provider.mkdir(new URI('/home/workspace2'));
-            await provider.writeFile(new URI('/home/workspace2/my-file.json'), this.encodingService.encode('{ foo: true }').buffer, { create: true, overwrite: false });
+            await provider.mkdir(new URI('/home/solution'));
+            for (const file of solutionFiles) {
+                await provider.writeFile(new URI(`/home/solution/${file.name}`), this.encodingService.encode(file.content).buffer, { create: true, overwrite: false });
+            }
         }
     }
 }
