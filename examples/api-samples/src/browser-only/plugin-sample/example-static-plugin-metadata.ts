@@ -19,6 +19,63 @@ export const staticMetadata: any[] = [
     metadata: {
       host: 'main',
       model: {
+        packagePath: '/home/user/theia/examples/browser-only/plugins/robertjndw.ts-executor-web/extension',
+        packageUri: 'file:///home/user/theia/examples/browser-only/plugins/robertjndw.ts-executor-web',
+        id: 'robertjndw.ts-executor-web',
+        name: 'ts-executor-web',
+        publisher: 'robertjndw',
+        version: '0.0.1',
+        displayName: 'TypeScript Executor (Web)',
+        description: 'Execute TypeScript code in the browser.',
+        engine: {
+          type: 'vscode',
+          version: '^1.74.0',
+        },
+        entryPoint: {
+          frontend: './dist/web/extension.js',
+        },
+        iconUrl: 'hostedPlugin/robertjndw_ts_executor_web/media%2Ficon.png',
+        l10n: undefined,
+        readmeUrl: 'hostedPlugin/robertjndw_ts_executor_web/.%2FREADME.md',
+        licenseUrl: 'hostedPlugin/robertjndw_ts_executor_web/.%2FLICENSE',
+      },
+      lifecycle: {
+        startMethod: 'activate',
+        stopMethod: 'deactivate',
+        frontendModuleName: 'robertjndw_ts_executor_web',
+        frontendInitPath: 'plugin-vscode-init-fe.js'
+      },
+      outOfSync: false,
+      isUnderDevelopment: false,
+    },
+    type: 0,
+    contributes: {
+      activationEvents: [
+        'onLanguage:typescript',
+        'onLanguage:javascript',
+      ],
+      commands: [
+        {
+          "command": "ts-executor-web.runCode",
+          "title": "Run TypeScript Code",
+          "icon": "$(play)"
+        }
+      ],
+      "menus": {
+        "editor/title/run": [
+          {
+            "when": "editorLangId == javascript || editorLangId == typescript",
+            "command": "ts-executor-web.runCode",
+            "group": "navigation"
+          }
+        ]
+      }
+    }
+  },
+  {
+    metadata: {
+      host: 'main',
+      model: {
         packagePath: '/home/user/theia/examples/browser-only/plugins/vscode.typescript-language-features/extension',
         packageUri: 'file:///home/user/theia/examples/browser-only/plugins/vscode.typescript-language-features',
         id: 'vscode.typescript-language-features',
