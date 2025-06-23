@@ -14,7 +14,8 @@
 		"Other"
 	],
 	"activationEvents": [
-		"*"
+		"onLanguage:typescript",
+		"onLanguage:javascript"
 	],
 	"browser": "./dist/web/extension.js",
 	"contributes": {

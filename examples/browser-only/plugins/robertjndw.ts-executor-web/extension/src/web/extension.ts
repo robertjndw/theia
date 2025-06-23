@@ -15,18 +15,14 @@ export async function activate(context: vscode.ExtensionContext) {
     const outputChannel = vscode.window.createOutputChannel('TS Executor Logs');
 
     await esbuild.initialize({
-        wasmURL: 'https://unpkg.com/esbuild-wasm/esbuild.wasm',
+        wasmURL: 'https://unpkg.com/esbuild-wasm@0.24.2/esbuild.wasm',
     });
 
     // The command has been defined in the package.json file
     // Now provide the implementation of the command with registerCommand
     // The commandId parameter must match the command field in package.json
     const disposable = vscode.commands.registerCommand('ts-executor-web.runCode', async () => {
-        vscode.window.showInformationMessage('Running TypeScript code in the web extension host...');
-        console.log('Running TypeScript code in the web extension host...');
-
         const workspaceFiles = await vscode.workspace.findFiles('**/*.{ts,js}', '**/node_modules/**');
-        console.log('Workspace files:', workspaceFiles.map(file => file.fsPath));
         if (workspaceFiles.length === 0) {
             vscode.window.showErrorMessage('No JavaScript or TypeScript files found in the workspace.');
             return;
@@ -46,7 +42,6 @@ export async function activate(context: vscode.ExtensionContext) {
             vscode.window.showErrorMessage('No active editor or entry file detected.');
             return;
         }
-        console.log('Entry file:', entryFile);
 
         // Bundle the files using esbuild-wasm
         let bundledCode: string;
@@ -100,7 +95,6 @@ export async function activate(context: vscode.ExtensionContext) {
             vscode.window.showErrorMessage(`Error bundling files: ${err}`);
             return;
         }
-        console.log('Bundled code successfully');
 
         // Prepare a custom console to capture logs
         const capturedLogs: string[] = [];
@@ -120,7 +114,6 @@ export async function activate(context: vscode.ExtensionContext) {
         };
 
         // Execute the code in a sandbox
-        console.log('Executing bundled code...');
         try {
             const sandbox = {
                 console: customConsole,
