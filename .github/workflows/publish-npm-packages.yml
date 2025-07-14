@@ -5,7 +5,7 @@ on:
       - feat/make-artemis-compatible
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     permissions:
       contents: read
       packages: write
@@ -16,6 +16,9 @@ jobs:
         with:
           node-version: '20'
           registry-url: 'https://npm.pkg.github.com'
+      - uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
       - name: Install deps & bootstrap
         run: |
           npm install -g node-gyp
