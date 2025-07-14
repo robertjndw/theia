@@ -1,6 +1,8 @@
 name: Publish package to GitHub Packages
 on:
-  workflow_dispatch:
+  push:
+    branches:
+      - feat/make-artemis-compatible
 jobs:
   build:
     runs-on: ubuntu-latest
