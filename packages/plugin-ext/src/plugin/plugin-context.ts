@@ -1629,8 +1629,8 @@ export class Plugin<T> implements theia.Plugin<T> {
         this.pluginType = plugin.model.entryPoint.frontend ? 'frontend' : 'backend';
 
         if (this.pluginType === 'frontend') {
-            const { origin } = new Endpoint();
-            this.pluginUri = URI.parse(origin + '/' + PluginPackage.toPluginUrl(plugin.model, ''));
+            const ownURI = new Endpoint().getRestUrl();
+            this.pluginUri = URI.parse(ownURI.parent + "/" + PluginPackage.toPluginUrl(plugin.model, ''));
         } else {
             this.pluginUri = URI.parse(plugin.pluginUri);
         }
