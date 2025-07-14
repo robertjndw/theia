@@ -1,5 +1,5 @@
 {
-  "name": "@theia/plugin-ext",
+  "name": "@robertjndw/plugin-ext",
   "version": "1.58.5",
   "description": "Theia - Plugin Extension",
   "main": "lib/common/index.js",
@@ -52,7 +52,8 @@
     "vscode-textmate": "^9.0.0"
   },
   "publishConfig": {
-    "access": "public"
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
   },
   "theiaExtensions": [
     {
@@ -70,12 +71,12 @@
   "license": "EPL-2.0 OR GPL-2.0-only WITH Classpath-exception-2.0",
   "repository": {
     "type": "git",
-    "url": "https://github.com/eclipse-theia/theia.git"
+    "url": "https://github.com/robertjndw/theia.git"
   },
   "bugs": {
-    "url": "https://github.com/eclipse-theia/theia/issues"
+    "url": "https://github.com/robertjndw/theia/issues"
   },
-  "homepage": "https://github.com/eclipse-theia/theia",
+  "homepage": "https://github.com/robertjndw/theia",
   "files": [
     "lib",
     "src"
