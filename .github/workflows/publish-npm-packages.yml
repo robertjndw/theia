@@ -23,7 +23,7 @@ jobs:
         run: |
           echo "registry=https://npm.pkg.github.com/" > ~/.npmrc
           echo "//npm.pkg.github.com/:_authToken=${NODE_AUTH_TOKEN}" >> ~/.npmrc
-          echo "@theia:registry=https://npm.pkg.github.com/robertjndw/" >> ~/.npmrc
+          echo "@theia:registry=https://npm.pkg.github.com/" >> ~/.npmrc
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - name: Install deps & bootstrap
@@ -32,6 +32,6 @@ jobs:
           npm ci
           npm run build
       - name: Publish with Lerna
-        run: lerna publish from-package --yes --force-publish --registry https://npm.pkg.github.com/robertjndw/
+        run: lerna publish from-package --yes --force-publish --registry https://npm.pkg.github.com/
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
