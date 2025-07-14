@@ -28,7 +28,9 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - name: Install root dependencies
-        run: npm ci
+        run: | 
+          cd packages/plugin-ext
+          npm ci
       - name: Build plugin-ext package
         run: |
           cd packages/plugin-ext
