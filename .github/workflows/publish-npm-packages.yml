@@ -18,6 +18,7 @@ jobs:
           registry-url: 'https://npm.pkg.github.com'
       - name: Install deps & bootstrap
         run: |
+          npm install -g node-gyp
           npm ci
           npx lerna bootstrap
       - name: Publish with Lerna
