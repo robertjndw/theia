@@ -1,5 +1,5 @@
 {
-  "name": "@robertjndw/plugin-ext",
+  "name": "@theia/plugin-ext",
   "version": "1.58.5",
   "description": "Theia - Plugin Extension",
   "main": "lib/common/index.js",
@@ -70,7 +70,7 @@
   "license": "EPL-2.0 OR GPL-2.0-only WITH Classpath-exception-2.0",
   "repository": {
     "type": "git",
-    "url": "https://github.com/robertjndw/theia.git"
+    "url": "https://github.com/eclipse-theia/theia.git"
   },
   "bugs": {
     "url": "https://github.com/eclipse-theia/theia/issues"
