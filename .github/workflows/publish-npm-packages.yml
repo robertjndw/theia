@@ -23,14 +23,15 @@ jobs:
         run: |
           echo "registry=https://npm.pkg.github.com/" > ~/.npmrc
           echo "//npm.pkg.github.com/:_authToken=${NODE_AUTH_TOKEN}" >> ~/.npmrc
-          echo "@theia:registry=https://npm.pkg.github.com/" >> ~/.npmrc
+          echo "@theia:registry=https://npm.pkg.github.com/robertjndw/" >> ~/.npmrc
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - name: Install deps & bootstrap
         run: |
           npm install -g node-gyp
           npm ci
+          npm run build
       - name: Publish with Lerna
-        run: lerna publish from-package --yes --force-publish --registry https://npm.pkg.github.com/
+        run: lerna publish from-package --yes --force-publish --registry https://npm.pkg.github.com/robertjndw/
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
