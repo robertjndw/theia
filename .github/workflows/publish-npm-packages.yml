@@ -23,8 +23,7 @@ jobs:
         run: |
           npm install -g node-gyp
           npm ci
-          npx lerna bootstrap
       - name: Publish with Lerna
-        run: npx lerna publish from-package --yes
+        run: lerna publish from-package --yes
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
