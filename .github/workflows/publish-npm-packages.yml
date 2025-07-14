@@ -28,13 +28,11 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - name: Install root dependencies
         run: | 
-          cd packages/plugin-ext
           npm install -g node-gyp
           npm ci
-      - name: Build plugin-ext package
+      - name: Build packages
         run: |
           cd packages/plugin-ext
-          npm ci
           npm run build
       - name: Publish plugin-ext package
         run: |
