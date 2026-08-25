@@ -16,14 +16,15 @@
 
 import { Summary, SummaryMetadata, TaskContextStorageService } from '@theia/ai-chat/lib/browser/task-context-service';
 import { InMemoryTaskContextStorage } from '@theia/ai-chat/lib/browser/task-context-storage-service';
-import { inject, injectable, postConstruct } from '@theia/core/shared/inversify';
-import { DisposableCollection, EOL, Emitter, ILogger, Path, URI, unreachable } from '@theia/core';
-import { PreferenceService, OpenerService, open } from '@theia/core/lib/browser';
+import { parseFrontmatter } from '@theia/ai-core/lib/common/frontmatter';
+import { inject, injectable, postConstruct, named } from '@theia/core/shared/inversify';
+import { DisposableCollection, EOL, Emitter, ILogger, Path, PreferenceService, URI, unreachable } from '@theia/core';
+import { OpenerService, open } from '@theia/core/lib/browser';
 import { FileService } from '@theia/filesystem/lib/browser/file-service';
 import { WorkspaceService } from '@theia/workspace/lib/browser';
 import * as yaml from 'js-yaml';
 import { FileChange, FileChangeType } from '@theia/filesystem/lib/common/files';
-import { TASK_CONTEXT_STORAGE_DIRECTORY_PREF } from './workspace-preferences';
+import { TASK_CONTEXT_STORAGE_DIRECTORY_PREF } from '../common/workspace-preferences';
 import { BinaryBuffer } from '@theia/core/lib/common/buffer';
 
 @injectable()
@@ -33,16 +34,18 @@ export class TaskContextFileStorageService implements TaskContextStorageService 
     @inject(WorkspaceService) protected readonly workspaceService: WorkspaceService;
     @inject(FileService) protected readonly fileService: FileService;
     @inject(OpenerService) protected readonly openerService: OpenerService;
-    @inject(ILogger) protected readonly logger: ILogger;
+
+    @inject(ILogger) @named('ai-ide:TaskContextFileStorageService')
+    protected readonly logger: ILogger;
+
     protected readonly onDidChangeEmitter = new Emitter<void>();
     readonly onDidChange = this.onDidChangeEmitter.event;
 
     protected sanitizeLabel(label: string): string {
-        return label.replace(/^[^\p{L}\p{N}]+/vg, '');
+        return label.replace(/^[^\p{L}\p{N}]+/ug, '');
     }
 
-    protected async getStorageLocation(): Promise<URI | undefined> {
-        await this.workspaceService.ready;
+    protected getStorageLocation(): URI | undefined {
         if (!this.workspaceService.opened) { return; }
         const values = this.preferenceService.inspect(TASK_CONTEXT_STORAGE_DIRECTORY_PREF);
         const configuredPath = values?.globalValue === undefined ? values?.defaultValue : values?.globalValue;
@@ -53,9 +56,21 @@ export class TaskContextFileStorageService implements TaskContextStorageService 
 
     @postConstruct()
     protected init(): void {
-        this.watchStorage().catch(error => this.logger.error(error));
+        this.doInit();
+    }
+
+    protected get ready(): Promise<void> {
+        return Promise.all([
+            this.workspaceService.ready,
+            this.preferenceService.ready,
+        ]).then(() => undefined);
+    }
+
+    protected async doInit(): Promise<void> {
+        await this.ready;
+        this.watchStorage();
         this.preferenceService.onPreferenceChanged(e => {
-            if (e.affects(TASK_CONTEXT_STORAGE_DIRECTORY_PREF)) {
+            if (e.preferenceName === TASK_CONTEXT_STORAGE_DIRECTORY_PREF) {
                 this.watchStorage().catch(error => this.logger.error(error));
             }
         });
@@ -63,9 +78,9 @@ export class TaskContextFileStorageService implements TaskContextStorageService 
 
     protected toDisposeOnStorageChange?: DisposableCollection;
     protected async watchStorage(): Promise<void> {
+        const newStorage = await this.getStorageLocation();
         this.toDisposeOnStorageChange?.dispose();
         this.toDisposeOnStorageChange = undefined;
-        const newStorage = await this.getStorageLocation();
         if (!newStorage) { return; }
         this.toDisposeOnStorageChange = new DisposableCollection(
             this.fileService.watch(newStorage, { recursive: true, excludes: [] }),
@@ -75,7 +90,7 @@ export class TaskContextFileStorageService implements TaskContextStorageService 
             }),
             { dispose: () => this.clearInMemoryStorage() },
         );
-        await this.cacheNewTasks(newStorage);
+        this.cacheNewTasks(newStorage).catch(this.logger.error.bind(this.logger));
     }
 
     protected async handleChanges(changes: FileChange[]): Promise<void> {
@@ -123,9 +138,9 @@ export class TaskContextFileStorageService implements TaskContextStorageService 
             summary: body,
             label: this.sanitizeLabel(rawLabel),
             uri,
-            id: frontmatter?.sessionId || uri.path.base
+            id: frontmatter?.id || frontmatter?.sessionId || uri.path.base
         };
-        const existingSummary = summary.sessionId && this.getAll().find(candidate => candidate.sessionId === summary.sessionId);
+        const existingSummary = !frontmatter?.id && summary.sessionId && this.getAll().find(candidate => candidate.sessionId === summary.sessionId);
         if (existingSummary) {
             summary.id = existingSummary.id;
         }
@@ -133,15 +148,17 @@ export class TaskContextFileStorageService implements TaskContextStorageService 
     }
 
     async store(summary: Summary): Promise<void> {
+        await this.ready;
         const label = this.sanitizeLabel(summary.label);
-        const storageLocation = await this.getStorageLocation();
+        const storageLocation = this.getStorageLocation();
         if (storageLocation) {
             const frontmatter = {
+                id: summary.id,
                 sessionId: summary.sessionId,
                 date: new Date().toISOString(),
                 label,
             };
-            const derivedName = label.trim().replace(/[^\p{L}\p{N}]/vg, '-').replace(/^-+|-+$/g, '');
+            const derivedName = label.trim().replace(/[^\p{L}\p{N}]/ug, '-').replace(/^-+|-+$/g, '');
             const filename = (derivedName.length > 32 ? derivedName.slice(0, derivedName.indexOf('-', 32)) : derivedName) + '.md';
             const content = yaml.dump(frontmatter).trim() + `${EOL}---${EOL}` + summary.summary;
             const uri = storageLocation.resolve(filename);
@@ -156,8 +173,21 @@ export class TaskContextFileStorageService implements TaskContextStorageService 
         return this.inMemoryStorage.getAll();
     }
 
-    get(identifier: string): Summary | undefined {
-        return this.inMemoryStorage.get(identifier);
+    async get(identifier: string): Promise<Summary | undefined> {
+        const cached = this.inMemoryStorage.get(identifier);
+        if (!cached?.uri) {
+            return cached;
+        }
+        // Read fresh content from disk
+        const content = await this.fileService.read(cached.uri).then(read => read.value).catch(reason => {
+            this.logger.error(`Failed to read file ${cached.uri}: ${reason}`);
+            return undefined;
+        });
+        if (content === undefined) {
+            return cached; // Fall back to cache if read fails
+        }
+        const { body } = this.maybeReadFrontmatter(content);
+        return { ...cached, summary: body };
     }
 
     async delete(identifier: string): Promise<boolean> {
@@ -173,24 +203,15 @@ export class TaskContextFileStorageService implements TaskContextStorageService 
     }
 
     protected maybeReadFrontmatter(content: string): { body: string, frontmatter: SummaryMetadata | undefined } {
-        const frontmatterEnd = content.indexOf('---');
-        if (frontmatterEnd !== -1) {
-            try {
-                const frontmatter = yaml.load(content.slice(0, frontmatterEnd));
-                if (this.hasLabel(frontmatter)) {
-                    return { frontmatter, body: content.slice(frontmatterEnd + 3).trim() };
-                }
-            } catch { /* Probably not frontmatter, then. */ }
-        }
-        return { body: content, frontmatter: undefined };
+        const { metadata, body } = parseFrontmatter<SummaryMetadata>(content, { isValid: this.hasLabel });
+        return { frontmatter: metadata, body };
     }
 
-    protected hasLabel(candidate: unknown): candidate is SummaryMetadata {
-        return !!candidate && typeof candidate === 'object' && !Array.isArray(candidate) && 'label' in candidate && typeof candidate.label === 'string';
-    }
+    protected hasLabel = (candidate: unknown): candidate is SummaryMetadata =>
+        !!candidate && typeof candidate === 'object' && !Array.isArray(candidate) && 'label' in candidate && typeof candidate.label === 'string';
 
     async open(identifier: string): Promise<void> {
-        const summary = this.get(identifier);
+        const summary = await this.get(identifier);
         if (!summary) {
             throw new Error('Unable to open requested task context: none found with specified identifier.');
         }

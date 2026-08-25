@@ -14,7 +14,7 @@
 // SPDX-License-Identifier: EPL-2.0 OR GPL-2.0-only WITH Classpath-exception-2.0
 // *****************************************************************************
 
-import { SelectionService, UriSelection } from '@theia/core';
+import { MenuPath, SelectionService, UriSelection } from '@theia/core';
 import { ResourceContextKey } from '@theia/core/lib/browser/resource-context-key';
 import { inject, injectable, postConstruct } from '@theia/core/shared/inversify';
 import { URI as CodeUri } from '@theia/core/shared/vscode-uri';
@@ -25,11 +25,11 @@ import { DirtyDiffWidget } from '@theia/scm/lib/browser/dirty-diff/dirty-diff-wi
 import { Change, LineRange } from '@theia/scm/lib/browser/dirty-diff/diff-computer';
 import { IChange } from '@theia/monaco-editor-core/esm/vs/editor/common/diff/legacyLinesDiffComputer';
 import { TimelineItem } from '@theia/timeline/lib/common/timeline-model';
-import { ScmCommandArg, TimelineCommandArg, TreeViewItemReference } from '../../../common';
+import { ScmCommandArg, ScmHistoryItemCommandArg, TimelineCommandArg, TreeViewItemReference } from '../../../common';
 import { TestItemReference, TestMessageArg } from '../../../common/test-types';
 import { PluginScmProvider, PluginScmResource, PluginScmResourceGroup } from '../scm-main';
 import { TreeViewWidget } from '../view/tree-view-widget';
-import { CodeEditorWidgetUtil, ContributionPoint } from './vscode-theia-menu-mappings';
+import { CodeEditorWidgetUtil, codeToTheiaMappings, ContributionPoint } from './vscode-theia-menu-mappings';
 import { TestItem, TestMessage } from '@theia/test/lib/browser/test-service';
 
 export type ArgumentAdapter = (...args: unknown[]) => unknown[];
@@ -61,6 +61,7 @@ export class PluginMenuCommandAdapter {
             ['debug/variables/context', firstArgOnly],
             ['debug/toolBar', noArgs],
             ['editor/context', selectedResource],
+            ['editor/content', widgetURI],
             ['editor/title', widgetURI],
             ['editor/title/context', selectedResource],
             ['editor/title/run', widgetURI],
@@ -68,7 +69,13 @@ export class PluginMenuCommandAdapter {
             ['scm/resourceFolder/context', toScmArgs],
             ['scm/resourceGroup/context', toScmArgs],
             ['scm/resourceState/context', toScmArgs],
+            ['scm/repository', toScmArgs],
+            ['scm/history/title', () => [this.toScmArg(this.scmService.selectedRepository)]],
+            ['scm/historyItem/context', (...args) => this.toScmHistoryArgs(...args)],
+            ['scm/historyItemRef/context', (...args) => this.toScmHistoryArgs(...args)],
             ['scm/title', () => [this.toScmArg(this.scmService.selectedRepository)]],
+            ['scm/sourceControl', toScmArgs],
+            ['scm/sourceControl/title', () => [this.toScmArg(this.scmService.selectedRepository)]],
             ['testing/message/context', toTestMessageArgs],
             ['testing/profiles/context', noArgs],
             ['scm/change/title', (...args) => this.toScmChangeArgs(...args)],
@@ -84,8 +91,27 @@ export class PluginMenuCommandAdapter {
         });
     }
 
-    getArgumentAdapter(contributionPoint: string): ArgumentAdapter {
-        return this.argumentAdapters.get(contributionPoint) || identity;
+    getArgumentAdapter(menuPath: MenuPath): ArgumentAdapter {
+        for (const [contributionPoint, menuPaths] of codeToTheiaMappings) {
+            for (const theiaPath of menuPaths) {
+                if (this.isPrefixOf(theiaPath, menuPath)) {
+                    return this.argumentAdapters.get(contributionPoint) || identity;
+                }
+            }
+        }
+        return identity;
+    }
+
+    private isPrefixOf(candidate: string[], menuPath: MenuPath): boolean {
+        if (candidate.length > menuPath.length) {
+            return false;
+        }
+        for (let i = 0; i < candidate.length; i++) {
+            if (candidate[i] !== menuPath[i]) {
+                return false;
+            }
+        }
+        return true;
     }
 
     /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -123,6 +149,16 @@ export class PluginMenuCommandAdapter {
             }
         }
         return scmArgs;
+    }
+
+    protected toScmHistoryArgs(...args: any[]): any[] {
+        const result: any[] = [];
+        for (const arg of args) {
+            if (ScmHistoryItemCommandArg.is(arg) || ScmCommandArg.is(arg)) {
+                result.push(arg);
+            }
+        }
+        return result;
     }
 
     protected toScmArg(arg: any): ScmCommandArg | undefined {

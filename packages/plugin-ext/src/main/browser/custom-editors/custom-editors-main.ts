@@ -40,7 +40,7 @@ import { WebviewsMainImpl } from '../webviews-main';
 import { WidgetManager } from '@theia/core/lib/browser/widget-manager';
 import { ApplicationShell, LabelProvider, Saveable, SaveAsOptions, SaveOptions } from '@theia/core/lib/browser';
 import { WebviewPanelOptions } from '@theia/plugin';
-import { EditorPreferences } from '@theia/editor/lib/browser';
+import { EditorPreferences } from '@theia/editor/lib/common/editor-preferences';
 import { BinaryBuffer } from '@theia/core/lib/common/buffer';
 
 const enum CustomEditorModelType {
@@ -145,6 +145,8 @@ export class CustomEditorsMainImpl implements CustomEditorsMain, Disposable {
 
                 this.webviewsMain.hookWebview(widget);
                 widget.title.label = this.labelProvider.getName(resource);
+                widget.title.caption = resource.path.fsPath();
+                widget.title.iconClass = this.labelProvider.getIcon(resource) + ' file-icon';
 
                 const _cancellationSource = new CancellationTokenSource();
                 await this.proxy.$resolveWebviewEditor(

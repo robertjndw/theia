@@ -39,8 +39,16 @@ export interface WindowService {
     /**
      * Opens a new default window.
      * - In electron and in the browser it will open the default window without a pre-defined content.
+     * @returns a window identifier that can be passed to {@link closeWindow}, or -1 if not supported.
      */
-    openNewDefaultWindow(params?: WindowReloadOptions): void;
+    openNewDefaultWindow(params?: WindowReloadOptions): Promise<number>;
+
+    /**
+     * Closes a window previously opened by {@link openNewDefaultWindow}.
+     * @param windowId the identifier returned by {@link openNewDefaultWindow}.
+     * No-op if the window does not exist or the platform does not support it.
+     */
+    closeWindow(windowId: number): void;
 
     /**
      * Reveal and focuses the current window
@@ -48,7 +56,7 @@ export interface WindowService {
     focus(): void;
 
     /**
-     * Fires when the `window` unloads. The unload event is inevitable. On this event, the frontend application can save its state and release resource.
+     * Fires when the application is shutting down. On this event, the frontend application can save its state and release resource.
      * Saving the state and releasing any resources must be a synchronous call. Any asynchronous calls invoked after emitting this event might be ignored.
      */
     readonly onUnload: Event<void>;

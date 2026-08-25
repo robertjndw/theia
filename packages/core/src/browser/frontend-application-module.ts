@@ -14,15 +14,19 @@
 // SPDX-License-Identifier: EPL-2.0 OR GPL-2.0-only WITH Classpath-exception-2.0
 // *****************************************************************************
 
+// Import Lumino rules first because some conflict with Theia's styles.
+// This ensures Theia rules with equal specificity take precedence (see GH-17872).
+import '@lumino/widgets/style/index.css';
+import 'perfect-scrollbar/css/perfect-scrollbar.css';
 import '../../src/browser/style/index.css';
-require('../../src/browser/style/materialcolors.css').use();
+import '../../src/browser/style/materialcolors.css';
 import 'font-awesome/css/font-awesome.min.css';
 import 'file-icons-js/css/style.css';
 import '@vscode/codicons/dist/codicon.css';
 
 import { ContainerModule } from 'inversify';
 import {
-    bindContributionProvider,
+    bindRootContributionProvider,
     SelectionService,
     ResourceResolver,
     CommandContribution, CommandRegistry, CommandService, commandServicePath,
@@ -32,7 +36,8 @@ import {
     messageServicePath,
     InMemoryTextResourceResolver,
     UntitledResourceResolver,
-    MenuPath
+    MenuPath,
+    PreferenceService
 } from '../common';
 import { KeybindingRegistry, KeybindingContext, KeybindingContribution } from './keybinding';
 import { FrontendApplication } from './frontend-application';
@@ -47,11 +52,11 @@ import {
     TabBarRendererFactory, ShellLayoutRestorer,
     SidePanelHandler, SidePanelHandlerFactory,
     SidebarMenuWidget, SidebarTopMenuWidgetFactory,
-    SplitPositionHandler, DockPanelRendererFactory, ApplicationShellLayoutMigration, ApplicationShellLayoutMigrationError, SidebarBottomMenuWidgetFactory
+    SplitPositionHandler, DockPanelRendererFactory, ApplicationShellLayoutMigration, ApplicationShellLayoutMigrationError, SidebarBottomMenuWidgetFactory,
+    ShellLayoutTransformer, WidgetAreaResolver
 } from './shell';
 import { LabelParser } from './label-parser';
 import { LabelProvider, LabelProviderContribution, DefaultUriLabelProviderContribution } from './label-provider';
-import { PreferenceService } from './preferences';
 import { ContextMenuRenderer, Coordinate } from './context-menu-renderer';
 import { ThemeService } from './theming';
 import { ConnectionStatusService, FrontendConnectionStatusService, ApplicationConnectionStatusContribution, PingService } from './connection-status-service';
@@ -63,7 +68,6 @@ import { EnvVariablesServer, envVariablesPath, EnvVariable } from './../common/e
 import { FrontendApplicationStateService } from './frontend-application-state';
 import { JsonSchemaStore, JsonSchemaContribution, DefaultJsonSchemaContribution, JsonSchemaDataStore } from './json-schema-store';
 import { TabBarToolbarRegistry, TabBarToolbarContribution, TabBarToolbarFactory, TabBarToolbar } from './shell/tab-bar-toolbar';
-import { bindCorePreferences, CorePreferences } from './core-preferences';
 import { ContextKeyService, ContextKeyServiceDummyImpl } from './context-key-service';
 import { ResourceContextKey } from './resource-context-key';
 import { KeyboardLayoutService } from './keyboard/keyboard-layout-service';
@@ -123,24 +127,28 @@ import { DockPanel, RendererHost } from './widgets';
 import { TooltipService, TooltipServiceImpl } from './tooltip-service';
 import { BackendRequestService, RequestService, REQUEST_SERVICE_PATH } from '@theia/request';
 import { bindFrontendStopwatch, bindBackendStopwatch } from './performance';
-import { SaveableService } from './saveable-service';
+import { SaveableService, SaveErrorChecker } from './saveable-service';
 import { SecondaryWindowHandler } from './secondary-window-handler';
 import { UserWorkingDirectoryProvider } from './user-working-directory-provider';
 import { WindowTitleService } from './window/window-title-service';
 import { WindowTitleUpdater } from './window/window-title-updater';
 import { TheiaDockPanel } from './shell/theia-dock-panel';
 import { bindStatusBar } from './status-bar';
-import { MarkdownRenderer, MarkdownRendererFactory, MarkdownRendererImpl } from './markdown-rendering/markdown-renderer';
+import { CoreMarkdownRenderer, MarkdownRenderer, MarkdownRendererFactory, MarkdownRendererImpl } from './markdown-rendering/markdown-renderer';
 import { StylingParticipant, StylingService } from './styling-service';
 import { bindCommonStylingParticipants } from './common-styling-participants';
 import { HoverService } from './hover-service';
 import { AdditionalViewsMenuPath, AdditionalViewsMenuWidget, AdditionalViewsMenuWidgetFactory } from './shell/additional-views-menu-widget';
 import { LanguageIconLabelProvider } from './language-icon-provider';
-import { bindTreePreferences } from './tree';
+import { bindTreePreferences } from '../common/tree-preference';
 import { OpenWithService } from './open-with-service';
 import { ViewColumnService } from './shell/view-column-service';
 import { DomInputUndoRedoHandler, UndoRedoHandler, UndoRedoHandlerService } from './undo-redo-handler';
 import { WidgetStatusBarContribution, WidgetStatusBarService } from './widget-status-bar-service';
+import { SymbolIconColorContribution } from './symbol-icon-color-contribution';
+import { CorePreferences, bindCorePreferences } from '../common/core-preferences';
+import { bindBadgeDecoration } from './badges';
+import { PerspectiveContribution, PerspectiveService, PerspectiveServiceImpl, PerspectiveServiceInternal, WidgetAreaResolverImpl } from './perspective-service';
 
 export { bindResourceProvider, bindMessageService, bindPreferenceService };
 
@@ -148,7 +156,7 @@ export const frontendApplicationModule = new ContainerModule((bind, _unbind, _is
     bind(NoneIconTheme).toSelf().inSingletonScope();
     bind(LabelProviderContribution).toService(NoneIconTheme);
     bind(IconThemeService).toSelf().inSingletonScope();
-    bindContributionProvider(bind, IconThemeContribution);
+    bindRootContributionProvider(bind, IconThemeContribution);
     bind(DefaultFileIconThemeContribution).toSelf().inSingletonScope();
     bind(IconThemeContribution).toService(DefaultFileIconThemeContribution);
     bind(IconThemeApplicationContribution).toSelf().inSingletonScope();
@@ -157,14 +165,14 @@ export const frontendApplicationModule = new ContainerModule((bind, _unbind, _is
     bind(LabelProviderContribution).toService(LanguageIconLabelProvider);
 
     bind(ColorRegistry).toSelf().inSingletonScope();
-    bindContributionProvider(bind, ColorContribution);
+    bindRootContributionProvider(bind, ColorContribution);
     bind(ColorApplicationContribution).toSelf().inSingletonScope();
     bind(FrontendApplicationContribution).toService(ColorApplicationContribution);
 
     bind(FrontendApplication).toSelf().inSingletonScope();
     bind(FrontendApplicationStateService).toSelf().inSingletonScope();
     bind(DefaultFrontendApplicationContribution).toSelf();
-    bindContributionProvider(bind, FrontendApplicationContribution);
+    bindRootContributionProvider(bind, FrontendApplicationContribution);
 
     bind(ApplicationShellOptions).toConstantValue({});
     bind(ApplicationShell).toSelf().inSingletonScope();
@@ -182,7 +190,7 @@ export const frontendApplicationModule = new ContainerModule((bind, _unbind, _is
     });
     bind(SplitPositionHandler).toSelf().inSingletonScope();
 
-    bindContributionProvider(bind, TabBarToolbarContribution);
+    bindRootContributionProvider(bind, TabBarToolbarContribution);
     bind(TabBarToolbarRegistry).toSelf().inSingletonScope();
     bind(FrontendApplicationContribution).toService(TabBarToolbarRegistry);
     bind(TabBarToolbarFactory).toFactory(context => () => {
@@ -191,7 +199,11 @@ export const frontendApplicationModule = new ContainerModule((bind, _unbind, _is
         return container.get(TabBarToolbar);
     });
 
-    bind(DockPanelRendererFactory).toFactory(context => () => context.container.get(DockPanelRenderer));
+    bind(DockPanelRendererFactory).toFactory<DockPanelRenderer, [(Document | ShadowRoot)?]>(context => (document?: Document | ShadowRoot) => {
+        const renderer = context.container.get(DockPanelRenderer);
+        renderer.document = document;
+        return renderer;
+    });
     bind(DockPanelRenderer).toSelf();
     bind(TabBarRendererFactory).toFactory(({ container }) => () => {
         const contextMenuRenderer = container.get(ContextMenuRenderer);
@@ -207,14 +219,14 @@ export const frontendApplicationModule = new ContainerModule((bind, _unbind, _is
     });
     bind(TheiaDockPanel.Factory).toFactory(({ container }) => (options?: DockPanel.IOptions, maximizeCallback?: (area: TheiaDockPanel) => void) => {
         const corePreferences = container.get<CorePreferences>(CorePreferences);
-        return new TheiaDockPanel(options, corePreferences);
+        return new TheiaDockPanel(options, corePreferences, maximizeCallback);
     });
 
-    bindContributionProvider(bind, TabBarDecorator);
+    bindRootContributionProvider(bind, TabBarDecorator);
     bind(TabBarDecoratorService).toSelf().inSingletonScope();
     bind(FrontendApplicationContribution).toService(TabBarDecoratorService);
 
-    bindContributionProvider(bind, OpenHandler);
+    bindRootContributionProvider(bind, OpenHandler);
     bind(DefaultOpenerService).toSelf().inSingletonScope();
     bind(OpenerService).toService(DefaultOpenerService);
 
@@ -230,7 +242,7 @@ export const frontendApplicationModule = new ContainerModule((bind, _unbind, _is
     bind(TooltipServiceImpl).toSelf().inSingletonScope();
     bind(TooltipService).toService(TooltipServiceImpl);
 
-    bindContributionProvider(bind, ApplicationShellLayoutMigration);
+    bindRootContributionProvider(bind, ApplicationShellLayoutMigration);
     bind<ApplicationShellLayoutMigration>(ApplicationShellLayoutMigration).toConstantValue({
         layoutVersion: 2.0,
         onWillInflateLayout({ layoutVersion }): void {
@@ -240,7 +252,9 @@ export const frontendApplicationModule = new ContainerModule((bind, _unbind, _is
         }
     });
 
-    bindContributionProvider(bind, WidgetFactory);
+    bindRootContributionProvider(bind, ShellLayoutTransformer);
+
+    bindRootContributionProvider(bind, WidgetFactory);
     bind(WidgetManager).toSelf().inSingletonScope();
     bind(ShellLayoutRestorer).toSelf().inSingletonScope();
     bind(CommandContribution).toService(ShellLayoutRestorer);
@@ -261,17 +275,17 @@ export const frontendApplicationModule = new ContainerModule((bind, _unbind, _is
         return registry;
     });
     bind(CommandService).toService(CommandRegistry);
-    bindContributionProvider(bind, CommandContribution);
+    bindRootContributionProvider(bind, CommandContribution);
 
     bind(ContextKeyService).to(ContextKeyServiceDummyImpl).inSingletonScope();
 
     bind(MenuModelRegistry).toSelf().inSingletonScope();
-    bindContributionProvider(bind, MenuContribution);
+    bindRootContributionProvider(bind, MenuContribution);
 
     bind(KeyboardLayoutService).toSelf().inSingletonScope();
     bind(KeybindingRegistry).toSelf().inSingletonScope();
-    bindContributionProvider(bind, KeybindingContext);
-    bindContributionProvider(bind, KeybindingContribution);
+    bindRootContributionProvider(bind, KeybindingContext);
+    bindRootContributionProvider(bind, KeybindingContribution);
 
     bindMessageService(bind).onActivation(({ container }, messages) => {
         const client = container.get(MessageClient);
@@ -289,6 +303,8 @@ export const frontendApplicationModule = new ContainerModule((bind, _unbind, _is
     [FrontendApplicationContribution, CommandContribution, KeybindingContribution, MenuContribution, ColorContribution].forEach(serviceIdentifier =>
         bind(serviceIdentifier).toService(CommonFrontendContribution)
     );
+    bind(SymbolIconColorContribution).toSelf().inSingletonScope();
+    bind(ColorContribution).toService(SymbolIconColorContribution);
 
     bindCommonStylingParticipants(bind);
 
@@ -307,10 +323,11 @@ export const frontendApplicationModule = new ContainerModule((bind, _unbind, _is
         return quickPickService;
     });
 
-    bind(MarkdownRenderer).to(MarkdownRendererImpl).inSingletonScope();
+    bind(CoreMarkdownRenderer).to(MarkdownRendererImpl).inSingletonScope();
+    bind(MarkdownRenderer).toService(CoreMarkdownRenderer);
     bind(MarkdownRendererFactory).toFactory(({ container }) => () => container.get(MarkdownRenderer));
 
-    bindContributionProvider(bind, QuickAccessContribution);
+    bindRootContributionProvider(bind, QuickAccessContribution);
     bind(QuickInputFrontendContribution).toSelf().inSingletonScope();
     bind(FrontendApplicationContribution).toService(QuickInputFrontendContribution);
 
@@ -320,7 +337,7 @@ export const frontendApplicationModule = new ContainerModule((bind, _unbind, _is
     bindStatusBar(bind);
     bind(LabelParser).toSelf().inSingletonScope();
 
-    bindContributionProvider(bind, LabelProviderContribution);
+    bindRootContributionProvider(bind, LabelProviderContribution);
     bind(LabelProvider).toSelf().inSingletonScope();
     bind(FrontendApplicationContribution).toService(LabelProvider);
     bind(DefaultUriLabelProviderContribution).toSelf().inSingletonScope();
@@ -333,7 +350,7 @@ export const frontendApplicationModule = new ContainerModule((bind, _unbind, _is
     bindPreferenceService(bind);
     bind(FrontendApplicationContribution).toService(PreferenceService);
 
-    bindContributionProvider(bind, JsonSchemaContribution);
+    bindRootContributionProvider(bind, JsonSchemaContribution);
     bind(JsonSchemaStore).toSelf().inSingletonScope();
     bind(FrontendApplicationContribution).toService(JsonSchemaStore);
     bind(JsonSchemaDataStore).toSelf().inSingletonScope();
@@ -422,7 +439,7 @@ export const frontendApplicationModule = new ContainerModule((bind, _unbind, _is
     bind(WindowTitleService).toSelf().inSingletonScope();
     bind(WindowTitleUpdater).toSelf().inSingletonScope();
     bind(FrontendApplicationContribution).toService(WindowTitleUpdater);
-    bindContributionProvider(bind, BreadcrumbsContribution);
+    bindRootContributionProvider(bind, BreadcrumbsContribution);
     bind(BreadcrumbsService).toSelf().inSingletonScope();
     bind(BreadcrumbsRenderer).toSelf();
     bind(BreadcrumbsRendererFactory).toFactory(ctx =>
@@ -450,6 +467,7 @@ export const frontendApplicationModule = new ContainerModule((bind, _unbind, _is
 
     bind(SaveableService).toSelf().inSingletonScope();
     bind(FrontendApplicationContribution).toService(SaveableService);
+    bindRootContributionProvider(bind, SaveErrorChecker);
 
     bind(UserWorkingDirectoryProvider).toSelf().inSingletonScope();
     bind(FrontendApplicationContribution).toService(UserWorkingDirectoryProvider);
@@ -457,18 +475,28 @@ export const frontendApplicationModule = new ContainerModule((bind, _unbind, _is
     bind(HoverService).toSelf().inSingletonScope();
 
     bind(StylingService).toSelf().inSingletonScope();
-    bindContributionProvider(bind, StylingParticipant);
+    bindRootContributionProvider(bind, StylingParticipant);
     bind(FrontendApplicationContribution).toService(StylingService);
 
     bind(SecondaryWindowHandler).toSelf().inSingletonScope();
     bind(ViewColumnService).toSelf().inSingletonScope();
 
     bind(UndoRedoHandlerService).toSelf().inSingletonScope();
-    bindContributionProvider(bind, UndoRedoHandler);
+    bindRootContributionProvider(bind, UndoRedoHandler);
     bind(DomInputUndoRedoHandler).toSelf().inSingletonScope();
     bind(UndoRedoHandler).toService(DomInputUndoRedoHandler);
 
+    bind(WidgetAreaResolverImpl).toSelf().inSingletonScope();
+    bind(WidgetAreaResolver).toService(WidgetAreaResolverImpl);
+    bind(PerspectiveServiceImpl).toSelf().inSingletonScope();
+    bind(PerspectiveService).toService(PerspectiveServiceImpl);
+    bind(PerspectiveServiceInternal).toService(PerspectiveServiceImpl);
+    bind(FrontendApplicationContribution).toService(PerspectiveServiceImpl);
+    bind(CommandContribution).toService(PerspectiveServiceImpl);
+    bindRootContributionProvider(bind, PerspectiveContribution);
+
     bind(WidgetStatusBarService).toSelf().inSingletonScope();
     bind(FrontendApplicationContribution).toService(WidgetStatusBarService);
-    bindContributionProvider(bind, WidgetStatusBarContribution);
+    bindRootContributionProvider(bind, WidgetStatusBarContribution);
+    bindBadgeDecoration(bind);
 });

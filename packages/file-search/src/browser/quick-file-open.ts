@@ -16,10 +16,10 @@
 
 import { CommonCommands, KeybindingRegistry, OpenerService, QuickAccessProvider, QuickAccessRegistry } from '@theia/core/lib/browser';
 import { QuickInputService, QuickPickItem, QuickPicks } from '@theia/core/lib/browser/quick-input/quick-input-service';
-import { CancellationToken, Command, nls } from '@theia/core/lib/common';
+import { CancellationToken, Command, nls, ILogger } from '@theia/core/lib/common';
 import { MessageService } from '@theia/core/lib/common/message-service';
 import URI from '@theia/core/lib/common/uri';
-import { inject, injectable, optional, postConstruct } from '@theia/core/shared/inversify';
+import { inject, injectable, optional, postConstruct, named } from '@theia/core/shared/inversify';
 import { EditorOpenerOptions, EditorWidget, Position, Range } from '@theia/editor/lib/browser';
 import { NavigationLocationService } from '@theia/editor/lib/browser/navigation/navigation-location-service';
 import { WorkspaceService } from '@theia/workspace/lib/browser/workspace-service';
@@ -59,6 +59,9 @@ export class QuickFileOpenService implements QuickAccessProvider {
     protected readonly messageService: MessageService;
     @inject(QuickFileSelectService)
     protected readonly quickFileSelectService: QuickFileSelectService;
+
+    @inject(ILogger) @named('file-search:QuickFileOpenService')
+    protected readonly logger: ILogger;
 
     registerQuickAccessProvider(): void {
         this.quickAccessRegistry.registerQuickAccessProvider({
@@ -159,7 +162,7 @@ export class QuickFileOpenService implements QuickAccessProvider {
                 }
             })
             .catch(error => {
-                console.warn(error);
+                this.logger.warn(error);
                 this.messageService.error(nls.localizeByDefault("Unable to open '{0}'", uri.path.toString()));
             });
     }
@@ -172,7 +175,7 @@ export class QuickFileOpenService implements QuickAccessProvider {
         let placeholder = nls.localizeByDefault('Search files by name (append {0} to go to line or {1} to go to symbol)', ':', '@');
         const keybinding = this.getKeyCommand();
         if (keybinding) {
-            placeholder += nls.localize('theia/file-search/toggleIgnoredFiles', ' (Press {0} to show/hide ignored files)', keybinding);
+            placeholder += nls.localize('theia/file-search/toggleExcludedFiles', ' (Press {0} to show/hide excluded files)', keybinding);
         }
         return placeholder;
     }

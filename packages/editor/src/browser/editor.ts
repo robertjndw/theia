@@ -28,7 +28,13 @@ export const TextEditorProvider = Symbol('TextEditorProvider');
 export type TextEditorProvider = (uri: URI) => Promise<TextEditor>;
 
 export interface TextEditorDocument extends lsp.TextDocument, Saveable, Disposable {
+    /**
+     * @param lineNumber 1-based
+     */
     getLineContent(lineNumber: number): string;
+    /**
+     * @param lineNumber 1-based
+     */
     getLineMaxColumn(lineNumber: number): number;
     /**
      * @since 1.8.0
@@ -224,7 +230,6 @@ export interface TextEditor extends Disposable, TextEditorSelection, Navigatable
      * otherwise it won't receive the focus.
      */
     focus(): void;
-    blur(): void;
     isFocused(): boolean;
     readonly onFocusChanged: Event<boolean>;
 
@@ -295,8 +300,24 @@ export interface TextEditor extends Disposable, TextEditorSelection, Navigatable
     readonly onEncodingChanged: Event<string>;
 
     shouldDisplayDirtyDiff(): boolean;
+    /**
+     * This event is optional iff {@link shouldDisplayDirtyDiff} always returns the same result for this editor instance.
+     */
+    readonly onShouldDisplayDirtyDiffChanged?: Event<boolean>;
 
     handleVisibilityChanged(nowVisible: boolean): void;
+
+    /**
+     * Temporarily restores internal state (e.g. Monaco editor model) so that
+     * the widget DOM is fully rendered for visual preview capture.
+     * Must be followed by {@link unstagePreview} to revert.
+     */
+    stageForPreview?(): void;
+
+    /**
+     * Reverts the temporary state restoration performed by {@link stageForPreview}.
+     */
+    unstagePreview?(): void;
 }
 
 export interface Selection extends Range {

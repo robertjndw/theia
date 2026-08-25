@@ -14,11 +14,12 @@
 // SPDX-License-Identifier: EPL-2.0 OR GPL-2.0-only WITH Classpath-exception-2.0
 // *****************************************************************************
 
-import { FrontendApplicationContribution, PreferenceService, PreferenceChange } from '@theia/core/lib/browser';
+import { FrontendApplicationContribution } from '@theia/core/lib/browser';
 import { inject, injectable } from '@theia/core/shared/inversify';
 import { VercelAiLanguageModelsManager, VercelAiModelDescription, VercelAiProvider } from '../common';
-import { ANTHROPIC_API_KEY_PREF, CUSTOM_ENDPOINTS_PREF, MODELS_PREF, OPENAI_API_KEY_PREF, VERCEL_AI_PROVIDER_ID } from './vercel-ai-preferences';
-import { AICorePreferences, PREFERENCE_NAME_MAX_RETRIES } from '@theia/ai-core/lib/browser/ai-core-preferences';
+import { ANTHROPIC_API_KEY_PREF, CUSTOM_ENDPOINTS_PREF, MODELS_PREF, OPENAI_API_KEY_PREF, VERCEL_AI_PROVIDER_ID } from '../common/vercel-ai-preferences';
+import { AICorePreferences, PREFERENCE_NAME_MAX_RETRIES } from '@theia/ai-core/lib/common/ai-core-preferences';
+import { PreferenceService, PreferenceChange } from '@theia/core';
 
 interface ModelConfig {
     id: string;
@@ -65,7 +66,7 @@ export class VercelAiFrontendApplicationContribution implements FrontendApplicat
 
             this.aiCorePreferences.onPreferenceChanged(event => {
                 if (event.preferenceName === PREFERENCE_NAME_MAX_RETRIES) {
-                    this.updateAllModelsWithNewRetries();
+                    this.updateAllModels();
                 }
             });
         });
@@ -74,10 +75,12 @@ export class VercelAiFrontendApplicationContribution implements FrontendApplicat
     protected handlePreferenceChange(event: PreferenceChange): void {
         switch (event.preferenceName) {
             case OPENAI_API_KEY_PREF:
-                this.manager.setProviderConfig('openai', { provider: 'openai', apiKey: event.newValue });
+                this.manager.setProviderConfig('openai', { provider: 'openai', apiKey: this.preferenceService.get<string>(OPENAI_API_KEY_PREF, undefined) });
+                this.updateAllModels();
                 break;
             case ANTHROPIC_API_KEY_PREF:
-                this.manager.setProviderConfig('anthropic', { provider: 'anthropic', apiKey: event.newValue });
+                this.manager.setProviderConfig('anthropic', { provider: 'anthropic', apiKey: this.preferenceService.get<string>(ANTHROPIC_API_KEY_PREF, undefined) });
+                this.updateAllModels();
                 break;
             case MODELS_PREF:
                 this.handleModelChanges(event);
@@ -88,9 +91,13 @@ export class VercelAiFrontendApplicationContribution implements FrontendApplicat
         }
     }
 
+    protected previousModels: ModelConfig[] = [];
+    protected previousCustomModels: Partial<VercelAiModelDescription>[] = [];
+
     protected handleModelChanges(event: PreferenceChange): void {
-        const newModels = this.ensureModelConfigArray(event.newValue);
-        const oldModels = this.ensureModelConfigArray(event.oldValue);
+        const newModels = this.ensureModelConfigArray(this.preferenceService.get(MODELS_PREF, []));
+        const oldModels = this.previousModels;
+        this.previousModels = newModels;
 
         const oldModelIds = new Set(oldModels.map(m => m.id));
         const newModelIds = new Set(newModels.map(m => m.id));
@@ -103,8 +110,9 @@ export class VercelAiFrontendApplicationContribution implements FrontendApplicat
     }
 
     protected handleCustomModelChanges(event: PreferenceChange): void {
-        const newCustomModels = this.ensureCustomModelArray(event.newValue);
-        const oldCustomModels = this.ensureCustomModelArray(event.oldValue);
+        const newCustomModels = this.ensureCustomModelArray(this.preferenceService.get(CUSTOM_ENDPOINTS_PREF, []));
+        const oldCustomModels = this.previousCustomModels;
+        this.previousCustomModels = newCustomModels;
 
         const oldModels = this.createCustomModelDescriptionsFromPreferences(oldCustomModels);
         const newModels = this.createCustomModelDescriptionsFromPreferences(newCustomModels);
@@ -152,7 +160,7 @@ export class VercelAiFrontendApplicationContribution implements FrontendApplicat
         ) as Partial<VercelAiModelDescription>[];
     }
 
-    protected updateAllModelsWithNewRetries(): void {
+    protected updateAllModels(): void {
         const models = this.preferenceService.get<ModelConfig[]>(MODELS_PREF, []);
         this.manager.createOrUpdateLanguageModels(...models.map(model => this.createVercelAiModelDescription(model)));
 

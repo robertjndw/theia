@@ -15,11 +15,12 @@
 // *****************************************************************************
 
 import { inject, injectable } from 'inversify';
-import { Disposable, DisposableCollection, disposableTimeout, isOSX } from '../common';
+import { Disposable, DisposableCollection, disposableTimeout, isOSX, PreferenceService } from '../common';
 import { MarkdownString } from '../common/markdown-rendering/markdown-string';
 import { animationFrame } from './browser';
-import { MarkdownRenderer, MarkdownRendererFactory } from './markdown-rendering/markdown-renderer';
-import { PreferenceService } from './preferences';
+import { wireMarkdownLinkHandler } from './markdown-rendering/markdown-link-handler';
+import { CoreMarkdownRenderer, MarkdownRenderer } from './markdown-rendering/markdown-renderer';
+import { OpenerService } from './opener-service';
 
 import '../../src/browser/style/hover-service.css';
 
@@ -71,6 +72,21 @@ export interface HoverRequest {
      * Function that takes the desired width and returns a HTMLElement to be rendered.
      */
     visualPreview?: (width: number) => HTMLElement | undefined;
+    /**
+     * Indicates if the hover contains interactive/clickable items.
+     * When true, the hover will register a click handler to allow interaction with elements in the hover area.
+     */
+    interactive?: boolean;
+    /**
+     * If implemented, this method will be called when the hover is no longer shown or no longer scheduled to be shown.
+     */
+    onHide?(): void;
+    /**
+     * When true, the hover will be shown immediately without any delay.
+     * Useful for explicitly triggered hovers (e.g., on click) where the user expects instant feedback.
+     * @default false
+     */
+    skipHoverDelay?: boolean;
 }
 
 @injectable()
@@ -78,13 +94,12 @@ export class HoverService {
     protected static hostClassName = 'theia-hover';
     protected static styleSheetId = 'theia-hover-style';
     @inject(PreferenceService) protected readonly preferences: PreferenceService;
-    @inject(MarkdownRendererFactory) protected readonly markdownRendererFactory: MarkdownRendererFactory;
 
-    protected _markdownRenderer: MarkdownRenderer | undefined;
-    protected get markdownRenderer(): MarkdownRenderer {
-        this._markdownRenderer ||= this.markdownRendererFactory();
-        return this._markdownRenderer;
-    }
+    // Inject CoreMarkdownRenderer rather than the MarkdownRenderer symbol,
+    // which is rebound by Monaco to a renderer that strips code block content.
+    @inject(CoreMarkdownRenderer) protected readonly markdownRenderer: MarkdownRenderer;
+
+    @inject(OpenerService) protected readonly openerService: OpenerService;
 
     protected _hoverHost: HTMLElement | undefined;
     protected get hoverHost(): HTMLElement {
@@ -102,13 +117,12 @@ export class HoverService {
     protected readonly disposeOnHide = new DisposableCollection();
 
     requestHover(request: HoverRequest): void {
-        if (request.target !== this.hoverTarget) {
-            this.cancelHover();
-            this.pendingTimeout = disposableTimeout(() => this.renderHover(request), this.getHoverDelay());
-            this.hoverTarget = request.target;
-            this.listenForMouseOut();
-            this.listenForMouseClick();
-        }
+        this.cancelHover();
+        const delay = request.skipHoverDelay ? 0 : this.getHoverDelay();
+        this.pendingTimeout = disposableTimeout(() => this.renderHover(request), delay);
+        this.hoverTarget = request.target;
+        this.listenForMouseOut();
+        this.listenForMouseClick(request);
     }
 
     protected getHoverDelay(): number {
@@ -120,7 +134,10 @@ export class HoverService {
     protected async renderHover(request: HoverRequest): Promise<void> {
         const host = this.hoverHost;
         let firstChild: HTMLElement | undefined;
-        const { target, content, position, cssClasses } = request;
+        const { target, content, position, cssClasses, interactive, onHide } = request;
+        if (onHide) {
+            this.disposeOnHide.push({ dispose: onHide.bind(request) });
+        }
         if (cssClasses) {
             host.classList.add(...cssClasses);
         }
@@ -134,6 +151,7 @@ export class HoverService {
             this.disposeOnHide.push(renderedContent);
             host.appendChild(renderedContent.element);
             firstChild = renderedContent.element;
+            this.disposeOnHide.push(wireMarkdownLinkHandler(renderedContent.element, content, this.openerService));
         }
         // browsers might insert linebreaks when the hover appears at the edge of the window
         // resetting the position prevents that
@@ -142,6 +160,17 @@ export class HoverService {
         document.body.append(host);
         if (!host.matches(':popover-open')) {
             host.showPopover();
+        }
+
+        if (interactive) {
+            // Add a click handler to the hover host to ensure clicks within the hover area work properly
+            const clickHandler = (e: MouseEvent) => {
+                // Let click events within the hover area be processed by their handlers
+                // but prevent them from triggering document handlers that might dismiss the tooltip
+                e.stopImmediatePropagation();
+            };
+            host.addEventListener('click', clickHandler);
+            this.disposeOnHide.push({ dispose: () => host.removeEventListener('click', clickHandler) });
         }
 
         if (request.visualPreview) {
@@ -203,17 +232,21 @@ export class HoverService {
     }
 
     protected listenForMouseOut(): void {
-        const handleMouseMove = (e: MouseEvent) => {
-            if (e.target instanceof Node && !this.hoverHost.contains(e.target) && !this.hoverTarget?.contains(e.target)) {
-                this.disposeOnHide.push(disposableTimeout(() => {
-                    if (!this.hoverHost.matches(':hover') && !this.hoverTarget?.matches(':hover')) {
-                        this.cancelHover();
-                    }
-                }, quickMouseThresholdMillis));
-            }
+        const handleMouseLeave = (e: MouseEvent) => {
+            this.disposeOnHide.push(disposableTimeout(() => {
+                if (!this.hoverHost.matches(':hover') && !this.hoverTarget?.matches(':hover')) {
+                    this.cancelHover();
+                }
+            }, quickMouseThresholdMillis));
         };
-        document.addEventListener('mousemove', handleMouseMove);
-        this.disposeOnHide.push({ dispose: () => document.removeEventListener('mousemove', handleMouseMove) });
+        this.hoverTarget?.addEventListener('mouseout', handleMouseLeave);
+        this.hoverHost.addEventListener('mouseout', handleMouseLeave);
+        this.disposeOnHide.push({
+            dispose: () => {
+                this.hoverTarget?.removeEventListener('mouseout', handleMouseLeave);
+                this.hoverHost.removeEventListener('mouseout', handleMouseLeave);
+            }
+        });
     }
 
     cancelHover(): void {
@@ -224,12 +257,18 @@ export class HoverService {
     }
 
     /**
-     * Listen for any mouse click (mousedown) event and cancel the hover if detected.
-     * This ensures the hover is dismissed when the user clicks anywhere (including on the target or elsewhere).
+     * Listen for mouse click (mousedown) events and handle them based on hover interactivity.
+     * For non-interactive hovers, any mousedown cancels the hover immediately.
+     * For interactive hovers, the hover remains visible to allow interaction with its elements.
      */
-    protected listenForMouseClick(): void {
+    protected listenForMouseClick(request: HoverRequest): void {
         const handleMouseDown = (e: MouseEvent) => {
-            this.cancelHover();
+            if (this.hoverHost.contains(e.target as Node)) {
+                return;
+            }
+            if (!request.interactive) {
+                this.cancelHover();
+            }
         };
         document.addEventListener('mousedown', handleMouseDown, true);
         this.disposeOnHide.push({ dispose: () => document.removeEventListener('mousedown', handleMouseDown, true) });

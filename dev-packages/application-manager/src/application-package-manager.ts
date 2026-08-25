@@ -19,7 +19,9 @@ import * as fs from 'fs-extra';
 import * as cp from 'child_process';
 import * as semver from 'semver';
 import { ApplicationPackage, ApplicationPackageOptions } from '@theia/application-package';
-import { WebpackGenerator, FrontendGenerator, BackendGenerator } from './generator';
+import { prepareBrowserOnlyPlugins } from './browser-only/prepare-browser-only-plugins';
+import { writeBrowserOnlyExtensionsList } from './browser-only/write-browser-only-extensions-list';
+import { BundlerGenerator, FrontendGenerator, BackendGenerator } from './generator';
 import { ApplicationProcess } from './application-process';
 import { GeneratorOptions } from './generator/abstract-generator';
 import yargs = require('yargs');
@@ -45,7 +47,7 @@ export class ApplicationPackageManager {
         return cli
             .option('mode', {
                 description: 'Generation mode to use',
-                choices: ['development', 'production'],
+                choices: ['development', 'production'] as const,
                 default: 'production' as const,
             })
             .option('split-frontend', {
@@ -73,12 +75,15 @@ export class ApplicationPackageManager {
     }
 
     async clean(): Promise<void> {
-        const webpackGenerator = new WebpackGenerator(this.pck);
+        const bundlerGenerator = new BundlerGenerator(this.pck);
         await Promise.all([
             this.remove(this.pck.lib()),
             this.remove(this.pck.srcGen()),
-            this.remove(webpackGenerator.genConfigPath),
-            this.remove(webpackGenerator.genNodeConfigPath)
+            this.remove(bundlerGenerator.genConfigPath),
+            this.remove(bundlerGenerator.genNodeConfigPath),
+            this.remove(bundlerGenerator.genESBuildBrowserPath),
+            this.remove(bundlerGenerator.genESBuildNodePath),
+            this.remove(bundlerGenerator.genESBuildElectronPath),
         ]);
     }
 
@@ -99,7 +104,7 @@ export class ApplicationPackageManager {
             throw error;
         }
         await Promise.all([
-            new WebpackGenerator(this.pck, options).generate(),
+            new BundlerGenerator(this.pck, options).generate(),
             new BackendGenerator(this.pck, options).generate(),
             new FrontendGenerator(this.pck, options).generate(),
         ]);
@@ -108,12 +113,27 @@ export class ApplicationPackageManager {
     async copy(): Promise<void> {
         await fs.ensureDir(this.pck.lib('frontend'));
         await fs.copy(this.pck.frontend('index.html'), this.pck.lib('frontend', 'index.html'));
+
+        if (this.pck.isBrowserOnly()) {
+            await this.prepareBrowserOnly();
+        }
+    }
+
+    protected async prepareBrowserOnly(): Promise<void> {
+        await prepareBrowserOnlyPlugins(this.pck);
+        await writeBrowserOnlyExtensionsList(this.pck);
     }
 
     async build(args: string[] = [], options: GeneratorOptions = {}): Promise<void> {
+        const bundlerGenerator = new BundlerGenerator(this.pck);
         await this.generate(options);
         await this.copy();
-        return this.__process.run('webpack', args);
+        if (await bundlerGenerator.preferESBuild()) {
+            const process = this.__process.spawn('node', [bundlerGenerator.esbuildPath, ...args]);
+            return this.__process.promisify('esbuild', process);
+        } else {
+            return this.__process.run('webpack', args);
+        }
     }
 
     start(args: string[] = []): cp.ChildProcess {
@@ -214,6 +234,13 @@ export class ApplicationPackageManager {
         }
         if (!theiaElectron.electronVersion || !semver.satisfies(theiaElectron.electronVersion, currentRange)) {
             throw new AbortError('Dependencies are out of sync, please run "install" again');
+        }
+        // Electron >=42 no longer runs a postinstall to download its binary;
+        // ensure it is present before the ffmpeg replacement step needs it.
+        const electronDistPath = path.resolve(require.resolve('electron/package.json'), '..', 'dist');
+        if (!await fs.pathExists(path.join(electronDistPath, 'version'))) {
+            const installScript = path.resolve(require.resolve('electron/package.json'), '..', 'install.js');
+            cp.execFileSync(process.execPath, [installScript], { stdio: 'inherit' });
         }
         const ffmpeg = await import('@theia/ffmpeg');
         await ffmpeg.replaceFfmpeg();

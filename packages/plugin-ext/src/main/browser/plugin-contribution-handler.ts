@@ -27,9 +27,7 @@ import {
 import {
     DefaultUriLabelProviderContribution,
     LabelProviderContribution,
-    PreferenceSchemaProvider
 } from '@theia/core/lib/browser';
-import { DefaultOverridesPreferenceSchemaId, PreferenceLanguageOverrideService, PreferenceSchema, PreferenceSchemaProperties } from '@theia/core/lib/browser/preferences';
 import { KeybindingsContributionPointHandler } from './keybindings/keybindings-contribution-handler';
 import { MonacoSnippetSuggestProvider } from '@theia/monaco/lib/browser/monaco-snippet-suggest-provider';
 import { PluginSharedStyle } from './plugin-shared-style';
@@ -44,7 +42,7 @@ import { MonacoThemingService } from '@theia/monaco/lib/browser/monaco-theming-s
 import { ColorRegistry } from '@theia/core/lib/browser/color-registry';
 import { PluginIconService } from './plugin-icon-service';
 import { PluginIconThemeService } from './plugin-icon-theme-service';
-import { ContributionProvider } from '@theia/core/lib/common';
+import { ContributionProvider, isObject, OVERRIDE_PROPERTY_PATTERN, PreferenceSchemaService } from '@theia/core/lib/common';
 import * as monaco from '@theia/monaco-editor-core';
 import { ContributedTerminalProfileStore, TerminalProfileStore } from '@theia/terminal/lib/browser/terminal-profile-service';
 import { TerminalWidget } from '@theia/terminal/lib/browser/base/terminal-widget';
@@ -53,6 +51,8 @@ import { PluginTerminalRegistry } from './plugin-terminal-registry';
 import { ContextKeyService } from '@theia/core/lib/browser/context-key-service';
 import { LanguageService } from '@theia/core/lib/browser/language-service';
 import { ThemeIcon } from '@theia/monaco-editor-core/esm/vs/base/common/themables';
+import { JSONObject, JSONValue } from '@theia/core/shared/@lumino/coreutils';
+import { ILogger } from '@theia/core';
 
 // The enum export is missing from `vscode-textmate@9.2.0`
 const enum StandardTokenType {
@@ -79,11 +79,8 @@ export class PluginContributionHandler {
     @inject(MenusContributionPointHandler)
     private readonly menusContributionHandler: MenusContributionPointHandler;
 
-    @inject(PreferenceSchemaProvider)
-    private readonly preferenceSchemaProvider: PreferenceSchemaProvider;
-
-    @inject(PreferenceLanguageOverrideService)
-    private readonly preferenceOverrideService: PreferenceLanguageOverrideService;
+    @inject(PreferenceSchemaService)
+    private readonly preferenceSchemaProvider: PreferenceSchemaService;
 
     @inject(MonacoTextmateService)
     private readonly monacoTextmateService: MonacoTextmateService;
@@ -151,6 +148,9 @@ export class PluginContributionHandler {
     @inject(ContextKeyService)
     protected readonly contextKeyService: ContextKeyService;
 
+    @inject(ILogger) @named('plugin-ext:PluginContributionHandler')
+    protected readonly logger: ILogger;
+
     protected readonly commandHandlers = new Map<string, CommandHandler['execute'] | undefined>();
 
     protected readonly onDidRegisterCommandHandlerEmitter = new Emitter<string>();
@@ -168,8 +168,8 @@ export class PluginContributionHandler {
         }
         const toDispose = new DisposableCollection(Disposable.create(() => { /* mark as not disposed */ }));
         /* eslint-disable @typescript-eslint/no-explicit-any */
-        const logError = (message: string, ...args: any[]) => console.error(`[${clientId}][${plugin.metadata.model.id}]: ${message}`, ...args);
-        const logWarning = (message: string, ...args: any[]) => console.warn(`[${clientId}][${plugin.metadata.model.id}]: ${message}`, ...args);
+        const logError = (message: string, ...args: any[]) => this.logger.error(`[${clientId}][${plugin.metadata.model.id}]: ${message}`, ...args);
+        const logWarning = (message: string, ...args: any[]) => this.logger.warn(`[${clientId}][${plugin.metadata.model.id}]: ${message}`, ...args);
         const pushContribution = (id: string, contribute: () => Disposable) => {
             if (toDispose.disposed) {
                 return;
@@ -184,7 +184,7 @@ export class PluginContributionHandler {
         const configuration = contributions.configuration;
         if (configuration) {
             for (const config of configuration) {
-                pushContribution('configuration', () => this.preferenceSchemaProvider.setSchema(config));
+                pushContribution('configuration', () => this.preferenceSchemaProvider.addSchema(config));
             }
         }
 
@@ -213,11 +213,16 @@ export class PluginContributionHandler {
                 }
                 const langConfiguration = lang.configuration;
                 if (langConfiguration) {
+                    const comments = langConfiguration.comments;
                     pushContribution(`language.${lang.id}.configuration`, () => monaco.languages.setLanguageConfiguration(lang.id, {
                         wordPattern: this.createRegex(langConfiguration.wordPattern),
                         autoClosingPairs: langConfiguration.autoClosingPairs,
                         brackets: langConfiguration.brackets,
-                        comments: langConfiguration.comments,
+                        // @monaco-uplift: Monaco doesn't support LineCommentRule yet, extract the string
+                        comments: comments ? {
+                            lineComment: comments.lineComment && typeof comments.lineComment === 'object' ? comments.lineComment.comment : comments.lineComment,
+                            blockComment: comments.blockComment,
+                        } : undefined,
                         folding: this.convertFolding(langConfiguration.folding),
                         surroundingPairs: langConfiguration.surroundingPairs,
                         indentationRules: this.convertIndentationRules(langConfiguration.indentationRules),
@@ -272,7 +277,7 @@ export class PluginContributionHandler {
                         embeddedLanguages: this.convertEmbeddedLanguages(grammar.embeddedLanguages, logWarning),
                         tokenTypes: this.convertTokenTypes(grammar.tokenTypes),
                         balancedBracketSelectors: grammar.balancedBracketScopes ?? ['*'],
-                        unbalancedBracketSelectors: grammar.balancedBracketScopes,
+                        unbalancedBracketSelectors: grammar.unbalancedBracketScopes ?? [],
                     }));
                 }
                 // activate grammars only once everything else is loaded.
@@ -404,6 +409,35 @@ export class PluginContributionHandler {
             this.debugSchema.update();
         }
 
+        // Register dynamic debug configuration types discovered from activation events.
+        // This allows the debug dropdown to show provider types before the extension has activated.
+        if (contributions.activationEvents) {
+            for (const event of contributions.activationEvents) {
+                if (event.startsWith('onDebugDynamicConfigurations:')) {
+                    // Explicit type declaration: onDebugDynamicConfigurations:python
+                    // Try to find a matching debugger to get the label
+                    const debugType = event.slice('onDebugDynamicConfigurations:'.length);
+                    const debuggerContrib = contributions.debuggers?.find(d => d.type === debugType);
+                    const label = debuggerContrib?.label ?? debugType;
+                    pushContribution(`dynamicDebugType.${debugType}`,
+                        () => this.debugService.registerDynamicDebugConfigurationType(debugType, label)
+                    );
+                } else if (event === 'onDebugDynamicConfigurations' && contributions.debuggers?.length) {
+                    // Generic event - register all unique debugger types from this extension
+                    const registeredTypes = new Set<string>();
+                    for (const contrib of contributions.debuggers) {
+                        if (!registeredTypes.has(contrib.type)) {
+                            registeredTypes.add(contrib.type);
+                            const label = contrib.label ?? contrib.type;
+                            pushContribution(`dynamicDebugType.${contrib.type}`,
+                                () => this.debugService.registerDynamicDebugConfigurationType(contrib.type, label)
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
         if (contributions.resourceLabelFormatters) {
             for (const formatter of contributions.resourceLabelFormatters) {
                 for (const contribution of this.contributionProvider.getContributions()) {
@@ -487,7 +521,7 @@ export class PluginContributionHandler {
 
     registerCommand(command: Command, enablement?: string): Disposable {
         if (this.hasCommand(command.id)) {
-            console.warn(`command '${command.id}' already registered`);
+            this.logger.warn(`command '${command.id}' already registered`);
             return Disposable.NULL;
         }
 
@@ -535,7 +569,7 @@ export class PluginContributionHandler {
 
     registerCommandHandler(id: string, execute: CommandHandler['execute']): Disposable {
         if (this.hasCommandHandler(id)) {
-            console.warn(`command handler '${id}' already registered`);
+            this.logger.warn(`command handler '${id}' already registered`);
             return Disposable.NULL;
         }
 
@@ -552,34 +586,22 @@ export class PluginContributionHandler {
         return !!this.commandHandlers.get(id);
     }
 
-    protected updateDefaultOverridesSchema(configurationDefaults: PreferenceSchemaProperties): Disposable {
-        const defaultOverrides: PreferenceSchema = {
-            id: DefaultOverridesPreferenceSchemaId,
-            title: 'Default Configuration Overrides',
-            properties: {}
-        };
+    protected updateDefaultOverridesSchema(configurationDefaults: JSONObject): Disposable {
+        const disposables = new DisposableCollection();
         // eslint-disable-next-line guard-for-in
         for (const key in configurationDefaults) {
             const defaultValue = configurationDefaults[key];
-            if (this.preferenceOverrideService.testOverrideValue(key, defaultValue)) {
-                // language specific override
-                defaultOverrides.properties[key] = {
-                    type: 'object',
-                    default: defaultValue,
-                    description: `Configure editor settings to be overridden for ${key} language.`
-                };
+            const match = key.match(OVERRIDE_PROPERTY_PATTERN);
+            if (match && isObject(defaultValue)) {
+                for (const [propertyName, value] of Object.entries(defaultValue)) {
+                    disposables.push(this.preferenceSchemaProvider.registerOverride(propertyName, match[1], value as JSONValue));
+                }
             } else {
                 // regular configuration override
-                defaultOverrides.properties[key] = {
-                    default: defaultValue,
-                    description: `Configure default setting for ${key}.`
-                };
+                disposables.push(this.preferenceSchemaProvider.registerOverride(key, undefined, defaultValue));
             }
         }
-        if (Object.keys(defaultOverrides.properties).length) {
-            return this.preferenceSchemaProvider.setSchema(defaultOverrides);
-        }
-        return Disposable.NULL;
+        return disposables;
     }
 
     private createRegex(value: string | RegExpOptions | undefined): RegExp | undefined {

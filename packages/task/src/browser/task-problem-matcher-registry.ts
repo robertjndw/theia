@@ -19,8 +19,8 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import { inject, injectable, postConstruct } from '@theia/core/shared/inversify';
-import { Event, Emitter } from '@theia/core/lib/common';
+import { inject, injectable, postConstruct, named } from '@theia/core/shared/inversify';
+import { Event, Emitter, nls } from '@theia/core/lib/common';
 import { Disposable, DisposableCollection } from '@theia/core/lib/common/disposable';
 import {
     ApplyToKind, FileLocationKind, NamedProblemMatcher,
@@ -30,6 +30,7 @@ import {
 import { ProblemPatternRegistry } from './task-problem-pattern-registry';
 import { Severity } from '@theia/core/lib/common/severity';
 import { Deferred } from '@theia/core/lib/common/promise-util';
+import { ILogger } from '@theia/core';
 
 @injectable()
 export class ProblemMatcherRegistry {
@@ -39,6 +40,9 @@ export class ProblemMatcherRegistry {
 
     @inject(ProblemPatternRegistry)
     protected readonly problemPatternRegistry: ProblemPatternRegistry;
+
+    @inject(ILogger) @named('task:ProblemMatcherRegistry')
+    protected readonly logger: ILogger;
 
     protected readonly onDidChangeProblemMatcherEmitter = new Emitter<void>();
     get onDidChangeProblemMatcher(): Event<void> {
@@ -65,7 +69,7 @@ export class ProblemMatcherRegistry {
      */
     register(matcher: ProblemMatcherContribution): Disposable {
         if (!matcher.name) {
-            console.error('Only named Problem Matchers can be registered.');
+            this.logger.error('Only named Problem Matchers can be registered.');
             return Disposable.NULL;
         }
         const toDispose = new DisposableCollection(Disposable.create(() => {
@@ -223,7 +227,7 @@ export class ProblemMatcherRegistry {
     private fillDefaults(): void {
         this.add({
             name: 'msCompile',
-            label: 'Microsoft compiler problems',
+            label: nls.localizeByDefault('Microsoft compiler problems'),
             owner: 'msCompile',
             applyTo: ApplyToKind.allDocuments,
             fileLocation: FileLocationKind.Absolute,
@@ -232,7 +236,7 @@ export class ProblemMatcherRegistry {
 
         this.add({
             name: 'lessCompile',
-            label: 'Less problems',
+            label: nls.localizeByDefault('Less problems'),
             deprecated: true,
             owner: 'lessCompile',
             source: 'less',
@@ -244,7 +248,7 @@ export class ProblemMatcherRegistry {
 
         this.add({
             name: 'gulp-tsc',
-            label: 'Gulp TSC Problems',
+            label: nls.localizeByDefault('Gulp TSC Problems'),
             owner: 'typescript',
             source: 'ts',
             applyTo: ApplyToKind.closedDocuments,
@@ -255,7 +259,7 @@ export class ProblemMatcherRegistry {
 
         this.add({
             name: 'jshint',
-            label: 'JSHint problems',
+            label: nls.localizeByDefault('JSHint problems'),
             owner: 'jshint',
             source: 'jshint',
             applyTo: ApplyToKind.allDocuments,
@@ -265,7 +269,7 @@ export class ProblemMatcherRegistry {
 
         this.add({
             name: 'jshint-stylish',
-            label: 'JSHint stylish problems',
+            label: nls.localizeByDefault('JSHint stylish problems'),
             owner: 'jshint',
             source: 'jshint',
             applyTo: ApplyToKind.allDocuments,
@@ -275,7 +279,7 @@ export class ProblemMatcherRegistry {
 
         this.add({
             name: 'eslint-compact',
-            label: 'ESLint compact problems',
+            label: nls.localizeByDefault('ESLint compact problems'),
             owner: 'eslint',
             source: 'eslint',
             applyTo: ApplyToKind.allDocuments,
@@ -286,7 +290,7 @@ export class ProblemMatcherRegistry {
 
         this.add({
             name: 'eslint-stylish',
-            label: 'ESLint stylish problems',
+            label: nls.localizeByDefault('ESLint stylish problems'),
             owner: 'eslint',
             source: 'eslint',
             applyTo: ApplyToKind.allDocuments,
@@ -296,7 +300,7 @@ export class ProblemMatcherRegistry {
 
         this.add({
             name: 'go',
-            label: 'Go problems',
+            label: nls.localizeByDefault('Go problems'),
             owner: 'go',
             source: 'go',
             applyTo: ApplyToKind.allDocuments,

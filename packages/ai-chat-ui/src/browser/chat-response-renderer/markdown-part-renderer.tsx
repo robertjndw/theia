@@ -24,15 +24,38 @@ import {
 import { ReactNode, useEffect, useRef } from '@theia/core/shared/react';
 import * as React from '@theia/core/shared/react';
 import * as markdownit from '@theia/core/shared/markdown-it';
+import * as markdownitemoji from '@theia/core/shared/markdown-it-emoji';
 import * as DOMPurify from '@theia/core/shared/dompurify';
 import { MarkdownString } from '@theia/core/lib/common/markdown-rendering';
 import { OpenerService, open } from '@theia/core/lib/browser';
 import { URI } from '@theia/core';
+import {
+    blockExternalResources,
+    BLOCKED_RESOURCE_ALLOW_CLASS,
+    BLOCKED_RESOURCE_CLASS,
+    BLOCKED_RESOURCE_WRAPPER_CLASS,
+    restoreBlockedResource
+} from './block-external-resources';
+
+export interface MarkdownRenderProps {
+    text: string | MarkdownString;
+    openerService: OpenerService;
+    className?: string;
+}
+
+/**
+ * Renders the given markdown via {@link useMarkdownRendering} into a `<div>`.
+ * Shared component for use across chat response renderers.
+ */
+export const MarkdownRender: React.FC<MarkdownRenderProps> = ({ text, openerService, className }) => {
+    const ref = useMarkdownRendering(text, openerService);
+    return <div className={className} ref={ref}></div>;
+};
 
 @injectable()
 export class MarkdownPartRenderer implements ChatResponsePartRenderer<MarkdownChatResponseContent | InformationalChatResponseContent> {
     @inject(OpenerService) protected readonly openerService: OpenerService;
-    protected readonly markdownIt = markdownit();
+    protected readonly markdownIt = markdownit().use(markdownitemoji.full);
     canHandle(response: ChatResponseContent): number {
         if (MarkdownChatResponseContent.is(response)) {
             return 10;
@@ -50,15 +73,9 @@ export class MarkdownPartRenderer implements ChatResponsePartRenderer<MarkdownCh
             return null;
         }
 
-        return <MarkdownRender response={response} openerService={this.openerService} />;
+        return <MarkdownRender text={response.content} openerService={this.openerService} />;
     }
 }
-
-const MarkdownRender = ({ response, openerService }: { response: MarkdownChatResponseContent | InformationalChatResponseContent; openerService: OpenerService }) => {
-    const ref = useMarkdownRendering(response.content, openerService);
-
-    return <div ref={ref}></div>;
-};
 
 export interface DeclaredEventsEventListenerObject extends EventListenerObject {
     handledEvents?: (keyof HTMLElementEventMap)[];
@@ -79,30 +96,41 @@ export interface DeclaredEventsEventListenerObject extends EventListenerObject {
  * @param eventHandler `handleEvent` will be called by default for `click` events and additionally
  * for all events enumerated in {@link DeclaredEventsEventListenerObject.handledEvents}. If `handleEvent` returns `true`,
  * no additional handlers will be run for the event.
+ * @param blockExternalResourceLoading whether external URL resources should be blocked until explicitly allowed (default: true).
+ * Trusted content authored by the user (e.g. their own chat requests) can pass `false` to render such resources directly.
+ * Active embedded content (iframes, frames, objects, embeds) is always blocked regardless of this flag.
  * @returns the ref to use in an element to render the markdown
  */
 export const useMarkdownRendering = (
     markdown: string | MarkdownString,
     openerService: OpenerService,
     skipSurroundingParagraph: boolean = false,
-    eventHandler?: DeclaredEventsEventListenerObject
+    eventHandler?: DeclaredEventsEventListenerObject,
+    blockExternalResourceLoading: boolean = true
 ) => {
     // null is valid in React
     // eslint-disable-next-line no-null/no-null
     const ref = useRef<HTMLDivElement | null>(null);
     const markdownString = typeof markdown === 'string' ? markdown : markdown.value;
     useEffect(() => {
-        const markdownIt = markdownit();
+        const markdownIt = markdownit({ html: true }).use(markdownitemoji.full);
         const host = document.createElement('div');
+        const template = document.createElement('template');
 
         // markdownIt always puts the content in a paragraph element, so we remove it if we don't want that
         const html = skipSurroundingParagraph ? markdownIt.render(markdownString).replace(/^<p>|<\/p>|<p><\/p>$/g, '') : markdownIt.render(markdownString);
 
-        host.innerHTML = DOMPurify.sanitize(html, {
+        template.innerHTML = DOMPurify.sanitize(html, {
             // DOMPurify usually strips non http(s) links from hrefs
             // but we want to allow them (see handleClick via OpenerService below)
-            ALLOW_UNKNOWN_PROTOCOLS: true
+            ALLOW_UNKNOWN_PROTOCOLS: true,
+            ADD_TAGS: ['iframe', 'frame'],
+            ADD_ATTR: ['src', 'srcset', 'srcdoc', 'poster', 'href', 'xlink:href', 'data']
         });
+        // Active embedded content is always blocked; trusted content (blockExternalResourceLoading=false)
+        // still renders its external URL resources directly.
+        blockExternalResources(template.content, blockExternalResourceLoading);
+        host.appendChild(template.content);
         while (ref?.current?.firstChild) {
             ref.current.removeChild(ref.current.firstChild);
         }
@@ -110,13 +138,32 @@ export const useMarkdownRendering = (
 
         // intercept link clicks to use the Theia OpenerService instead of the default browser behavior
         const handleClick = (event: MouseEvent) => {
-            if ((eventHandler?.handleEvent(event) as unknown) === true) {return; }
-            let target = event.target as HTMLElement;
-            while (target && target.tagName !== 'A') {
-                target = target.parentElement as HTMLElement;
+            let target = event.target instanceof Element ? event.target : event.target instanceof Node ? event.target.parentElement : undefined;
+            const allowButton = target?.closest(`.${BLOCKED_RESOURCE_ALLOW_CLASS}`);
+            if (allowButton) {
+                const placeholder = allowButton.closest(`.${BLOCKED_RESOURCE_CLASS}`);
+                const restored = placeholder ? restoreBlockedResource(placeholder) : undefined;
+                if (placeholder && restored) {
+                    const wrapper = placeholder.parentElement?.classList.contains(BLOCKED_RESOURCE_WRAPPER_CLASS)
+                        ? placeholder.parentElement
+                        : undefined;
+                    if (wrapper) {
+                        wrapper.replaceWith(restored);
+                    } else {
+                        placeholder.replaceWith(restored);
+                    }
+                }
+                event.preventDefault();
+                event.stopPropagation();
+                return;
             }
-            if (target && target.tagName === 'A') {
-                const href = target.getAttribute('href');
+            if ((eventHandler?.handleEvent(event) as unknown) === true) { return; }
+            // SVG anchors keep their lower-case tag name, so normalize before comparing
+            while (target && target.tagName.toUpperCase() !== 'A') {
+                target = target.parentElement ?? undefined;
+            }
+            if (target && target.tagName.toUpperCase() === 'A') {
+                const href = target.getAttribute('href') ?? target.getAttribute('xlink:href');
                 if (href) {
                     open(openerService, new URI(href));
                     event.preventDefault();
@@ -130,7 +177,7 @@ export const useMarkdownRendering = (
             ref.current?.removeEventListener('click', handleClick);
             eventHandler?.handledEvents?.forEach(eventType => eventType !== 'click' && ref?.current?.removeEventListener(eventType, eventHandler));
         };
-    }, [markdownString, skipSurroundingParagraph, openerService]);
+    }, [markdownString, skipSurroundingParagraph, openerService, blockExternalResourceLoading]);
 
     return ref;
 };

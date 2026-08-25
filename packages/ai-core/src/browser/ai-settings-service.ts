@@ -13,15 +13,19 @@
 //
 // SPDX-License-Identifier: EPL-2.0 OR GPL-2.0-only WITH Classpath-exception-2.0
 // *****************************************************************************
-import { DisposableCollection, Emitter, Event } from '@theia/core';
-import { PreferenceScope, PreferenceService } from '@theia/core/lib/browser';
-import { inject, injectable } from '@theia/core/shared/inversify';
-import { JSONObject } from '@theia/core/shared/@lumino/coreutils';
-import { AISettings, AISettingsService, AgentSettings } from '../common';
+import { DisposableCollection, Emitter, Event, ILogger, RecursiveReadonly } from '@theia/core';
+import { inject, injectable, postConstruct, named } from '@theia/core/shared/inversify';
+import { AiConfigurationService, AISettings, AISettingsService, AgentSettings } from '../common';
 
 @injectable()
 export class AISettingsServiceImpl implements AISettingsService {
-    @inject(PreferenceService) protected preferenceService: PreferenceService;
+
+    @inject(ILogger) @named('ai-core:AISettingsServiceImpl')
+    protected readonly logger: ILogger;
+
+    @inject(AiConfigurationService)
+    protected readonly aiConfigurationService: AiConfigurationService;
+
     static readonly PREFERENCE_NAME = 'ai-features.agentSettings';
 
     protected toDispose = new DisposableCollection();
@@ -29,22 +33,35 @@ export class AISettingsServiceImpl implements AISettingsService {
     protected readonly onDidChangeEmitter = new Emitter<void>();
     onDidChange: Event<void> = this.onDidChangeEmitter.event;
 
-    async updateAgentSettings(agent: string, agentSettings: Partial<AgentSettings>): Promise<void> {
-        const settings = await this.getSettings();
-        const newAgentSettings = { ...settings[agent], ...agentSettings };
-        settings[agent] = newAgentSettings;
-        this.preferenceService.set(AISettingsServiceImpl.PREFERENCE_NAME, settings, PreferenceScope.User);
-        this.onDidChangeEmitter.fire();
+    @postConstruct()
+    protected init(): void {
+        this.toDispose.push(
+            this.aiConfigurationService.onDidChange(change => {
+                if (change.affectsPreference(AISettingsServiceImpl.PREFERENCE_NAME)) {
+                    this.onDidChangeEmitter.fire();
+                }
+            })
+        );
     }
 
-    async getAgentSettings(agent: string): Promise<AgentSettings | undefined> {
+    async updateAgentSettings(agent: string, agentSettings: Partial<AgentSettings>): Promise<void> {
+        const settings = await this.getSettings();
+        const toSet = { ...settings, [agent]: { ...settings[agent], ...agentSettings } };
+        try {
+            await this.aiConfigurationService.update(AISettingsServiceImpl.PREFERENCE_NAME, toSet);
+        } catch (e) {
+            this.onDidChangeEmitter.fire();
+            this.logger.warn('Updating the preferences was unsuccessful: ' + e);
+        }
+    }
+
+    async getAgentSettings(agent: string): Promise<RecursiveReadonly<AgentSettings> | undefined> {
         const settings = await this.getSettings();
         return settings[agent];
     }
 
-    async getSettings(): Promise<AISettings> {
-        await this.preferenceService.ready;
-        const pref = this.preferenceService.inspect<AISettings & JSONObject>(AISettingsServiceImpl.PREFERENCE_NAME);
-        return pref?.value ? pref.value : {};
+    async getSettings(): Promise<RecursiveReadonly<AISettings>> {
+        await this.aiConfigurationService.ready;
+        return this.aiConfigurationService.get<AISettings>(AISettingsServiceImpl.PREFERENCE_NAME, {}) ?? {};
     }
 }

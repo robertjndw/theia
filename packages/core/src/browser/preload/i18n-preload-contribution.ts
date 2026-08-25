@@ -19,7 +19,7 @@ import { FrontendApplicationConfigProvider } from '../frontend-application-confi
 import { nls } from '../../common/nls';
 import { inject, injectable, named } from 'inversify';
 import { LocalizationServer } from '../../common/i18n/localization-server';
-import { ContributionProvider } from '../../common';
+import { ContributionProvider } from '../../common/contribution-provider';
 import { TextReplacementContribution } from './text-replacement-contribution';
 
 @injectable()
@@ -43,7 +43,7 @@ export class I18nPreloadContribution implements PreloadContribution {
             const localization = await this.localizationServer.loadLocalization(locale);
             if (localization.languagePack) {
                 nls.localization = localization;
-            } else {
+            } else if (locale !== nls.defaultLocale) {
                 // In case the localization that we've loaded doesn't localize Theia completely (languagePack is false)
                 // We simply reset the locale to the default again
                 Object.assign(nls, {

@@ -6,7 +6,6 @@
 
 #quick-input-container {
   position: fixed;
-  right: 50%;
   z-index: 1000000;
 }
 
@@ -193,6 +192,7 @@
 .quick-input-list .monaco-icon-label.codicon::before {
   position: relative;
   top: 3px;
+  margin-right: 5px;
 }
 
 .quick-input-list .monaco-icon-label.theia-file-icons-js {
@@ -263,4 +263,78 @@
 .monaco-inputbox.warning > .ibwrapper > .input,
 .monaco-inputbox.info > .ibwrapper > .input {
     outline: 0 !important;
+}
+
+.monaco-inputbox > .ibwrapper > .input {
+  min-height: 28px;
+  border-radius: 2px;
+}
+
+
+.monaco-editor .overlay-button {
+  padding: 6px 11px;
+  border-radius: 2px;
+  cursor: pointer;
+  user-select: none;
+  z-index: 1;
+  background-color: var(--theia-button-background);
+  color: var(--theia-button-foreground);
+  border: 1px solid var(--theia-contrast-border);
+  font-family: var(--theia-ui-font-family);
+  line-height: 1.4;
+}
+
+.monaco-editor .overlay-button.theia-mod-disabled {
+  display: none;
+}
+
+.monaco-diff-editor .gutter .action-item .action-label {
+  color: var(--theia-editorGutter-itemGlyphForeground);
+}
+
+.monaco-diff-editor .gutter .gutterItem .background {
+  display: none;
+}
+
+/* Code Action Widget (Source Action, Quick Fix, Refactor) */
+.action-widget {
+  font-family: var(--theia-ui-font-family);
+}
+
+.action-widget .monaco-list .monaco-list-row.action.focused:not(.option-disabled) .codicon {
+  color: inherit !important;
+}
+
+.action-widget .monaco-list-row.action {
+  min-width: max-content;
+}
+
+/* Editor hover widget and overlay messages.
+   Alias --vscode- to --theia- for git blame hover addition/deletion colors
+   since the git extension uses --vscode- prefixed variables in inline styles. */
+.monaco-editor .monaco-hover {
+  font-family: var(--theia-ui-font-family);
+  --vscode-scmGraph-historyItemHoverAdditionsForeground: var(--theia-scmGraph-historyItemHoverAdditionsForeground);
+  --vscode-scmGraph-historyItemHoverDeletionsForeground: var(--theia-scmGraph-historyItemHoverDeletionsForeground);
+}
+
+.monaco-editor .monaco-hover p {
+  margin: 0.5em 0;
+}
+
+.monaco-editor .monaco-hover code {
+  font-family: var(--monaco-monospace-font, var(--theia-code-font-family));
+}
+
+.monaco-editor .monaco-hover pre,
+.monaco-editor .monaco-hover .monaco-tokenized-source {
+  font-family: var(--monaco-monospace-font, var(--theia-code-font-family));
+}
+
+.monaco-editor .monaco-hover hr {
+  margin-bottom: 0px;
+}
+
+.monaco-editor .monaco-editor-overlaymessage .message {
+  font-family: var(--theia-ui-font-family);
 }

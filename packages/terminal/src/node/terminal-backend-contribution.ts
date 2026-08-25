@@ -28,7 +28,7 @@ export class TerminalBackendContribution implements MessagingService.Contributio
     @inject(ProcessManager)
     protected readonly processManager: ProcessManager;
 
-    @inject(ILogger) @named('terminal')
+    @inject(ILogger) @named('terminal:TerminalBackendContribution')
     protected readonly logger: ILogger;
 
     configure(service: MessagingService): void {
@@ -50,7 +50,12 @@ export class TerminalBackendContribution implements MessagingService.Contributio
                 output.on('data', chunk => {
                     buffer.push(chunk);
                 });
+                const toDisposeOnProcessClose = termProcess.onClose(() => {
+                    buffer.flush();
+                    channel.close();
+                });
                 channel.onClose(() => {
+                    toDisposeOnProcessClose.dispose();
                     buffer.dispose();
                     output.dispose();
                 });

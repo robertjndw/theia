@@ -36,9 +36,10 @@ import {
     PluginInfo,
     LanguageStatus as LanguageStatusDTO,
     InlayHintDto,
-    IdentifiableInlineCompletions
+    IdentifiableInlineCompletions,
+    HoverWithId
 } from '../../common/plugin-api-rpc';
-import { injectable, inject } from '@theia/core/shared/inversify';
+import { injectable, inject, named } from '@theia/core/shared/inversify';
 import {
     SerializedDocumentFilter, MarkerData, Range, RelatedInformation,
     MarkerSeverity, DocumentLink, WorkspaceSymbolParams, CodeAction, CompletionDto,
@@ -79,21 +80,14 @@ import {
     EvaluatableExpressionProvider,
     InlineValue,
     InlineValueContext,
-    InlineValuesProvider
+    InlineValuesProvider,
+    MultiDocumentHighlightProvider
 } from '@theia/monaco-editor-core/esm/vs/editor/common/languages';
 import { ITextModel } from '@theia/monaco-editor-core/esm/vs/editor/common/model';
 import { CodeActionTriggerKind } from '../../plugin/types-impl';
 import { IReadonlyVSDataTransfer } from '@theia/monaco-editor-core/esm/vs/base/common/dataTransfer';
-import { FileUploadService } from '@theia/filesystem/lib/browser/file-upload-service';
-
-/**
- * @monaco-uplift The public API declares these functions as (languageId: string, service).
- * Confirm that the functions delegate to a handler that accepts a LanguageSelector rather than just a string.
- * Relevant code in node_modules/@theia/monaco-editor-core/src/vs/editor/standalone/browser/standaloneLanguages.ts
- */
-interface RegistrationFunction<T> {
-    (languageId: MonacoLanguageSelector.LanguageSelector, service: T): Disposable;
-}
+import { FileUploadService } from '@theia/filesystem/lib/common/upload/file-upload';
+import { ILogger } from '@theia/core';
 
 @injectable()
 export class LanguagesMainImpl implements LanguagesMain, Disposable {
@@ -115,6 +109,9 @@ export class LanguagesMainImpl implements LanguagesMain, Disposable {
 
     @inject(FileUploadService)
     protected readonly fileUploadService: FileUploadService;
+
+    @inject(ILogger) @named('plugin-ext:LanguagesMainImpl')
+    protected readonly logger: ILogger;
 
     private readonly proxy: LanguagesExt;
     private readonly services = new Map<number, Disposable>();
@@ -160,8 +157,13 @@ export class LanguagesMainImpl implements LanguagesMain, Disposable {
     }
 
     $setLanguageConfiguration(handle: number, languageId: string, configuration: SerializedLanguageConfiguration): void {
+        const comments = configuration.comments;
         const config: monaco.languages.LanguageConfiguration = {
-            comments: configuration.comments,
+            comments: comments ? {
+                // @monaco-uplift: Monaco doesn't support LineCommentRule yet, extract the string
+                lineComment: comments.lineComment && typeof comments.lineComment === 'object' ? comments.lineComment.comment : comments.lineComment,
+                blockComment: comments.blockComment,
+            } : undefined,
             brackets: configuration.brackets,
             wordPattern: reviveRegExp(configuration.wordPattern),
             indentationRules: reviveIndentationRule(configuration.indentationRules),
@@ -174,7 +176,7 @@ export class LanguagesMainImpl implements LanguagesMain, Disposable {
 
     $registerCompletionSupport(handle: number, pluginInfo: PluginInfo, selector: SerializedDocumentFilter[], triggerCharacters: string[], supportsResolveDetails: boolean): void {
         this.register(handle,
-            (monaco.languages.registerCompletionItemProvider as RegistrationFunction<monaco.languages.CompletionItemProvider>)(this.toLanguageSelector(selector), {
+            monaco.languages.registerCompletionItemProvider(this.toLanguageSelector(selector), {
                 triggerCharacters,
                 provideCompletionItems: (model, position, context, token) => this.provideCompletionItems(handle, model, position, context, token),
                 resolveCompletionItem: supportsResolveDetails
@@ -213,19 +215,19 @@ export class LanguagesMainImpl implements LanguagesMain, Disposable {
     $registerDefinitionProvider(handle: number, pluginInfo: PluginInfo, selector: SerializedDocumentFilter[]): void {
         const languageSelector = this.toLanguageSelector(selector);
         const definitionProvider = this.createDefinitionProvider(handle);
-        this.register(handle, (monaco.languages.registerDefinitionProvider as RegistrationFunction<monaco.languages.DefinitionProvider>)(languageSelector, definitionProvider));
+        this.register(handle, monaco.languages.registerDefinitionProvider(languageSelector, definitionProvider));
     }
 
     $registerDeclarationProvider(handle: number, pluginInfo: PluginInfo, selector: SerializedDocumentFilter[]): void {
         const languageSelector = this.toLanguageSelector(selector);
         const declarationProvider = this.createDeclarationProvider(handle);
-        this.register(handle, (monaco.languages.registerDeclarationProvider as RegistrationFunction<monaco.languages.DeclarationProvider>)(languageSelector, declarationProvider));
+        this.register(handle, monaco.languages.registerDeclarationProvider(languageSelector, declarationProvider));
     }
 
     $registerReferenceProvider(handle: number, pluginInfo: PluginInfo, selector: SerializedDocumentFilter[]): void {
         const languageSelector = this.toLanguageSelector(selector);
         const referenceProvider = this.createReferenceProvider(handle);
-        this.register(handle, (monaco.languages.registerReferenceProvider as RegistrationFunction<monaco.languages.ReferenceProvider>)(languageSelector, referenceProvider));
+        this.register(handle, monaco.languages.registerReferenceProvider(languageSelector, referenceProvider));
     }
 
     protected createReferenceProvider(handle: number): monaco.languages.ReferenceProvider {
@@ -256,8 +258,7 @@ export class LanguagesMainImpl implements LanguagesMain, Disposable {
     $registerSignatureHelpProvider(handle: number, pluginInfo: PluginInfo, selector: SerializedDocumentFilter[], metadata: theia.SignatureHelpProviderMetadata): void {
         const languageSelector = this.toLanguageSelector(selector);
         const signatureHelpProvider = this.createSignatureHelpProvider(handle, metadata);
-        this.register(handle, (monaco.languages.registerSignatureHelpProvider as RegistrationFunction<monaco.languages.SignatureHelpProvider>)
-            (languageSelector, signatureHelpProvider));
+        this.register(handle, monaco.languages.registerSignatureHelpProvider(languageSelector, signatureHelpProvider));
     }
 
     $clearDiagnostics(id: string): void {
@@ -276,8 +277,7 @@ export class LanguagesMainImpl implements LanguagesMain, Disposable {
     $registerImplementationProvider(handle: number, pluginInfo: PluginInfo, selector: SerializedDocumentFilter[]): void {
         const languageSelector = this.toLanguageSelector(selector);
         const implementationProvider = this.createImplementationProvider(handle);
-        this.register(handle, (monaco.languages.registerImplementationProvider as RegistrationFunction<monaco.languages.ImplementationProvider>)
-            (languageSelector, implementationProvider));
+        this.register(handle, monaco.languages.registerImplementationProvider(languageSelector, implementationProvider));
     }
 
     protected createImplementationProvider(handle: number): monaco.languages.ImplementationProvider {
@@ -313,8 +313,7 @@ export class LanguagesMainImpl implements LanguagesMain, Disposable {
     $registerTypeDefinitionProvider(handle: number, pluginInfo: PluginInfo, selector: SerializedDocumentFilter[]): void {
         const languageSelector = this.toLanguageSelector(selector);
         const typeDefinitionProvider = this.createTypeDefinitionProvider(handle);
-        this.register(handle, (monaco.languages.registerTypeDefinitionProvider as RegistrationFunction<monaco.languages.TypeDefinitionProvider>)
-            (languageSelector, typeDefinitionProvider));
+        this.register(handle, monaco.languages.registerTypeDefinitionProvider(languageSelector, typeDefinitionProvider));
     }
 
     protected createTypeDefinitionProvider(handle: number): monaco.languages.TypeDefinitionProvider {
@@ -350,25 +349,32 @@ export class LanguagesMainImpl implements LanguagesMain, Disposable {
     $registerHoverProvider(handle: number, pluginInfo: PluginInfo, selector: SerializedDocumentFilter[]): void {
         const languageSelector = this.toLanguageSelector(selector);
         const hoverProvider = this.createHoverProvider(handle);
-        this.register(handle, (monaco.languages.registerHoverProvider as RegistrationFunction<monaco.languages.HoverProvider>)(languageSelector, hoverProvider));
+        this.register(handle, monaco.languages.registerHoverProvider(languageSelector, hoverProvider));
     }
 
     protected createHoverProvider(handle: number): monaco.languages.HoverProvider {
         return {
-            provideHover: (model, position, token) => this.provideHover(handle, model, position, token)
+            provideHover: (model, position, token, context) =>
+                this.provideHover(handle, model, position, token, context as monaco.languages.HoverContext<HoverWithId> | undefined)
         };
     }
 
     protected provideHover(handle: number, model: monaco.editor.ITextModel, position: monaco.Position,
-        token: monaco.CancellationToken): monaco.languages.ProviderResult<monaco.languages.Hover> {
-        return this.proxy.$provideHover(handle, model.uri, position, token);
+        token: monaco.CancellationToken, context?: monaco.languages.HoverContext<HoverWithId>): monaco.languages.ProviderResult<monaco.languages.Hover> {
+        const serializedContext: monaco.languages.HoverContext<{ id: number }> = {
+            verbosityRequest: context?.verbosityRequest ? {
+                verbosityDelta: context.verbosityRequest.verbosityDelta,
+                previousHover: { id: context.verbosityRequest.previousHover.id }
+            } : undefined,
+        };
+        return this.proxy.$provideHover(handle, model.uri, position, serializedContext, token);
     }
 
     $registerEvaluatableExpressionProvider(handle: number, pluginInfo: PluginInfo, selector: SerializedDocumentFilter[]): void {
         const languageSelector = this.toLanguageSelector(selector);
         const evaluatableExpressionProvider = this.createEvaluatableExpressionProvider(handle);
         this.register(handle,
-            (StandaloneServices.get(ILanguageFeaturesService).evaluatableExpressionProvider.register as RegistrationFunction<EvaluatableExpressionProvider>)
+            (StandaloneServices.get(ILanguageFeaturesService).evaluatableExpressionProvider.register)
                 (languageSelector, evaluatableExpressionProvider));
     }
 
@@ -387,7 +393,7 @@ export class LanguagesMainImpl implements LanguagesMain, Disposable {
         const languageSelector = this.toLanguageSelector(selector);
         const inlineValuesProvider = this.createInlineValuesProvider(handle);
         this.register(handle,
-            (StandaloneServices.get(ILanguageFeaturesService).inlineValuesProvider.register as RegistrationFunction<InlineValuesProvider>)
+            (StandaloneServices.get(ILanguageFeaturesService).inlineValuesProvider.register)
                 (languageSelector, inlineValuesProvider));
     }
 
@@ -413,8 +419,7 @@ export class LanguagesMainImpl implements LanguagesMain, Disposable {
     $registerDocumentHighlightProvider(handle: number, _pluginInfo: PluginInfo, selector: SerializedDocumentFilter[]): void {
         const languageSelector = this.toLanguageSelector(selector);
         const documentHighlightProvider = this.createDocumentHighlightProvider(handle);
-        this.register(handle, (monaco.languages.registerDocumentHighlightProvider as RegistrationFunction<monaco.languages.DocumentHighlightProvider>)
-            (languageSelector, documentHighlightProvider));
+        this.register(handle, monaco.languages.registerDocumentHighlightProvider(languageSelector, documentHighlightProvider));
     }
 
     protected createDocumentHighlightProvider(handle: number): monaco.languages.DocumentHighlightProvider {
@@ -446,6 +451,45 @@ export class LanguagesMainImpl implements LanguagesMain, Disposable {
         });
     }
 
+    $registerMultiDocumentHighlightProvider(handle: number, _pluginInfo: PluginInfo, selector: SerializedDocumentFilter[]): void {
+        const languageSelector = this.toLanguageSelector(selector);
+        const multiDocumentHighlightProvider = this.createMultiDocumentHighlightProvider(handle, languageSelector);
+        this.register(handle,
+            StandaloneServices.get(ILanguageFeaturesService).multiDocumentHighlightProvider.register(languageSelector, multiDocumentHighlightProvider));
+    }
+
+    protected createMultiDocumentHighlightProvider(handle: number, selector: LanguageSelector): MultiDocumentHighlightProvider {
+        return {
+            selector,
+            provideMultiDocumentHighlights: (model, position, otherModels, token) =>
+                // @monaco-uplift: cast due to ITextModel enum incompatibility between internal and standalone API types
+                this.provideMultiDocumentHighlights(handle, model as unknown as monaco.editor.ITextModel, position,
+                    otherModels as unknown as monaco.editor.ITextModel[], token)
+        };
+    }
+
+    protected provideMultiDocumentHighlights(
+        handle: number, model: monaco.editor.ITextModel, position: monaco.Position,
+        otherModels: monaco.editor.ITextModel[], token: monaco.CancellationToken
+    ): monaco.languages.ProviderResult<Map<monaco.Uri, monaco.languages.DocumentHighlight[]>> {
+        const otherResources = otherModels.map(m => m.uri);
+        return this.proxy.$provideMultiDocumentHighlights(handle, model.uri, position, otherResources, token).then(result => {
+            if (!result) {
+                return undefined;
+            }
+            const map = new Map<monaco.Uri, monaco.languages.DocumentHighlight[]>();
+            for (const entry of result) {
+                const uri = monaco.Uri.revive(entry.uri);
+                const highlights: monaco.languages.DocumentHighlight[] = entry.highlights.map(item => ({
+                    ...item,
+                    kind: item.kind ?? monaco.languages.DocumentHighlightKind.Text
+                }));
+                map.set(uri, highlights);
+            }
+            return map;
+        });
+    }
+
     $registerWorkspaceSymbolProvider(handle: number, pluginInfo: PluginInfo): void {
         const workspaceSymbolProvider = this.createWorkspaceSymbolProvider(handle);
         this.register(handle, this.monacoLanguages.registerWorkspaceSymbolProvider(workspaceSymbolProvider));
@@ -469,7 +513,7 @@ export class LanguagesMainImpl implements LanguagesMain, Disposable {
     $registerDocumentLinkProvider(handle: number, pluginInfo: PluginInfo, selector: SerializedDocumentFilter[]): void {
         const languageSelector = this.toLanguageSelector(selector);
         const linkProvider = this.createLinkProvider(handle);
-        this.register(handle, (monaco.languages.registerLinkProvider as RegistrationFunction<monaco.languages.LinkProvider>)(languageSelector, linkProvider));
+        this.register(handle, monaco.languages.registerLinkProvider(languageSelector, linkProvider));
     }
 
     protected createLinkProvider(handle: number): monaco.languages.LinkProvider {
@@ -518,7 +562,7 @@ export class LanguagesMainImpl implements LanguagesMain, Disposable {
             lensProvider.onDidChange = emitter.event;
         }
 
-        this.register(handle, (monaco.languages.registerCodeLensProvider as RegistrationFunction<monaco.languages.CodeLensProvider>)(languageSelector, lensProvider));
+        this.register(handle, monaco.languages.registerCodeLensProvider(languageSelector, lensProvider));
     }
 
     protected createCodeLensProvider(handle: number): monaco.languages.CodeLensProvider {
@@ -560,7 +604,7 @@ export class LanguagesMainImpl implements LanguagesMain, Disposable {
     $registerOutlineSupport(handle: number, pluginInfo: PluginInfo, selector: SerializedDocumentFilter[], displayName?: string): void {
         const languageSelector = this.toLanguageSelector(selector);
         const symbolProvider = this.createDocumentSymbolProvider(handle, displayName);
-        this.register(handle, (monaco.languages.registerDocumentSymbolProvider as RegistrationFunction<monaco.languages.DocumentSymbolProvider>)(languageSelector, symbolProvider));
+        this.register(handle, monaco.languages.registerDocumentSymbolProvider(languageSelector, symbolProvider));
     }
 
     protected createDocumentSymbolProvider(handle: number, displayName?: string): monaco.languages.DocumentSymbolProvider {
@@ -665,8 +709,7 @@ export class LanguagesMainImpl implements LanguagesMain, Disposable {
     $registerDocumentFormattingSupport(handle: number, pluginInfo: PluginInfo, selector: SerializedDocumentFilter[]): void {
         const languageSelector = this.toLanguageSelector(selector);
         const documentFormattingEditSupport = this.createDocumentFormattingSupport(handle, pluginInfo);
-        this.register(handle, (monaco.languages.registerDocumentFormattingEditProvider as RegistrationFunction<monaco.languages.DocumentFormattingEditProvider>)
-            (languageSelector, documentFormattingEditSupport));
+        this.register(handle, monaco.languages.registerDocumentFormattingEditProvider(languageSelector, documentFormattingEditSupport));
     }
 
     createDocumentFormattingSupport(handle: number, pluginInfo: PluginInfo): monaco.languages.DocumentFormattingEditProvider {
@@ -688,8 +731,7 @@ export class LanguagesMainImpl implements LanguagesMain, Disposable {
     $registerRangeFormattingSupport(handle: number, pluginInfo: PluginInfo, selector: SerializedDocumentFilter[]): void {
         const languageSelector = this.toLanguageSelector(selector);
         const rangeFormattingEditProvider = this.createRangeFormattingSupport(handle, pluginInfo);
-        this.register(handle, (monaco.languages.registerDocumentRangeFormattingEditProvider as RegistrationFunction<monaco.languages.DocumentRangeFormattingEditProvider>)
-            (languageSelector, rangeFormattingEditProvider));
+        this.register(handle, monaco.languages.registerDocumentRangeFormattingEditProvider(languageSelector, rangeFormattingEditProvider));
     }
 
     createRangeFormattingSupport(handle: number, pluginInfo: PluginInfo): monaco.languages.DocumentRangeFormattingEditProvider {
@@ -711,8 +753,7 @@ export class LanguagesMainImpl implements LanguagesMain, Disposable {
     $registerOnTypeFormattingProvider(handle: number, pluginInfo: PluginInfo, selector: SerializedDocumentFilter[], autoFormatTriggerCharacters: string[]): void {
         const languageSelector = this.toLanguageSelector(selector);
         const onTypeFormattingProvider = this.createOnTypeFormattingProvider(handle, autoFormatTriggerCharacters);
-        this.register(handle, (monaco.languages.registerOnTypeFormattingEditProvider as RegistrationFunction<monaco.languages.OnTypeFormattingEditProvider>)
-            (languageSelector, onTypeFormattingProvider));
+        this.register(handle, monaco.languages.registerOnTypeFormattingEditProvider(languageSelector, onTypeFormattingProvider));
     }
 
     protected createOnTypeFormattingProvider(
@@ -740,11 +781,9 @@ export class LanguagesMainImpl implements LanguagesMain, Disposable {
         );
     }
 
-    createDocumentDropEditProvider(handle: number, _metadata?: DocumentDropEditProviderMetadata): DocumentDropEditProvider {
+    createDocumentDropEditProvider(handle: number, metadata?: DocumentDropEditProviderMetadata): DocumentDropEditProvider {
         return {
-            // @monaco-uplift id and dropMimeTypes should be supported by the monaco drop editor provider after 1.82.0
-            // id?: string;
-            // dropMimeTypes: metadata?.dropMimeTypes ?? ['*/*'],
+            dropMimeTypes: metadata?.dropMimeTypes ?? ['*/*'],
             provideDocumentDropEdits: async (model, position, dataTransfer, token) => this.provideDocumentDropEdits(handle, model, position, dataTransfer, token)
         };
     }
@@ -765,7 +804,7 @@ export class LanguagesMainImpl implements LanguagesMain, Disposable {
             provider.onDidChange = emitter.event;
         }
 
-        this.register(handle, (monaco.languages.registerFoldingRangeProvider as RegistrationFunction<monaco.languages.FoldingRangeProvider>)(languageSelector, provider));
+        this.register(handle, monaco.languages.registerFoldingRangeProvider(languageSelector, provider));
     }
 
     createFoldingRangeProvider(handle: number): monaco.languages.FoldingRangeProvider {
@@ -789,7 +828,7 @@ export class LanguagesMainImpl implements LanguagesMain, Disposable {
     $registerSelectionRangeProvider(handle: number, pluginInfo: PluginInfo, selector: SerializedDocumentFilter[]): void {
         const languageSelector = this.toLanguageSelector(selector);
         const provider = this.createSelectionRangeProvider(handle);
-        this.register(handle, (monaco.languages.registerSelectionRangeProvider as RegistrationFunction<monaco.languages.SelectionRangeProvider>)(languageSelector, provider));
+        this.register(handle, monaco.languages.registerSelectionRangeProvider(languageSelector, provider));
     }
 
     protected createSelectionRangeProvider(handle: number): monaco.languages.SelectionRangeProvider {
@@ -806,7 +845,7 @@ export class LanguagesMainImpl implements LanguagesMain, Disposable {
     $registerDocumentColorProvider(handle: number, pluginInfo: PluginInfo, selector: SerializedDocumentFilter[]): void {
         const languageSelector = this.toLanguageSelector(selector);
         const colorProvider = this.createColorProvider(handle);
-        this.register(handle, (monaco.languages.registerColorProvider as RegistrationFunction<monaco.languages.DocumentColorProvider>)(languageSelector, colorProvider));
+        this.register(handle, monaco.languages.registerColorProvider(languageSelector, colorProvider));
     }
 
     createColorProvider(handle: number): monaco.languages.DocumentColorProvider {
@@ -857,7 +896,7 @@ export class LanguagesMainImpl implements LanguagesMain, Disposable {
             this.register(eventHandle, emitter);
             inlayHintsProvider.onDidChangeInlayHints = emitter.event;
         }
-        this.register(handle, (monaco.languages.registerInlayHintsProvider as RegistrationFunction<monaco.languages.InlayHintsProvider>)(languageSelector, inlayHintsProvider));
+        this.register(handle, monaco.languages.registerInlayHintsProvider(languageSelector, inlayHintsProvider));
 
     }
 
@@ -916,11 +955,11 @@ export class LanguagesMainImpl implements LanguagesMain, Disposable {
                 context: monaco.languages.InlineCompletionContext,
                 token: CancellationToken
             ): Promise<IdentifiableInlineCompletions | undefined> => this.proxy.$provideInlineCompletions(handle, model.uri, position, context, token),
-            freeInlineCompletions: (completions: IdentifiableInlineCompletions): void => {
+            disposeInlineCompletions: (completions: IdentifiableInlineCompletions): void => {
                 this.proxy.$freeInlineCompletionsList(handle, completions.pid);
             }
         };
-        this.register(handle, (monaco.languages.registerInlineCompletionsProvider as RegistrationFunction<monaco.languages.InlineCompletionsProvider>)(languageSelector, provider));
+        this.register(handle, monaco.languages.registerInlineCompletionsProvider(languageSelector, provider));
     }
 
     $registerQuickFixProvider(
@@ -964,7 +1003,7 @@ export class LanguagesMainImpl implements LanguagesMain, Disposable {
                 dispose: () => this.proxy.$releaseCodeActions(handle, actions.map(a => a.cacheId))
             };
         } catch (e) {
-            console.error(e);
+            this.logger.error(e);
             return undefined;
         }
     }
@@ -998,7 +1037,7 @@ export class LanguagesMainImpl implements LanguagesMain, Disposable {
     $registerRenameProvider(handle: number, pluginInfo: PluginInfo, selector: SerializedDocumentFilter[], supportsResolveLocation: boolean): void {
         const languageSelector = this.toLanguageSelector(selector);
         const renameProvider = this.createRenameProvider(handle, supportsResolveLocation);
-        this.register(handle, (monaco.languages.registerRenameProvider as RegistrationFunction<monaco.languages.RenameProvider>)(languageSelector, renameProvider));
+        this.register(handle, monaco.languages.registerRenameProvider(languageSelector, renameProvider));
     }
 
     protected createRenameProvider(handle: number, supportsResolveLocation: boolean): monaco.languages.RenameProvider {
@@ -1133,12 +1172,12 @@ export class LanguagesMainImpl implements LanguagesMain, Disposable {
             event = emitter.event;
         }
         const provider = this.createDocumentSemanticTokensProvider(handle, legend, event);
-        this.register(handle, (monaco.languages.registerDocumentSemanticTokensProvider as RegistrationFunction<monaco.languages.DocumentSemanticTokensProvider>)
-            (languageSelector, provider));
+        this.register(handle, monaco.languages.registerDocumentSemanticTokensProvider(languageSelector, provider));
     }
 
     protected createDocumentSemanticTokensProvider(handle: number, legend: theia.SemanticTokensLegend, event?: Event<void>): monaco.languages.DocumentSemanticTokensProvider {
         return {
+            onDidChange: event,
             releaseDocumentSemanticTokens: resultId => {
                 if (resultId) {
                     this.proxy.$releaseDocumentSemanticTokens(handle, parseInt(resultId, 10));
@@ -1176,15 +1215,24 @@ export class LanguagesMainImpl implements LanguagesMain, Disposable {
         }
     }
 
-    $registerDocumentRangeSemanticTokensProvider(handle: number, pluginInfo: PluginInfo, selector: SerializedDocumentFilter[], legend: theia.SemanticTokensLegend): void {
+    $registerDocumentRangeSemanticTokensProvider(handle: number, pluginInfo: PluginInfo, selector: SerializedDocumentFilter[], legend: theia.SemanticTokensLegend,
+        eventHandle: number | undefined): void {
         const languageSelector = this.toLanguageSelector(selector);
-        const provider = this.createDocumentRangeSemanticTokensProvider(handle, legend);
-        this.register(handle, (monaco.languages.registerDocumentRangeSemanticTokensProvider as RegistrationFunction<monaco.languages.DocumentRangeSemanticTokensProvider>)
-            (languageSelector, provider));
+        let event: Event<void> | undefined = undefined;
+        if (typeof eventHandle === 'number') {
+            const emitter = new Emitter<void>();
+            this.register(eventHandle, emitter);
+            event = emitter.event;
+        }
+        const provider = this.createDocumentRangeSemanticTokensProvider(handle, legend, event);
+        this.register(handle, monaco.languages.registerDocumentRangeSemanticTokensProvider(languageSelector, provider));
     }
 
-    protected createDocumentRangeSemanticTokensProvider(handle: number, legend: theia.SemanticTokensLegend): monaco.languages.DocumentRangeSemanticTokensProvider {
+    protected createDocumentRangeSemanticTokensProvider(
+        handle: number, legend: theia.SemanticTokensLegend, event?: Event<void>
+    ): monaco.languages.DocumentRangeSemanticTokensProvider {
         return {
+            onDidChange: event,
             getLegend: () => legend,
             provideDocumentRangeSemanticTokens: async (model, range, token) => {
                 const encodedDto = await this.proxy.$provideDocumentRangeSemanticTokens(handle, model.uri, range, token);
@@ -1202,7 +1250,7 @@ export class LanguagesMainImpl implements LanguagesMain, Disposable {
                     };
                 }
                 throw new Error('Unexpected');
-            }
+            },
         };
     }
 
@@ -1234,7 +1282,7 @@ export class LanguagesMainImpl implements LanguagesMain, Disposable {
         const languageSelector = this.toLanguageSelector(selector);
         const linkedEditingRangeProvider = this.createLinkedEditingRangeProvider(handle);
         this.register(handle,
-            (monaco.languages.registerLinkedEditingRangeProvider as RegistrationFunction<monaco.languages.LinkedEditingRangeProvider>)(languageSelector, linkedEditingRangeProvider)
+            monaco.languages.registerLinkedEditingRangeProvider(languageSelector, linkedEditingRangeProvider)
         );
     }
 
@@ -1273,7 +1321,8 @@ function reviveMarker(marker: MarkerData): vst.Diagnostic {
         range: reviveRange(marker.startLineNumber, marker.startColumn, marker.endLineNumber, marker.endColumn),
         message: marker.message,
         source: marker.source,
-        relatedInformation: undefined
+        relatedInformation: undefined,
+        data: marker.data
     };
 
     if (marker.relatedInformation) {

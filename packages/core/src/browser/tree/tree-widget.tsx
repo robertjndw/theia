@@ -21,7 +21,8 @@ import { Key, KeyCode, KeyModifier } from '../keyboard/keys';
 import { ContextMenuRenderer } from '../context-menu-renderer';
 import { StatefulWidget } from '../shell';
 import {
-    EXPANSION_TOGGLE_CLASS, SELECTED_CLASS, COLLAPSED_CLASS, FOCUS_CLASS, BUSY_CLASS, CODICON_TREE_ITEM_CLASSES, CODICON_LOADING_CLASSES, Widget, UnsafeWidgetUtilities
+    EXPANSION_TOGGLE_CLASS, SELECTED_CLASS, COLLAPSED_CLASS, FOCUS_CLASS, BUSY_CLASS, CODICON_TREE_ITEM_CLASSES, CODICON_LOADING_CLASSES, Widget, UnsafeWidgetUtilities,
+    addEventListener
 } from '../widgets';
 import { TreeNode, CompositeTreeNode } from './tree';
 import { TreeModel } from './tree-model';
@@ -40,11 +41,11 @@ import { ElementExt } from '@lumino/domutils';
 import { TreeWidgetSelection } from './tree-widget-selection';
 import { MaybePromise } from '../../common/types';
 import { LabelProvider } from '../label-provider';
-import { CorePreferences } from '../core-preferences';
+import { CorePreferences } from '../../common/core-preferences';
 import { TreeFocusService } from './tree-focus-service';
 import { useEffect } from 'react';
-import { PreferenceService, PreferenceChange } from '../preferences';
-import { PREFERENCE_NAME_TREE_INDENT } from './tree-preference';
+import { PREFERENCE_NAME_TREE_INDENT } from '../../common/tree-preference';
+import { PreferenceService, PreferenceChange } from '../../common/preferences';
 
 const debounce = require('lodash.debounce');
 
@@ -63,25 +64,9 @@ export const TREE_NODE_CAPTION_CLASS = 'theia-TreeNodeCaption';
 export const TREE_NODE_INDENT_GUIDE_CLASS = 'theia-tree-node-indent';
 
 /**
- * Threshold in pixels to consider the view as being scrolled to the bottom
+ * Threshold in pixels to consider the view as being scrolled to the bottom.
  */
 export const SCROLL_BOTTOM_THRESHOLD = 30;
-
-/**
- * Tree scroll event data.
- */
-export interface TreeScrollEvent {
-    readonly scrollTop: number;
-    readonly scrollLeft: number;
-}
-
-/**
- * Tree scroll state data.
- */
-export interface TreeScrollState {
-    readonly scrollTop: number;
-    readonly isAtBottom: boolean;
-}
 
 export const TreeProps = Symbol('TreeProps');
 
@@ -186,8 +171,8 @@ export class TreeWidget extends ReactWidget implements StatefulWidget {
     protected searchBox: SearchBox;
     protected searchHighlights: Map<string, TreeDecoration.CaptionHighlight>;
 
-    protected readonly onScrollEmitter = new Emitter<TreeScrollEvent>();
-    readonly onScroll: TheiaEvent<TreeScrollEvent> = this.onScrollEmitter.event;
+    protected readonly onAtBottomStateChangeEmitter = new Emitter<boolean>();
+    readonly onAtBottomStateChange: TheiaEvent<boolean> = this.onAtBottomStateChangeEmitter.event;
 
     @inject(TreeDecoratorService)
     protected readonly decoratorService: TreeDecoratorService;
@@ -282,7 +267,7 @@ export class TreeWidget extends ReactWidget implements StatefulWidget {
         this.node.addEventListener('mouseup', this.handleMiddleClickEvent.bind(this));
         this.node.addEventListener('auxclick', this.handleMiddleClickEvent.bind(this));
         this.toDispose.pushAll([
-            this.onScrollEmitter,
+            this.onAtBottomStateChangeEmitter,
             this.model,
             this.model.onChanged(() => this.updateRows()),
             this.model.onSelectionChanged(() => this.scheduleUpdateScrollToRow({ resize: false })),
@@ -303,7 +288,7 @@ export class TreeWidget extends ReactWidget implements StatefulWidget {
             }),
             this.preferenceService.onPreferenceChanged((event: PreferenceChange) => {
                 if (event.preferenceName === PREFERENCE_NAME_TREE_INDENT) {
-                    this.treeIndent = event.newValue;
+                    this.treeIndent = this.preferenceService.get<number>(PREFERENCE_NAME_TREE_INDENT, 8);
                     this.update();
                 }
             })
@@ -313,36 +298,49 @@ export class TreeWidget extends ReactWidget implements StatefulWidget {
             this.updateDecorations();
         });
         if (this.props.globalSelection) {
-            this.toDispose.pushAll([
-                this.model.onSelectionChanged(() => {
-                    if (this.node.contains(document.activeElement)) {
-                        this.updateGlobalSelection();
-                    }
-                }),
-                this.focusService.onDidChangeFocus(focus => {
-                    if (focus && this.node.contains(document.activeElement) && this.model.selectedNodes[0] !== focus && this.model.selectedNodes.includes(focus)) {
-                        this.updateGlobalSelection();
-                    }
-                }),
-                Disposable.create(() => {
-                    const selection = this.selectionService.selection;
-                    if (TreeWidgetSelection.isSource(selection, this)) {
-                        this.selectionService.selection = undefined;
-                    }
-                })
-            ]);
-
-            this.node.addEventListener('focusin', e => {
-                if (this.model.selectedNodes.length && (!this.selectionService.selection || !TreeWidgetSelection.isSource(this.selectionService.selection, this))) {
-                    this.updateGlobalSelection();
-                }
-            });
+            this.registerGlobalSelectionHandlers();
         }
+
         this.toDispose.push(this.corePreferences.onPreferenceChanged(preference => {
             if (preference.preferenceName === 'workbench.tree.renderIndentGuides') {
                 this.update();
             }
         }));
+    }
+
+    protected registerGlobalSelectionHandlers(): void {
+        this.model.onSelectionChanged(this.handleGlobalSelectionOnModelSelectionChange, this, this.toDispose);
+        this.focusService.onDidChangeFocus(this.handleGlobalSelectionOnFocusServiceFocusChange, this, this.toDispose);
+        this.toDispose.push(addEventListener(this.node, 'focusin', this.handleGlobalSelectionOnFocusIn.bind(this)));
+        this.toDispose.push(Disposable.create(this.handleGlobalSelectionOnDisposal.bind(this)));
+    }
+
+    protected handleGlobalSelectionOnModelSelectionChange(): void {
+        if (this.shouldUpdateGlobalSelection()) {
+            this.updateGlobalSelection();
+        }
+    }
+
+    protected handleGlobalSelectionOnFocusServiceFocusChange(focus: SelectableTreeNode | undefined): void {
+        if (focus && this.shouldUpdateGlobalSelection() && this.model.selectedNodes[0] !== focus && this.model.selectedNodes.includes(focus)) {
+            this.updateGlobalSelection();
+        }
+    }
+
+    protected handleGlobalSelectionOnFocusIn(): void {
+        if (this.model.selectedNodes.length && (!this.selectionService.selection || !TreeWidgetSelection.isSource(this.selectionService.selection, this))) {
+            this.updateGlobalSelection();
+        }
+    }
+
+    protected handleGlobalSelectionOnDisposal(): void {
+        if (TreeWidgetSelection.isSource(this.selectionService.selection, this)) {
+            this.selectionService.selection = undefined;
+        }
+    }
+
+    protected shouldUpdateGlobalSelection(): boolean {
+        return this.node.contains(document.activeElement) || TreeWidgetSelection.isSource(this.selectionService.selection, this);
     }
 
     /**
@@ -375,6 +373,7 @@ export class TreeWidget extends ReactWidget implements StatefulWidget {
         }
         this.rows = new Map(rowsToUpdate);
         this.update();
+        this.scheduleUpdateScrollToRow();
     }
 
     protected getDepthForNode(node: TreeNode, depths: Map<CompositeTreeNode | undefined, number>): number {
@@ -528,13 +527,13 @@ export class TreeWidget extends ReactWidget implements StatefulWidget {
                 return <this.ScrollingRowRenderer rows={rows} />;
             }
             return <TreeWidget.View
-                ref={view => this.view = (view || undefined)}
+                ref={view => { this.view = (view || undefined); }}
                 width={this.node.offsetWidth}
                 height={this.node.offsetHeight}
                 rows={rows}
                 renderNodeRow={this.renderNodeRow}
                 scrollToRow={this.scrollToRow}
-                onScrollEmitter={this.onScrollEmitter}
+                onAtBottomStateChangeEmitter={this.onAtBottomStateChangeEmitter}
                 {...this.props.viewProps}
             />;
         }
@@ -654,7 +653,8 @@ export class TreeWidget extends ReactWidget implements StatefulWidget {
             aria-label={node.checkboxInfo.accessibilityInformation?.label}
             role={node.checkboxInfo.accessibilityInformation?.role}
             className='theia-input'
-            onClick={event => this.toggleChecked(event)} />;
+            onClick={event => this.toggleChecked(event)}
+            onDoubleClick={event => event.stopPropagation()} />;
     }
 
     protected toggleChecked(event: React.MouseEvent<HTMLElement>): void {
@@ -1183,39 +1183,6 @@ export class TreeWidget extends ReactWidget implements StatefulWidget {
         return this.node;
     }
 
-    /**
-     * Get the current scroll state from the virtualized view.
-     * This should be used instead of accessing the DOM scroll properties directly
-     * when the tree is virtualized.
-     */
-    protected getVirtualizedScrollState(): TreeScrollState | undefined {
-        return this.view?.getScrollState();
-    }
-
-    /**
-     * Check if the tree is scrolled to the bottom.
-     * Works with both virtualized and non-virtualized trees.
-     */
-    isScrolledToBottom(): boolean {
-        if (this.props.virtualized !== false && this.view) {
-            // Use virtualized scroll state
-            const scrollState = this.getVirtualizedScrollState();
-            return scrollState?.isAtBottom ?? true;
-        } else {
-            // Fallback to DOM-based calculation for non-virtualized trees
-            const scrollContainer = this.node;
-            const scrollHeight = scrollContainer.scrollHeight;
-            const scrollTop = scrollContainer.scrollTop;
-            const clientHeight = scrollContainer.clientHeight;
-
-            if (scrollHeight <= clientHeight) {
-                return true;
-            }
-
-            return scrollHeight - scrollTop - clientHeight <= SCROLL_BOTTOM_THRESHOLD;
-        }
-    }
-
     protected override onAfterAttach(msg: Message): void {
         const up = [
             Key.ARROW_UP,
@@ -1426,9 +1393,10 @@ export class TreeWidget extends ReactWidget implements StatefulWidget {
             if (contextMenuPath) {
                 const { x, y } = event.nativeEvent;
                 const args = this.toContextMenuArgs(node);
+                const target = event.currentTarget;
                 setTimeout(() => this.contextMenuRenderer.render({
                     menuPath: contextMenuPath,
-                    context: event.currentTarget,
+                    context: target,
                     anchor: { x, y },
                     args
                 }), 10);
@@ -1639,35 +1607,48 @@ export namespace TreeWidget {
         /**
          * Optional scroll event emitter.
          */
-        onScrollEmitter?: Emitter<TreeScrollEvent>
+        /**
+         * Optional emitter fired when the at-bottom state changes.
+         */
+        onAtBottomStateChangeEmitter?: Emitter<boolean>
     }
     export class View extends React.Component<ViewProps> {
         list: VirtuosoHandle | undefined;
-        private lastScrollState: TreeScrollState = { scrollTop: 0, isAtBottom: true };
+
+        /**
+         * Ensure the selected row is scrolled into view when virtualization finishes updating.
+         */
+        protected readonly scrollIntoViewIfNeeded = () => {
+            const { scrollToRow } = this.props;
+            if (this.list && scrollToRow !== undefined) {
+                this.list.scrollIntoView({
+                    index: scrollToRow,
+                    align: 'center'
+                });
+            }
+        };
+
+        override componentDidMount(): void {
+            this.scrollIntoViewIfNeeded();
+        }
+
+        override componentDidUpdate(prevProps: ViewProps): void {
+            if (this.props.scrollToRow !== prevProps.scrollToRow) {
+                this.scrollIntoViewIfNeeded();
+            }
+        }
 
         override render(): React.ReactNode {
-            const { rows, width, height, scrollToRow, renderNodeRow, onScrollEmitter, ...other } = this.props;
+            const { rows, width, height, scrollToRow, renderNodeRow, onAtBottomStateChangeEmitter, ...other } = this.props;
             return <Virtuoso
-                ref={list => {
+                ref={(list: VirtuosoHandle | null) => {
                     this.list = (list || undefined);
-                    if (this.list && scrollToRow !== undefined) {
-                        this.list.scrollIntoView({
-                            index: scrollToRow,
-                            align: 'center'
-                        });
-                    }
+                    this.scrollIntoViewIfNeeded();
                 }}
-                // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                onScroll={(e: any) => {
-                    const scrollTop = e.target.scrollTop;
-                    const scrollHeight = e.target.scrollHeight;
-                    const clientHeight = e.target.clientHeight;
-                    const isAtBottom = scrollHeight - scrollTop - clientHeight <= SCROLL_BOTTOM_THRESHOLD;
-
-                    // Store scroll state before firing the event to prevent jitter during inference and scrolling
-                    this.lastScrollState = { scrollTop, isAtBottom };
-                    onScrollEmitter?.fire({ scrollTop, scrollLeft: e.target.scrollLeft || 0 });
+                atBottomStateChange={(atBottom: boolean) => {
+                    onAtBottomStateChangeEmitter?.fire(atBottom);
                 }}
+                atBottomThreshold={SCROLL_BOTTOM_THRESHOLD}
                 totalCount={rows.length}
                 itemContent={index => renderNodeRow(rows[index])}
                 width={width}
@@ -1677,10 +1658,6 @@ export namespace TreeWidget {
                 overscan={800}
                 {...other}
             />;
-        }
-
-        getScrollState(): TreeScrollState {
-            return { ...this.lastScrollState };
         }
     }
 }

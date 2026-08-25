@@ -209,22 +209,14 @@ export class TreeViewWelcomeWidget extends TreeWidget {
                     className='theia-button theia-WelcomeViewButton'
                     disabled={!this.isEnabledClick(enablement)}
                     onClick={e => this.openLinkOrCommand(e, node.href)}>
-                    {node.label}
+                    {this.renderLabelWithIcons(node.label)}
                 </button>
             </div>
         );
     }
 
     protected renderTextNode(node: string, textKey: string | number): React.ReactNode {
-        return <span key={`text-${textKey}`}>
-            {this.labelParser.parse(node)
-                .map((segment, index) =>
-                    LabelIcon.is(segment)
-                        ? <span
-                            key={index}
-                            className={codicon(segment.name)}
-                        />
-                        : <span key={index}>{segment}</span>)}</span>;
+        return <span key={`text-${textKey}`}>{this.renderLabelWithIcons(node)}</span>;
     }
 
     protected renderLinkNode(node: ILink, linkKey: string | number, enablement: string | undefined): React.ReactNode {
@@ -233,9 +225,16 @@ export class TreeViewWelcomeWidget extends TreeWidget {
                 className={this.getLinkClassName(node.href, enablement)}
                 title={node.title || ''}
                 onClick={e => this.openLinkOrCommand(e, node.href)}>
-                {node.label}
+                {this.renderLabelWithIcons(node.label)}
             </a>
         );
+    }
+
+    protected renderLabelWithIcons(label: string): React.ReactNode[] {
+        return this.labelParser.parse(label).map((segment, index) =>
+            LabelIcon.is(segment)
+                ? <span key={index} className={codicon(segment.name)} />
+                : <span key={index}>{segment}</span>);
     }
 
     protected getLinkClassName(href: string, enablement: string | undefined): string {
@@ -257,8 +256,7 @@ export class TreeViewWelcomeWidget extends TreeWidget {
         event.stopPropagation();
 
         if (value.startsWith('command:')) {
-            const command = value.replace('command:', '');
-            this.commands.executeCommand(command);
+            open(this.openerService, new URI(value));
         } else if (value.startsWith('file:')) {
             const uri = value.replace('file:', '');
             open(this.openerService, new URI(CodeUri.file(uri).toString()));

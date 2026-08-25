@@ -21,7 +21,7 @@ import { DefaultLanguageModelRegistryImpl, LanguageModel, LanguageModelMetaData,
  * Notifies a client whenever a model is added or removed
  */
 @injectable()
-export class BackendLanguageModelRegistry extends DefaultLanguageModelRegistryImpl {
+export class BackendLanguageModelRegistryImpl extends DefaultLanguageModelRegistryImpl {
 
     private client: LanguageModelRegistryClient | undefined;
 
@@ -45,15 +45,26 @@ export class BackendLanguageModelRegistry extends DefaultLanguageModelRegistryIm
         }
     }
 
+    override async patchLanguageModel<T extends LanguageModel = LanguageModel>(id: string, patch: Partial<T>): Promise<void> {
+        await super.patchLanguageModel(id, patch);
+        if (this.client) {
+            this.client.onLanguageModelUpdated(id);
+        }
+    }
+
     mapToMetaData(model: LanguageModel): LanguageModelMetaData {
         return {
             id: model.id,
             name: model.name,
+            status: model.status,
             vendor: model.vendor,
             version: model.version,
             family: model.family,
             maxInputTokens: model.maxInputTokens,
             maxOutputTokens: model.maxOutputTokens,
+            reasoningSupport: model.reasoningSupport,
+            serverTools: model.serverTools,
+            serverSideCompactionSupport: model.serverSideCompactionSupport,
         };
     }
 }

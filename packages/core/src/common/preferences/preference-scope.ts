@@ -14,11 +14,21 @@
 // SPDX-License-Identifier: EPL-2.0 OR GPL-2.0-only WITH Classpath-exception-2.0
 // *****************************************************************************
 
+/**
+ * An array of preference scopes that are valid in a given context, sorted from more general to more specific
+ */
+export const ValidPreferenceScopes = Symbol('ValidPreferenceScopes');
+
 export enum PreferenceScope {
     Default,
     User,
     Workspace,
-    Folder
+    Folder,
+    /**
+     * Process-lifetime, in-memory scope used by `--session-preference` CLI overrides.
+     * Has the highest precedence and is never persisted to disk.
+     */
+    Session
 }
 
 export namespace PreferenceScope {
@@ -51,18 +61,5 @@ export namespace PreferenceScope {
             }
         }
         return names;
-    }
-
-    export function fromString(strScope: string): PreferenceScope | undefined {
-        switch (strScope) {
-            case 'application':
-                return PreferenceScope.User;
-            case 'window':
-                return PreferenceScope.Folder;
-            case 'resource':
-                return PreferenceScope.Folder;
-            case 'language-overridable':
-                return PreferenceScope.Folder;
-        }
     }
 }

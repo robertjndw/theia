@@ -22,7 +22,7 @@ import {
 } from '../../common';
 import { KeybindingContribution, KeybindingRegistry } from '../keybinding';
 import { WidgetManager } from '../widget-manager';
-import { CommonMenus } from '../common-frontend-contribution';
+import { CommonMenus } from '../common-menus';
 import { ApplicationShell } from './application-shell';
 import { QuickViewService } from '../quick-input';
 
@@ -87,6 +87,11 @@ export abstract class AbstractViewContribution<T extends Widget> implements Comm
         return this.options.defaultWidgetOptions;
     }
 
+    /** The widget ID used for shell operations — `viewContainerId` if set, otherwise `widgetId`. */
+    get effectiveWidgetId(): string {
+        return this.options.viewContainerId || this.options.widgetId;
+    }
+
     get widget(): Promise<T> {
         return this.widgetManager.getOrCreateWidget(this.viewId);
     }
@@ -97,7 +102,7 @@ export abstract class AbstractViewContribution<T extends Widget> implements Comm
 
     async openView(args: Partial<OpenViewArguments> = {}): Promise<T> {
         const shell = this.shell;
-        const widget = await this.widgetManager.getOrCreateWidget(this.options.viewContainerId || this.viewId);
+        const widget = await this.widgetManager.getOrCreateWidget(this.effectiveWidgetId);
         const tabBar = shell.getTabBarFor(widget);
         const area = shell.getAreaFor(widget);
         if (!tabBar) {

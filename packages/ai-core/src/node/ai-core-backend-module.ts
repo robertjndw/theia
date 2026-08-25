@@ -20,6 +20,7 @@ import {
 } from './language-model-frontend-delegate';
 import {
     ConnectionHandler,
+    PreferenceContribution,
     RpcConnectionHandler,
     bindContributionProvider,
 } from '@theia/core';
@@ -41,14 +42,16 @@ import {
     TokenUsageServiceClient,
     TOKEN_USAGE_SERVICE_PATH
 } from '../common';
-import { BackendLanguageModelRegistry } from './backend-language-model-registry';
+import { BackendLanguageModelRegistryImpl } from './backend-language-model-registry';
 import { TokenUsageServiceImpl } from './token-usage-service-impl';
+import { AgentSettingsPreferenceSchema } from '../common/agent-preferences';
+import { bindAICorePreferences } from '../common/ai-core-preferences';
 
 // We use a connection module to handle AI services separately for each frontend.
 const aiCoreConnectionModule = ConnectionContainerModule.create(({ bind, bindBackendService, bindFrontendService }) => {
     bindContributionProvider(bind, LanguageModelProvider);
-    bind(BackendLanguageModelRegistry).toSelf().inSingletonScope();
-    bind(LanguageModelRegistry).toService(BackendLanguageModelRegistry);
+    bind(BackendLanguageModelRegistryImpl).toSelf().inSingletonScope();
+    bind(LanguageModelRegistry).toService(BackendLanguageModelRegistryImpl);
 
     bind(TokenUsageService).to(TokenUsageServiceImpl).inSingletonScope();
 
@@ -107,5 +110,7 @@ const aiCoreConnectionModule = ConnectionContainerModule.create(({ bind, bindBac
 });
 
 export default new ContainerModule(bind => {
+    bind(PreferenceContribution).toConstantValue({ schema: AgentSettingsPreferenceSchema });
+    bindAICorePreferences(bind);
     bind(ConnectionContainerModule).toConstantValue(aiCoreConnectionModule);
 });

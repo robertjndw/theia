@@ -9,6 +9,38 @@ Please see the latest version (`master`) for the most up-to-date information. Pl
 
 ### General
 
+_AI Configuration View_:
+
+The AI Configuration view (`@theia/ai-ide`) has been reworked from a tabbed dock panel into a master–detail tree driven by a new public contribution point, `AiConfigurationCategory`.
+
+- **New package dependency edges:** `@theia/ai-ide` and `@theia/ai-mcp` now depend on `@theia/ai-core-ui`, which hosts the contribution point (`AiConfigurationCategory`, `AiConfigurationCategoryRegistry`), the shared selection model (`AiConfigurationSelectionModel`), and the shared page primitives (`AiSettingsRow`, `AiConfigurationSection`, `SinglePageCategoryRenderer`, `CollectionCategoryRenderer`, …). If you consume the AI configuration UI, add `@theia/ai-core-ui` to your dependencies. `@theia/ai-core-ui` itself now depends on `@theia/preferences`, for the Settings UI's "Open settings.json" command (`PreferencesCommands.OPEN_PREFERENCES_JSON_TOOLBAR`) that the setting rows delegate to for complex values.
+- **Removed widgets:** the per-tab widgets and their `WidgetFactory` registrations were removed — `AIAgentConfigurationWidget`, `AIVariableConfigurationWidget`, `ModelAliasesConfigurationWidget`, `AIToolsConfigurationWidget`, `AISkillsConfigurationWidget`, `AITokenUsageConfigurationWidget`, `AIPromptFragmentsConfigurationWidget` (all `@theia/ai-ide`) and `AIMCPConfigurationWidget` (`@theia/ai-mcp`). The dead base classes (`AIConfigurationBaseWidget`, `AICardGridConfigurationWidget`, `AI{List,Table,Hierarchical}ConfigurationWidget`) were removed as well. Each surface now lives in an `AiConfigurationCategory` contribution with a renderer built from the shared primitives.
+- **Removed components and API:** the widget-era building blocks `ConfigurationSection`, `ExpandableSection` and `PromptVariantRenderer` (`template-settings-renderer.tsx`) were removed from `@theia/ai-ide`; use `AiConfigurationSection` and `VariantSetCard` from `@theia/ai-core-ui` instead. `MCPServerEditor.openEditServer` was dropped from the interface — the MCP server category owns the edit flow now; `openAddServer` and `installFromEntry` are unchanged.
+- **Adding custom categories:** adopters that added their own AI configuration tabs should now register an `AiConfigurationCategory` (bind it to the `AiConfigurationCategory` service identifier). Set `contributed: true` to have it grouped under "Contributed by extensions". See `examples/api-samples` (`SampleChatToolbarConfigurationCategory`) for a minimal end-to-end example.
+- **Selection:** category/item navigation now routes through `AiConfigurationSelectionModel` (`@theia/ai-core-ui`). `AIConfigurationSelectionService` (`@theia/ai-ide`) is retained for the agent/alias domain events it still carries.
+- **Stable entry points:** the command ids `aiConfiguration:open` (`OPEN_AI_CONFIG_VIEW`) and `aiConfiguration:openTools` (`OPEN_AI_CONFIG_VIEW_TOOLS`) and the chat-view toolbar button are unchanged. `OPEN_AI_CONFIG_VIEW(tabId)` still accepts the legacy per-tab widget ids and maps them onto the corresponding category ids.
+
+_ESBuild_:
+
+In addition to `webpack`, Theia is now also supporting [`ESBuild`](https://esbuild.github.io/) for bundling the application (frontend+backend). We will soon deprecate and then remove the `webpack` bundling option. Adopters can already use the ESBuild based bundler simply by deleting their `webpack.config.js`, which will automatically generate an `esbuild.mjs` file upon the next build.
+
+In case you have added your own bundling instructions to the `webpack.config.js`, these need to be migrated to the ESBuild based bundler.
+
+Note that as a part of this change, the `@theia/native-webpack-plugin` dependency has been renamed to `@theia/bundle-plugin`.
+
+The generated ESBuild configuration includes a `sourceMapPathsPlugin` that rewrites the `sources` field of emitted source maps to absolute `file://` URLs. This makes browser and Node debug launch configurations work without any custom `webRoot` or `sourceMapPathOverrides`: a minimal Chrome launch like
+
+```json
+{
+    "name": "Launch Browser Frontend",
+    "type": "chrome",
+    "request": "launch",
+    "url": "http://localhost:3000/"
+}
+```
+
+is sufficient to bind breakpoints in the original sources. If you have a customized `esbuild.mjs` that is not automatically regenerated (because the `gen-esbuild` import was removed), either regenerate it (delete `esbuild.mjs` and rerun `theia build`) or manually add `sourceMapPathsPlugin()` from `@theia/bundle-plugin` to the `plugins` array of each build target. The plugin is a no-op when source maps are disabled (production builds).
+
 _Builtin Extension Pack_:
 
 If you are using the [`eclipse-theia.builtin-extension-pack@1.79.0`](https://open-vsx.org/extension/eclipse-theia/builtin-extension-pack) extension pack you may need to include the [`ms-vscode.js-debug`](https://open-vsx.org/extension/ms-vscode/js-debug) and [`ms-vscode.js-debug-companion`](https://open-vsx.org/extension/ms-vscode/js-debug-companion) plugins for JavaScript debug support.
@@ -58,6 +90,115 @@ For example:
     "**/socket.io-client": "^4.5.3"
 }
 ```
+
+_Terminal Shell Integration Scripts_:
+
+The `@theia/terminal` package now includes shell integration scripts for Bash and Zsh (`packages/terminal/src/node/shell-integrations/`). These scripts are used at runtime by `ShellIntegrationInjector` to inject shell integration into terminal sessions, enabling features such as command history tracking and command separators.
+
+For **browser** applications, the generated webpack configuration automatically copies these scripts to `lib/backend/shell-integrations/` via `CopyWebpackPlugin`.
+
+For **Electron** applications that use custom packaging (e.g. `electron-builder`, `electron-forge`), you must ensure the `shell-integrations` directory is included in your packaged distribution. The scripts must be accessible relative to the compiled `ShellIntegrationInjector` module at `lib/backend/shell-integrations/`. If these files are missing, terminal shell integration will silently fail to activate.
+
+For example, in an `electron-builder` configuration, ensure the `lib/backend/shell-integrations` directory is included via the `files` pattern:
+
+```json
+{
+  "files": [
+    "lib/**/*",
+    "src-gen/**/*"
+  ]
+}
+```
+
+The `lib/**/*` glob already covers `lib/backend/shell-integrations/`. If you use a more restrictive `files` pattern, make sure `lib/backend/shell-integrations/**/*` is explicitly included, as `ShellIntegrationInjector` resolves these scripts relative to `__dirname` (i.e. `lib/backend/`).
+
+### v1.74.0
+
+#### Deprecation of @theia/ai-vercel-ai package
+
+The `@theia/ai-vercel-ai` package has been marked as deprecated and is no longer published on npm. It will be removed from the Theia codebase after a deprecation period. The package only wrapped OpenAI and Anthropic models, both of which are already covered by the dedicated `@theia/ai-openai` and `@theia/ai-anthropic` providers with first-class support.
+
+If your application depends on `@theia/ai-vercel-ai`, migrate as follows:
+
+- **OpenAI models**: use `@theia/ai-openai`. Move `ai-features.vercelAi.openaiApiKey` to `ai-features.openAiOfficial.openAiApiKey` and define models in `ai-features.openAiOfficial.officialOpenAiModels`.
+- **Anthropic models**: use `@theia/ai-anthropic`. Move `ai-features.vercelAi.anthropicApiKey` to `ai-features.anthropic.AnthropicApiKey` and define models in `ai-features.anthropic.AnthropicModels`.
+- **Custom endpoints** (`ai-features.vercelAi.customModels`): split entries by their `provider` field into the matching provider-specific preference:
+  - `provider: 'openai'` → `ai-features.openAiCustom.customOpenAiModels`
+  - `provider: 'anthropic'` → `ai-features.anthropicCustom.customAnthropicModels`
+
+The dedicated provider preferences offer the same fields plus additional ones (e.g. Azure `apiVersion`/`deployment`, `useResponseApi`, `reasoningSupport` for OpenAI; `useCaching`, `maxRetries` for Anthropic).
+
+#### `AiConfigurationService` for reading/writing AI preferences
+
+A new framework API, `AiConfigurationService` (`@theia/ai-core`), wraps `PreferenceService` for `ai-features.*` preferences and is the intended extension point for reading/writing AI configuration.
+
+**Adopter-facing:**
+
+- Prefer `AiConfigurationService` over `PreferenceService` for `ai-features.*` keys in frontend code. Its `get`/`inspect` are workspace-trust-aware (workspace/folder values are suppressed while the workspace is untrusted); writes (`set`/`update`) are never gated by trust.
+- **Behavior change:** the AI terminal's shell-command allowlist/denylist (`ai-features.terminal.shellCommand{Allowlist,Denylist}`) are now read trust-aware via `AiConfigurationService`. Previously they were read with a raw `PreferenceService.get`, so an untrusted workspace could contribute allowlist entries. Now workspace/folder-scoped entries are suppressed until the workspace is trusted (an untrusted workspace can no longer widen the shell allowlist). User- and default-scoped entries are unaffected.
+
+### v1.73.0
+
+#### Custom agents reorganized into per-agent folders [#17523](https://github.com/eclipse-theia/theia/pull/17523)
+
+Custom agents are no longer stored in a single `customAgents.yml` per scope. Each agent now lives in its own folder, `<scope>/agents/<id>/agent.md`, with YAML frontmatter (`name`, `description`, `defaultLLM`, `showInChat`) and the prompt body below it, matching the existing `SKILL.md` pattern (scopes are the workspace `.prompts/` directory and `~/.theia/prompt-templates`).
+
+**End-user-facing:**
+
+- When an existing `customAgents.yml` is found, Theia asks before migrating it to the new layout: a notification offers **Migrate** or **Don't Show Again**. Nothing is written until you choose **Migrate**, which avoids unexpected file changes (for example in a workspace under version control). Declining is safe: legacy `customAgents.yml` files keep being loaded so agents continue to work, and you are asked again next session until you either migrate or dismiss the prompt for good with **Don't Show Again** (remembered in local storage, not a setting). After a successful migration the `customAgents.yml` is renamed to `customAgents.yml.bak` (never deleted); restoring it is a matter of renaming the `.bak` back by hand. The migration can also be triggered at any time from the command palette via `AI: Re-run custom-agent migration`.
+- Prompts stored as a YAML _folded_ block scalar (`prompt: >-`) keep their markdown heading structure: the folded scalar would otherwise merge each heading into the following paragraph (e.g. `## Task Your task is ...`), so migration and runtime loading preserve the original line breaks instead. If an earlier Theia version already migrated such an agent with merged headings, the generated `agent.md` is corrected automatically on the next migration, but only when you have not edited it since (the corrected content is rewritten from `customAgents.yml.bak`; user-modified files are left untouched).
+- The default prompt-override file created by "Edit prompt" changed from `<agent-name>_prompt.prompttemplate` to `prompt.prompttemplate` inside the agent folder. Existing sibling `<agent-name>_prompt*.prompttemplate` files are moved into the agent folder during migration.
+
+**Adopter-facing:**
+
+- `PromptFragmentCustomizationService` gained the required methods `createCustomAgentFile`, `migrateCustomAgentsYaml` and `hasPendingCustomAgentMigration`. If you implement this interface directly, you must provide them. The `migrateCustomAgentsYaml()` report objects also carry a `corrected` count in addition to the migration counts.
+- `PromptFragmentCustomizationService.getCustomAgentsLocations()` now returns `CustomAgentsLocation[]`. Each element gained a required `kind: 'agents-dir' | 'legacy-yaml'` field, and the result interleaves per-agent `agents/` directory entries with legacy `customAgents.yml` entries (one of each per scope). Code that previously iterated the result assuming only `customAgents.yml` files should branch on `kind` instead.
+
+#### Custom agents default to the `.agents` workspace folder
+
+Custom agents are now scanned from both the `.agents/` and `.prompts/` folders of each workspace root, independent of the `ai-features.promptTemplates.WorkspaceTemplateDirectories` preference. `.agents/` is preferred and is the default location for newly created agents (matching the skills convention introduced in [#17553](https://github.com/eclipse-theia/theia/pull/17553)); `.prompts/agents/` continues to be discovered for backward compatibility.
+
+**End-user-facing:**
+
+- New custom agents are created under `.agents/agents/<id>/agent.md` by default. Existing agents under `.prompts/agents/` keep working and are still listed as a creation location.
+
+**Adopter-facing:**
+
+- `PromptFragmentCustomizationProperties` gained an optional `agentDirectoryPaths` field carrying the absolute parent directories scanned for custom agents. The `.agents`/`.prompts` parents are exported as `CUSTOM_AGENT_WORKSPACE_DIRECTORIES`.
+
+### v1.70.0
+
+#### Removal of deprecated @theia/git extension from Theia codebase [#17148](https://github.com/eclipse-theia/theia/pull/17148)
+
+The `@theia/git` extension has been completely removed from the Theia codebase.
+This extension was deprecated since v1.58.0 and stopped being published in v1.61.0.
+
+If your application still depends on `@theia/git`, you must migrate to the built-in VS Code Git extension, which provides the same feature set and is actively maintained. Remove any references to `@theia/git` from your application's dependencies and ensure the VS Code Git extension is included in your application, either through the builtin extension pack or by explicitly adding it to your plugins configuration.
+
+### v1.65.0
+
+#### Browser-only Filesystem Improvements [#16187](https://github.com/eclipse-theia/theia/pull/16187)
+
+Browser-only filesystem refactored to use OPFS API with web workers.
+
+Key changes:
+
+- `OPFSFileSystemProvider` completely rewritten - extensions inheriting from old implementation need alignment
+- `FileUploadService` moved from `@theia/filesystem/lib/browser/file-upload-service` to `@theia/filesystem/lib/common/upload/file-upload`, now bound with symbol key and separate `FileUploadServiceImpl`
+- `FileDownloadService` moved from `file-download-data.ts` to `file-download.ts`, now bound with symbol key and separate `FileDownloadServiceImpl`
+- `NodeFileUploadService` moved from `src/node/node-file-upload-service.ts` to `src/node/upload/node-file-upload-service.ts`
+- `OPFSInitialization.getRootDirectory()` returns `Promise<string> | string` instead of `Promise<FileSystemDirectoryHandle>` - Just return the root of your filesystem as a string instead of the directory handle
+
+#### Make Preferences available in the backend [#16017](https://github.com/eclipse-theia/theia/pull/16017)
+
+The PR makes preferences support available in the backend. Only default and user preferences can be accessed in the backend. The API has changed in the following ways:
+- Many files have been moved from the "browser" folder to the "common" folder. Imports will have to be adapted
+- `PreferenceSchemaProvider` has been replaced by two separate `PreferenceSchemaServiceImpl` (and corresponding interface) and `DefaultsPreferenceProvider` classes.
+- Preference schema typing has been simplified: a preference schema is no longer extending IJSONSchema and typing has been adapted to strictly
+use Theia types (for example for scopes) and a straight-forward extension of standard IJSONSchema for properties. This means schemas from VS Code (contributed) must be converted to Theia format.
+- PrefenceSchemaService separates between adding a schema and registering a default override for a property. Also, the service uses explicit override identifiers instead of encoding the override in the preference key. The service strictly distinguishes between preference schema and the derived JSON Schema for preference files. `JSONValue` is used instead of `any` where applicable. Schema properties must be added before overrides are registered.
+`PreferenceSchemaService` now has the concept of`validScopes`. In the backend, only`Default` and `User` can be used. As a consequence, a preference provider for a particular preference scope might not be bound. Do not inject a preference provider with `@inject(PreferenceProvider) @named(<preference scope>)`, inject and use `PreferenceProviderProvider` instead.
+- `PreferenceContribution` now has a `initSchema()` method in addition to the declarative Schema contribution. It is used to register overrides.  
 
 ### v1.62.0
 
@@ -129,7 +270,7 @@ This also means that `electron-remote` can no longer be used in components in `e
 
 See `/packages/filesystem/package.json` for an example
 
-4. Implement the API on the electron-main side by contributing a `ElectronMainApplicationContribution`. See `packages/filesystem/electron-main/electron-api-main.ts` for an example. If you don't have a module contributing to the electron-main application, you may have to declare it in your package.json.
+1. Implement the API on the electron-main side by contributing a `ElectronMainApplicationContribution`. See `packages/filesystem/electron-main/electron-api-main.ts` for an example. If you don't have a module contributing to the electron-main application, you may have to declare it in your package.json.
 
 ```
 "theiaExtensions": [

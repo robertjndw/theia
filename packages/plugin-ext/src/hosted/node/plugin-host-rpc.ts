@@ -16,6 +16,11 @@
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
+// The plugin host routes console.* calls itself and has no ILogger available.
+/* eslint-disable @theia/named-logger-check */
+
+import * as path from 'path';
+import { pathToFileURL } from 'node:url';
 import { dynamicRequire, removeFromCache } from '@theia/core/lib/node/dynamic-require';
 import { ContainerModule, inject, injectable, postConstruct, unmanaged } from '@theia/core/shared/inversify';
 import { AbstractPluginManagerExtImpl, PluginHost, PluginManagerExtImpl } from '../../plugin/plugin-manager';
@@ -23,7 +28,7 @@ import {
     MAIN_RPC_CONTEXT, Plugin, PluginAPIFactory, PluginManager,
     LocalizationExt
 } from '../../common/plugin-api-rpc';
-import { PluginMetadata, PluginModel } from '../../common/plugin-protocol';
+import { PluginMetadata, PluginModel, PluginPackage } from '../../common/plugin-protocol';
 import { createAPIFactory } from '../../plugin/plugin-context';
 import { EnvExtImpl } from '../../plugin/env';
 import { PreferenceRegistryExtImpl } from '../../plugin/preference-registry';
@@ -33,7 +38,7 @@ import { EditorsAndDocumentsExtImpl } from '../../plugin/editors-and-documents';
 import { WorkspaceExtImpl } from '../../plugin/workspace';
 import { MessageRegistryExt } from '../../plugin/message-registry';
 import { ClipboardExt } from '../../plugin/clipboard-ext';
-import { loadManifest } from './plugin-manifest-loader';
+import { loadManifest } from '@theia/plugin-utils/lib/node/plugin-manifest';
 import { KeyValueStorageProxy } from '../../plugin/plugin-storage';
 import { WebviewsExtImpl } from '../../plugin/webviews';
 import { TerminalServiceExtImpl } from '../../plugin/terminal-ext';
@@ -68,6 +73,11 @@ export interface ExtInterfaces {
 export type RpcKeys<EXT extends Partial<ExtInterfaces>> = Partial<Record<keyof EXT, ProxyIdentifier<any>>> & {
     $pluginManager: ProxyIdentifier<any>;
 };
+
+// Hide the dynamic `import()` inside `new Function` so that bundlers and
+// transpilers targeting CommonJS (tsc, esbuild, webpack) cannot statically
+// rewrite it into `Promise.resolve(require(...))`.
+const importESMPlugin = new Function('url', 'return import(url)') as (url: string) => Promise<any>;
 
 export const PluginContainerModuleLoader = Symbol('PluginContainerModuleLoader');
 /**
@@ -158,6 +168,24 @@ export abstract class AbstractPluginHostRPC<PM extends AbstractPluginManagerExtI
     }
 
     /**
+     * Determine whether a plugin should be loaded via ESM `import()` instead of
+     * CommonJS `require()`. Mirrors Node's own rules:
+     *   - `.mjs` is always ESM
+     *   - `.cjs` is always CJS
+     *   - any other extension falls back to the `package.json` `type` field
+     */
+    protected isESMPlugin(plugin: Plugin): boolean {
+        const ext = path.extname(plugin.pluginPath || '').toLowerCase();
+        if (ext === '.mjs') {
+            return true;
+        }
+        if (ext === '.cjs') {
+            return false;
+        }
+        return plugin.rawModel.type === 'module';
+    }
+
+    /**
      * Create the {@link PluginHost} that is required by my plugin manager ext interface to delegate
      * critical behaviour such as loading and initializing plugins to me.
      */
@@ -172,9 +200,13 @@ export abstract class AbstractPluginHostRPC<PM extends AbstractPluginManagerExtI
                 // https://github.com/eclipse-theia/theia/pull/4931
                 // https://github.com/nodejs/node/issues/8443
                 removeFromCache(mod => mod.id.startsWith(plugin.pluginFolder));
-                if (plugin.pluginPath) {
-                    return dynamicRequire(plugin.pluginPath);
+                if (!plugin.pluginPath) {
+                    return undefined;
                 }
+                if (self.isESMPlugin(plugin)) {
+                    return importESMPlugin(pathToFileURL(plugin.pluginPath).href);
+                }
+                return dynamicRequire(plugin.pluginPath);
             },
             async init(raw: PluginMetadata[]): Promise<[Plugin[], Plugin[]]> {
                 console.log(self.banner, 'PluginManagerExtImpl/init()');
@@ -185,7 +217,7 @@ export abstract class AbstractPluginHostRPC<PM extends AbstractPluginManagerExtI
                         const pluginModel = plg.model;
                         const pluginLifecycle = plg.lifecycle;
 
-                        const rawModel = await loadManifest(pluginModel.packagePath);
+                        const rawModel = await loadManifest<PluginPackage>(pluginModel.packagePath);
                         rawModel.packagePath = pluginModel.packagePath;
                         if (pluginModel.entryPoint!.frontend) {
                             foreign.push({

@@ -14,7 +14,7 @@
 // SPDX-License-Identifier: EPL-2.0 OR GPL-2.0-only WITH Classpath-exception-2.0
 // *****************************************************************************
 
-import { inject, injectable } from '@theia/core/shared/inversify';
+import { inject, injectable, named } from '@theia/core/shared/inversify';
 import { CancellationToken, CancellationTokenSource, ILogger, generateUuid } from '@theia/core';
 import {
     LanguageModelMetaData,
@@ -30,13 +30,13 @@ import {
     isLanguageModelParsedResponse,
     UserRequest,
 } from '../common';
-import { BackendLanguageModelRegistry } from './backend-language-model-registry';
+import { BackendLanguageModelRegistryImpl } from './backend-language-model-registry';
 
 @injectable()
 export class LanguageModelRegistryFrontendDelegateImpl implements LanguageModelRegistryFrontendDelegate {
 
     @inject(LanguageModelRegistry)
-    private registry: BackendLanguageModelRegistry;
+    private registry: BackendLanguageModelRegistryImpl;
 
     setClient(client: LanguageModelRegistryClient): void {
         this.registry.setClient(client);
@@ -53,8 +53,8 @@ export class LanguageModelFrontendDelegateImpl implements LanguageModelFrontendD
     @inject(LanguageModelRegistry)
     private registry: LanguageModelRegistry;
 
-    @inject(ILogger)
-    private logger: ILogger;
+    @inject(ILogger) @named('ai-core:LanguageModelFrontendDelegateImpl')
+    protected readonly logger: ILogger;
 
     private frontendDelegateClient: LanguageModelDelegateClient;
     private requestCancellationTokenMap: Map<string, CancellationTokenSource> = new Map();
@@ -80,7 +80,7 @@ export class LanguageModelFrontendDelegateImpl implements LanguageModelFrontendD
             );
         }
         request.tools?.forEach(tool => {
-            tool.handler = async args_string => this.frontendDelegateClient.toolCall(requestId, tool.id, args_string);
+            tool.handler = async (args_string, ctx) => this.frontendDelegateClient.toolCall(requestId, tool.id, args_string, ctx?.toolCallId);
         });
         if (cancellationToken) {
             const tokenSource = new CancellationTokenSource();

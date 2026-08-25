@@ -20,7 +20,8 @@ import { CommandRegistry as LuminoCommandRegistry } from '@lumino/commands';
 import {
     environment, DisposableCollection,
     AcceleratorSource,
-    ArrayUtils
+    ArrayUtils,
+    PreferenceService
 } from '../../common';
 import { KeybindingRegistry } from '../keybinding';
 import { FrontendApplication } from '../frontend-application';
@@ -29,8 +30,7 @@ import { ContextKeyService, ContextMatcher } from '../context-key-service';
 import { ContextMenuContext } from './context-menu-context';
 import { Message, waitForRevealed } from '../widgets';
 import { ApplicationShell } from '../shell';
-import { CorePreferences } from '../core-preferences';
-import { PreferenceService } from '../preferences/preference-service';
+import { CorePreferences } from '../../common/core-preferences';
 import { ElementExt } from '@lumino/domutils';
 import { CommandMenu, CompoundMenuNode, MAIN_MENU_BAR, MenuNode, MenuPath, RenderedMenuNode, Submenu } from '../../common/menu/menu-types';
 import { MenuModelRegistry } from '../../common/menu/menu-model-registry';
@@ -71,7 +71,7 @@ export class BrowserMainMenuFactory implements MenuWidgetFactory {
         const disposable = new DisposableCollection(
             this.corePreferences.onPreferenceChanged(change => {
                 if (change.preferenceName === 'window.menuBarVisibility') {
-                    this.showMenuBar(menuBar, change.newValue);
+                    this.showMenuBar(menuBar, this.corePreferences['window.menuBarVisibility']);
                 }
             }),
             this.keybindingRegistry.onKeybindingsChanged(() => {
@@ -143,7 +143,14 @@ export class DynamicMenuBarWidget extends MenuBarWidget {
     protected previousFocusedElement: HTMLElement | undefined;
 
     constructor() {
-        super();
+        // Disable Lumino's overflow menu feature. The feature has a bug where
+        // `onUpdateRequest` consumes a stale `_overflowIndex` (only recomputed at the
+        // end of the method), which causes a RangeError when the menu bar is rendered
+        // at zero width. Additionally, Theia's CSS does not constrain the menu bar's
+        // offsetWidth to the available space, so the overflow detection never triggers.
+        // See https://github.com/eclipse-theia/theia/issues/17352
+        // See https://github.com/jupyterlab/lumino/issues/811
+        super({ overflowMenuOptions: { isVisible: false } });
         // HACK we need to hook in on private method _openChildMenu. Don't do this at home!
         DynamicMenuBarWidget.prototype['_openChildMenu'] = () => {
             if (this.activeMenu instanceof DynamicMenuWidget) {
@@ -212,7 +219,7 @@ export class MenuServices {
 }
 
 export interface MenuWidgetFactory {
-    createMenuWidget(effectiveMenuPath: MenuPath, menu: Submenu, contextMatcher: ContextMatcher, options: BrowserMenuOptions): MenuWidget;
+    createMenuWidget(effectiveMenuPath: MenuPath, menu: Submenu, contextMatcher: ContextMatcher, options: BrowserMenuOptions, args?: unknown[]): MenuWidget;
 }
 
 /**
@@ -251,8 +258,8 @@ export class DynamicMenuWidget extends MenuWidget {
     }
 
     protected override onBeforeDetach(msg: Message): void {
-        this.node.ownerDocument.removeEventListener('pointerdown', this);
-        super.onAfterDetach(msg);
+        this.node.ownerDocument.removeEventListener('pointerdown', this, true);
+        super.onBeforeDetach(msg);
     }
 
     override handleEvent(event: Event): void {
@@ -321,11 +328,11 @@ export class DynamicMenuWidget extends MenuWidget {
         const result: MenuWidget.IItemOptions[] = [];
 
         for (const node of nodes) {
-            const nodePath = [...parentPath, node.id];
+            const nodePath = node.effectiveMenuPath || [...parentPath, node.id];
             if (node.isVisible(nodePath, contextMatcher, context, ...(this.args || []))) {
                 if (CompoundMenuNode.is(node)) {
                     if (RenderedMenuNode.is(node)) {
-                        const submenu = this.services.menuWidgetFactory.createMenuWidget(nodePath, node, this.contextMatcher, this.options);
+                        const submenu = this.services.menuWidgetFactory.createMenuWidget(nodePath, node, this.contextMatcher, this.options, this.args);
                         if (submenu.items.length > 0) {
                             result.push({ type: 'submenu', submenu });
                         }
@@ -342,10 +349,20 @@ export class DynamicMenuWidget extends MenuWidget {
 
                 } else if (CommandMenu.is(node)) {
                     const id = !phCommandRegistry.hasCommand(node.id) ? node.id : `${node.id}:${DynamicMenuWidget.nextCommmandId++}`;
+                    const enabled = node.isEnabled(nodePath, ...(this.args || []));
+                    const toggled = node.isToggled ? !!node.isToggled(nodePath, ...(this.args || [])) : false;
                     phCommandRegistry.addCommand(id, {
-                        execute: () => { node.run(nodePath, ...(this.args || [])); },
-                        isEnabled: () => node.isEnabled(nodePath, ...(this.args || [])),
-                        isToggled: () => node.isToggled ? !!node.isToggled(nodePath, ...(this.args || [])) : false,
+                        execute: () => {
+                            // Restore focus to the previously focused element before executing
+                            // the command so that focus-dependent commands like clipboard
+                            // operations target the correct element instead of the menu.
+                            if (this.previousFocusedElement) {
+                                this.previousFocusedElement.focus({ preventScroll: true });
+                            }
+                            node.run(nodePath, ...(this.args || []));
+                        },
+                        isEnabled: () => enabled,
+                        isToggled: () => toggled,
                         isVisible: () => true,
                         label: node.label,
                         iconClass: node.icon,
@@ -440,7 +457,7 @@ export class BrowserMenuBarContribution implements FrontendApplicationContributi
             });
             this.preferenceService.onPreferenceChanged(change => {
                 if (change.preferenceName === 'window.menuBarVisibility') {
-                    menu.setHidden(['compact', 'hidden'].includes(change.newValue));
+                    menu.setHidden(['compact', 'hidden'].includes(this.preferenceService.get('window.menuBarVisibility', 'classic')));
                 }
             });
         }

@@ -15,15 +15,18 @@
 // *****************************************************************************
 
 import { inject, injectable, postConstruct } from 'inversify';
-import { Command, CommandContribution, CommandRegistry, isOSX, isWindows, MenuModelRegistry, MenuContribution, Disposable, nls } from '../../common';
 import {
-    codicon, ConfirmDialog, KeybindingContribution, KeybindingRegistry, PreferenceScope, Widget,
-    FrontendApplication, FrontendApplicationContribution, CommonMenus, CommonCommands, Dialog, Message, ApplicationShell, PreferenceService, animationFrame,
+    Command, CommandContribution, CommandRegistry, isOSX, isWindows, MenuModelRegistry,
+    MenuContribution, Disposable, nls, PreferenceScope, PreferenceService
+} from '../../common';
+import {
+    codicon, ConfirmDialog, KeybindingContribution, KeybindingRegistry, Widget,
+    FrontendApplication, FrontendApplicationContribution, CommonMenus, CommonCommands, Dialog, Message, ApplicationShell, animationFrame,
 } from '../../browser';
 import { ElectronMainMenuFactory } from './electron-main-menu-factory';
 import { FrontendApplicationStateService, FrontendApplicationState } from '../../browser/frontend-application-state';
 import { FrontendApplicationConfigProvider } from '../../browser/frontend-application-config-provider';
-import { ZoomLevel } from '../window/electron-window-preferences';
+import { PREF_WINDOW_ZOOM_LEVEL, ZoomLevel } from '../../electron-common/electron-window-preferences';
 import { BrowserMenuBarContribution } from '../../browser/menu/browser-menu-plugin';
 import { WindowService } from '../../browser/window/window-service';
 import { WindowTitleService } from '../../browser/window/window-title-service';
@@ -136,13 +139,13 @@ export class ElectronMenuContribution extends BrowserMenuBarContribution impleme
         const disposeHandler = window.electronTheiaCore.onWindowEvent('focus', () => {
             this.setMenu(app);
         });
-        window.addEventListener('unload', () => disposeHandler.dispose());
+        window.addEventListener('pagehide', () => disposeHandler.dispose());
     }
 
     protected attachMenuBarVisibilityListener(): void {
         this.preferenceService.onPreferenceChanged(e => {
             if (e.preferenceName === 'window.menuBarVisibility') {
-                this.handleFullScreen(e.newValue);
+                this.handleFullScreen(this.preferenceService.get('window.menuBarVisibility', 'classic'));
             }
         });
     }
@@ -153,7 +156,18 @@ export class ElectronMenuContribution extends BrowserMenuBarContribution impleme
             this.titleBarStyle = style;
             this.setMenu(app);
             this.preferenceService.ready.then(() => {
-                this.preferenceService.set('window.titleBarStyle', this.titleBarStyle, PreferenceScope.User);
+                const current = this.preferenceService.inspect('window.titleBarStyle');
+                const defaultActive = current?.globalValue === undefined;
+                const currentValueActive = !current // Preference undefined -> current value only source of truth.
+                    || (defaultActive && this.titleBarStyle === current?.defaultValue)
+                    || (!defaultActive && this.titleBarStyle === current.globalValue);
+                if (!currentValueActive) {
+                    this.preferenceService.set('window.titleBarStyle', this.titleBarStyle, PreferenceScope.User);
+                }
+                // Enable the change flag after initialization is complete.
+                // This ensures that user-initiated changes will trigger a restart,
+                // while the synchronization change above (if any) is ignored.
+                this.titleBarStyleChangeFlag = true;
             });
         });
 
@@ -163,11 +177,11 @@ export class ElectronMenuContribution extends BrowserMenuBarContribution impleme
 
         this.preferenceService.onPreferenceChanged(change => {
             if (change.preferenceName === 'window.titleBarStyle') {
-                if (this.titleBarStyleChangeFlag && this.titleBarStyle !== change.newValue) {
-                    window.electronTheiaCore.setTitleBarStyle(change.newValue);
+                const newTitleBarStyle = this.preferenceService.get<string>('window.titleBarStyle', 'native');
+                if (this.titleBarStyleChangeFlag && this.titleBarStyle !== newTitleBarStyle) {
+                    window.electronTheiaCore.setTitleBarStyle(newTitleBarStyle);
                     this.handleRequiredRestart();
                 }
-                this.titleBarStyleChangeFlag = true;
             }
         });
     }
@@ -302,7 +316,7 @@ export class ElectronMenuContribution extends BrowserMenuBarContribution impleme
                     zoomLevel = ZoomLevel.MAX;
                     return;
                 };
-                this.preferenceService.set('window.zoomLevel', zoomLevel, PreferenceScope.User);
+                this.preferenceService.set(PREF_WINDOW_ZOOM_LEVEL, zoomLevel, PreferenceScope.User);
             }
         });
         registry.registerCommand(ElectronCommands.ZOOM_OUT, {
@@ -314,11 +328,11 @@ export class ElectronMenuContribution extends BrowserMenuBarContribution impleme
                     zoomLevel = ZoomLevel.MIN;
                     return;
                 };
-                this.preferenceService.set('window.zoomLevel', zoomLevel, PreferenceScope.User);
+                this.preferenceService.set(PREF_WINDOW_ZOOM_LEVEL, zoomLevel, PreferenceScope.User);
             }
         });
         registry.registerCommand(ElectronCommands.RESET_ZOOM, {
-            execute: () => this.preferenceService.set('window.zoomLevel', ZoomLevel.DEFAULT, PreferenceScope.User)
+            execute: () => this.preferenceService.set(PREF_WINDOW_ZOOM_LEVEL, ZoomLevel.DEFAULT, PreferenceScope.User)
         });
 
         registry.registerCommand(ElectronCommands.TOGGLE_FULL_SCREEN, {
@@ -332,7 +346,7 @@ export class ElectronMenuContribution extends BrowserMenuBarContribution impleme
         registry.registerKeybindings(
             {
                 command: ElectronCommands.TOGGLE_DEVELOPER_TOOLS.id,
-                keybinding: 'ctrlcmd+alt+i'
+                keybinding: 'alt+f12'
             },
             {
                 command: ElectronCommands.RELOAD.id,

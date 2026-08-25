@@ -14,31 +14,30 @@
 // SPDX-License-Identifier: EPL-2.0 OR GPL-2.0-only WITH Classpath-exception-2.0
 // *****************************************************************************
 
-import { DisposableCollection, Emitter, Event, MessageService, nls, ProgressService, WaitUntilEvent } from '@theia/core';
-import { LabelProvider, ApplicationShell, ConfirmDialog } from '@theia/core/lib/browser';
+import { DisposableCollection, Emitter, Event, MessageService, nls, ProgressService, WaitUntilEvent, ILogger } from '@theia/core';
+import { ApplicationShell, ConfirmDialog } from '@theia/core/lib/browser';
 import { ContextKey, ContextKeyService } from '@theia/core/lib/browser/context-key-service';
+import { WindowService } from '@theia/core/lib/browser/window/window-service';
 import URI from '@theia/core/lib/common/uri';
-import { EditorManager } from '@theia/editor/lib/browser';
+import { inject, injectable, postConstruct, named } from '@theia/core/shared/inversify';
+import * as monaco from '@theia/monaco-editor-core';
 import { QuickOpenTask } from '@theia/task/lib/browser/quick-open-task';
-import { TaskService, TaskEndedInfo, TaskEndedTypes } from '@theia/task/lib/browser/task-service';
+import { TaskEndedInfo, TaskEndedTypes, TaskService } from '@theia/task/lib/browser/task-service';
+import { TaskIdentifier } from '@theia/task/lib/common';
 import { VariableResolverService } from '@theia/variable-resolver/lib/browser';
-import { inject, injectable, postConstruct } from '@theia/core/shared/inversify';
+import { WorkspaceTrustService } from '@theia/workspace/lib/browser';
 import { DebugConfiguration } from '../common/debug-common';
+import { DebugPreferences } from '../common/debug-preferences';
 import { DebugError, DebugService } from '../common/debug-service';
 import { BreakpointManager } from './breakpoint/breakpoint-manager';
+import { DebugVariable } from './console/debug-console-items';
 import { DebugConfigurationManager } from './debug-configuration-manager';
 import { DebugSession, DebugState, debugStateContextValue } from './debug-session';
+import { DebugSessionConfigurationLabelProvider } from './debug-session-configuration-label-provider';
 import { DebugSessionContributionRegistry, DebugSessionFactory } from './debug-session-contribution';
 import { DebugCompoundRoot, DebugCompoundSessionOptions, DebugConfigurationSessionOptions, DebugSessionOptions, InternalDebugSessionOptions } from './debug-session-options';
 import { DebugStackFrame } from './model/debug-stack-frame';
 import { DebugThread } from './model/debug-thread';
-import { TaskIdentifier } from '@theia/task/lib/common';
-import { DebugSourceBreakpoint } from './model/debug-source-breakpoint';
-import { DebugFunctionBreakpoint } from './model/debug-function-breakpoint';
-import * as monaco from '@theia/monaco-editor-core';
-import { DebugInstructionBreakpoint } from './model/debug-instruction-breakpoint';
-import { DebugWidget } from './view/debug-widget';
-import { DebugSessionConfigurationLabelProvider } from './debug-session-configuration-label-provider';
 
 export interface WillStartDebugSession extends WaitUntilEvent {
 }
@@ -55,6 +54,11 @@ export interface DidChangeActiveDebugSession {
 export interface DidChangeBreakpointsEvent {
     session?: DebugSession
     uri: URI
+}
+
+export interface DidResolveLazyVariableEvent {
+    readonly session: DebugSession
+    readonly variable: DebugVariable
 }
 
 export interface DebugSessionCustomEvent {
@@ -97,12 +101,6 @@ export class DebugSessionManager {
     protected readonly onDidFocusThreadEmitter = new Emitter<DebugThread | undefined>();
     readonly onDidFocusThread = this.onDidFocusThreadEmitter.event;
 
-    protected readonly onDidChangeBreakpointsEmitter = new Emitter<DidChangeBreakpointsEvent>();
-    readonly onDidChangeBreakpoints = this.onDidChangeBreakpointsEmitter.event;
-    protected fireDidChangeBreakpoints(event: DidChangeBreakpointsEvent): void {
-        this.onDidChangeBreakpointsEmitter.fire(event);
-    }
-
     protected readonly onDidChangeEmitter = new Emitter<DebugSession | undefined>();
     readonly onDidChange: Event<DebugSession | undefined> = this.onDidChangeEmitter.event;
     protected fireDidChange(current: DebugSession | undefined): void {
@@ -112,17 +110,14 @@ export class DebugSessionManager {
         this.onDidChangeEmitter.fire(current);
     }
 
+    protected readonly onDidResolveLazyVariableEmitter = new Emitter<DidResolveLazyVariableEvent>();
+    readonly onDidResolveLazyVariable: Event<DidResolveLazyVariableEvent> = this.onDidResolveLazyVariableEmitter.event;
+
     @inject(DebugSessionFactory)
     protected readonly debugSessionFactory: DebugSessionFactory;
 
     @inject(DebugService)
     protected readonly debug: DebugService;
-
-    @inject(LabelProvider)
-    protected readonly labelProvider: LabelProvider;
-
-    @inject(EditorManager)
-    protected readonly editorManager: EditorManager;
 
     @inject(BreakpointManager)
     protected readonly breakpoints: BreakpointManager;
@@ -157,6 +152,18 @@ export class DebugSessionManager {
     @inject(DebugSessionConfigurationLabelProvider)
     protected readonly sessionConfigurationLabelProvider: DebugSessionConfigurationLabelProvider;
 
+    @inject(ILogger) @named('debug:DebugSessionManager')
+    protected readonly logger: ILogger;
+
+    @inject(WorkspaceTrustService)
+    protected readonly workspaceTrustService: WorkspaceTrustService;
+
+    @inject(DebugPreferences)
+    protected readonly debugPreferences: DebugPreferences;
+
+    @inject(WindowService)
+    protected readonly windowService: WindowService;
+
     protected debugTypeKey: ContextKey<string>;
     protected inDebugModeKey: ContextKey<boolean>;
     protected debugStateKey: ContextKey<string>;
@@ -166,15 +173,6 @@ export class DebugSessionManager {
         this.debugTypeKey = this.contextKeyService.createKey<string>('debugType', undefined);
         this.inDebugModeKey = this.contextKeyService.createKey<boolean>('inDebugMode', this.inDebugMode);
         this.debugStateKey = this.contextKeyService.createKey<string>('debugState', debugStateContextValue(this.state));
-        this.breakpoints.onDidChangeMarkers(uri => this.fireDidChangeBreakpoints({ uri }));
-        this.labelProvider.onDidChange(event => {
-            for (const uriString of this.breakpoints.getUris()) {
-                const uri = new URI(uriString);
-                if (event.affects(uri)) {
-                    this.fireDidChangeBreakpoints({ uri });
-                }
-            }
-        });
     }
 
     get inDebugMode(): boolean {
@@ -193,7 +191,7 @@ export class DebugSessionManager {
             await this.shell.saveAll();
             return true;
         } catch (error) {
-            console.error('saveAll failed:', error);
+            this.logger.error('saveAll failed:', error);
             return false;
         }
     }
@@ -211,7 +209,13 @@ export class DebugSessionManager {
     }
 
     protected async startConfiguration(options: DebugConfigurationSessionOptions): Promise<DebugSession | undefined> {
-        return this.progressService.withProgress('Start...', 'debug', async () => {
+        // Check workspace trust before starting debug session
+        const trust = await this.workspaceTrustService.requestWorkspaceTrust();
+        if (!trust) {
+            return undefined;
+        }
+
+        return this.progressService.withProgress(nls.localizeByDefault('Starting...'), 'debug', async () => {
             try {
                 // If a parent session is available saving should be handled by the parent
                 if (!options.configuration.parentSessionId && !options.configuration.suppressSaveBeforeStart && !await this.saveAll()) {
@@ -239,7 +243,7 @@ export class DebugSessionManager {
                     && this.sessions.some(s => this.sessionConfigurationLabelProvider.getLabel(s.options) === sessionConfigurationLabel)
                 ) {
                     const yes = await new ConfirmDialog({
-                        title: DebugWidget.LABEL,
+                        title: nls.localizeByDefault('Debug'),
                         msg: nls.localizeByDefault("'{0}' is already running. Do you want to start another instance?", sessionConfigurationLabel)
                     }).open();
                     if (!yes) {
@@ -259,18 +263,24 @@ export class DebugSessionManager {
                 return this.doStart(sessionId, resolved);
             } catch (e) {
                 if (DebugError.NotFound.is(e)) {
-                    this.messageService.error(`The debug session type "${e.data.type}" is not supported.`);
+                    this.messageService.error(nls.localize('theia/debug/debugSessionTypeNotSupported', 'The debug session type "{0}" is not supported.', e.data.type));
                     return undefined;
                 }
 
-                this.messageService.error('There was an error starting the debug session, check the logs for more details.');
-                console.error('Error starting the debug session', e);
+                this.messageService.error(nls.localize('theia/debug/errorStartingDebugSession', 'There was an error starting the debug session, check the logs for more details.'));
+                this.logger.error('Error starting the debug session', e);
                 throw e;
             }
         });
     }
 
     protected async startCompound(options: DebugCompoundSessionOptions): Promise<boolean | undefined> {
+        // Check workspace trust before starting compound debug session
+        const trust = await this.workspaceTrustService.requestWorkspaceTrust();
+        if (!trust) {
+            return false;
+        }
+
         let configurations: DebugConfigurationSessionOptions[] = [];
         const compoundRoot = options.compound.stopAll ? new DebugCompoundRoot() : undefined;
         try {
@@ -405,7 +415,7 @@ export class DebugSessionManager {
         const parentSession = options.configuration.parentSessionId ? this._sessions.get(options.configuration.parentSessionId) : undefined;
         const contrib = this.sessionContributionRegistry.get(options.configuration.type);
         const sessionFactory = contrib ? contrib.debugSessionFactory() : this.debugSessionFactory;
-        const session = sessionFactory.get(this, sessionId, options, parentSession);
+        const session = sessionFactory.createSession(sessionId, options, parentSession);
         this._sessions.set(sessionId, session);
 
         this.debugTypeKey.set(session.configuration.type);
@@ -417,11 +427,16 @@ export class DebugSessionManager {
                 state = session.state;
                 if (state === DebugState.Stopped) {
                     this.onDidStopDebugSessionEmitter.fire(session);
+                    // Only switch to this session if a thread actually stopped (not just state change)
+                    if (session.currentThread && session.currentThread.stopped) {
+                        this.updateCurrentSession(session);
+                    }
                 }
             }
-            this.updateCurrentSession(session);
+            // Always fire change event to update views (threads, variables, etc.)
+            // The selection logic in widgets will handle not jumping to non-stopped threads
+            this.fireDidChange(session);
         });
-        session.onDidChangeBreakpoints(uri => this.fireDidChangeBreakpoints({ session, uri }));
         session.on('terminated', async event => {
             const restart = event.body && event.body.restart;
             if (restart) {
@@ -438,7 +453,14 @@ export class DebugSessionManager {
         });
 
         session.onDispose(() => this.cleanup(session));
-        session.start().then(() => this.onDidStartDebugSessionEmitter.fire(session)).catch(e => {
+        session.start().then(() => {
+            this.onDidStartDebugSessionEmitter.fire(session);
+            // Set as current session if no current session exists
+            // This ensures the UI shows the running session and buttons are enabled
+            if (!this.currentSession) {
+                this.updateCurrentSession(session);
+            }
+        }).catch(e => {
             session.stop(false, () => {
                 this.debug.terminateDebugSession(session.id);
             });
@@ -450,8 +472,16 @@ export class DebugSessionManager {
     }
 
     protected cleanup(session: DebugSession): void {
+        // Data breakpoints that can't persist should be removed when a session ends.
+        const currentDataBreakpoints = this.breakpoints.getDataBreakpoints();
+        const toRetain = currentDataBreakpoints.filter(candidate => candidate.origin.info.canPersist);
+        if (currentDataBreakpoints.length !== toRetain.length) {
+            this.breakpoints.setDataBreakpoints(toRetain.map(bp => bp.origin));
+        }
         if (this.remove(session.id)) {
             this.onDidDestroyDebugSessionEmitter.fire(session);
+            this.breakpoints.updateSessionData(session.id, session.capabilities);
+            this.breakpoints.clearExceptionSessionEnablement(session.id);
         }
     }
 
@@ -531,38 +561,29 @@ export class DebugSessionManager {
         if (current) {
             this.disposeOnCurrentSessionChanged.push(current.onDidChange(() => {
                 if (this.currentFrame === this.topFrame) {
-                    this.open();
+                    this.open('auto');
                 }
                 this.fireDidChange(current);
             }));
+            this.disposeOnCurrentSessionChanged.push(current.onDidResolveLazyVariable(variable => this.onDidResolveLazyVariableEmitter.fire({ session: current, variable })));
             this.disposeOnCurrentSessionChanged.push(current.onDidFocusStackFrame(frame => this.onDidFocusStackFrameEmitter.fire(frame)));
             this.disposeOnCurrentSessionChanged.push(current.onDidFocusThread(thread => this.onDidFocusThreadEmitter.fire(thread)));
             const { currentThread } = current;
             this.onDidFocusThreadEmitter.fire(currentThread);
         }
-        this.updateBreakpoints(previous, current);
         this.open();
         this.fireDidChange(current);
     }
-    open(): void {
+    open(revealOption: 'auto' | 'center' = 'center'): void {
         const { currentFrame } = this;
         if (currentFrame && currentFrame.thread.stopped) {
-            currentFrame.open();
-        }
-    }
-    protected updateBreakpoints(previous: DebugSession | undefined, current: DebugSession | undefined): void {
-        const affectedUri = new Set();
-        for (const session of [previous, current]) {
-            if (session) {
-                for (const uriString of session.breakpointUris) {
-                    if (!affectedUri.has(uriString)) {
-                        affectedUri.add(uriString);
-                        this.fireDidChangeBreakpoints({
-                            session: current,
-                            uri: new URI(uriString)
-                        });
-                    }
-                }
+            const focusEditor = this.debugPreferences['debug.focusEditorOnBreak'];
+            currentFrame.open({
+                revealOption,
+                mode: focusEditor ? 'activate' : 'reveal',
+            });
+            if (this.debugPreferences['debug.focusWindowOnBreak']) {
+                this.windowService.focus();
             }
         }
     }
@@ -589,55 +610,6 @@ export class DebugSessionManager {
         return currentThread && currentThread.topFrame;
     }
 
-    getFunctionBreakpoints(session: DebugSession | undefined = this.currentSession): DebugFunctionBreakpoint[] {
-        if (session && session.state > DebugState.Initializing) {
-            return session.getFunctionBreakpoints();
-        }
-        const { labelProvider, breakpoints, editorManager } = this;
-        return this.breakpoints.getFunctionBreakpoints().map(origin => new DebugFunctionBreakpoint(origin, { labelProvider, breakpoints, editorManager }));
-    }
-
-    getInstructionBreakpoints(session = this.currentSession): DebugInstructionBreakpoint[] {
-        if (session && session.state > DebugState.Initializing) {
-            return session.getInstructionBreakpoints();
-        }
-        const { labelProvider, breakpoints, editorManager } = this;
-        return this.breakpoints.getInstructionBreakpoints().map(origin => new DebugInstructionBreakpoint(origin, { labelProvider, breakpoints, editorManager }));
-    }
-
-    getBreakpoints(session?: DebugSession): DebugSourceBreakpoint[];
-    getBreakpoints(uri: URI, session?: DebugSession): DebugSourceBreakpoint[];
-    getBreakpoints(arg?: URI | DebugSession, arg2?: DebugSession): DebugSourceBreakpoint[] {
-        const uri = arg instanceof URI ? arg : undefined;
-        const session = arg instanceof DebugSession ? arg : arg2 instanceof DebugSession ? arg2 : this.currentSession;
-        if (session && session.state > DebugState.Initializing) {
-            return session.getSourceBreakpoints(uri);
-        }
-        const { labelProvider, breakpoints, editorManager } = this;
-        return this.breakpoints.findMarkers({ uri }).map(({ data }) => new DebugSourceBreakpoint(data, { labelProvider, breakpoints, editorManager }));
-    }
-
-    getLineBreakpoints(uri: URI, line: number): DebugSourceBreakpoint[] {
-        const session = this.currentSession;
-        if (session && session.state > DebugState.Initializing) {
-            return session.getSourceBreakpoints(uri).filter(breakpoint => breakpoint.line === line);
-        }
-        const { labelProvider, breakpoints, editorManager } = this;
-        return this.breakpoints.getLineBreakpoints(uri, line).map(origin =>
-            new DebugSourceBreakpoint(origin, { labelProvider, breakpoints, editorManager })
-        );
-    }
-
-    getInlineBreakpoint(uri: URI, line: number, column: number): DebugSourceBreakpoint | undefined {
-        const session = this.currentSession;
-        if (session && session.state > DebugState.Initializing) {
-            return session.getSourceBreakpoints(uri).filter(breakpoint => breakpoint.line === line && breakpoint.column === column)[0];
-        }
-        const origin = this.breakpoints.getInlineBreakpoint(uri, line, column);
-        const { labelProvider, breakpoints, editorManager } = this;
-        return origin && new DebugSourceBreakpoint(origin, { labelProvider, breakpoints, editorManager });
-    }
-
     /**
      * Runs the given tasks.
      * @param taskName the task name to run, see [TaskNameResolver](#TaskNameResolver)
@@ -653,8 +625,9 @@ export class DebugSessionManager {
             return true;
         }
 
+        const taskLabel = typeof taskName === 'string' ? taskName : JSON.stringify(taskName);
         if (!taskInfo) {
-            return this.doPostTaskAction(`Could not run the task '${taskName}'.`);
+            return this.doPostTaskAction(nls.localize('theia/debug/couldNotRunTask', "Could not run the task '{0}'.", taskLabel));
         }
 
         const getExitCodePromise: Promise<TaskEndedInfo> = this.taskService.getExitCode(taskInfo.taskId).then(result =>
@@ -672,19 +645,24 @@ export class DebugSessionManager {
         if (taskEndedInfo.taskEndedType === TaskEndedTypes.TaskExited && taskEndedInfo.value === 0) {
             return true;
         } else if (taskEndedInfo.taskEndedType === TaskEndedTypes.TaskExited && taskEndedInfo.value !== undefined) {
-            return this.doPostTaskAction(`Task '${taskName}' terminated with exit code ${taskEndedInfo.value}.`);
+            return this.doPostTaskAction(nls.localize('theia/debug/taskTerminatedWithExitCode', "Task '{0}' terminated with exit code {1}.", taskLabel, taskEndedInfo.value));
         } else {
             const signal = await this.taskService.getTerminateSignal(taskInfo.taskId);
             if (signal !== undefined) {
-                return this.doPostTaskAction(`Task '${taskName}' terminated by signal ${signal}.`);
+                return this.doPostTaskAction(nls.localize('theia/debug/taskTerminatedBySignal', "Task '{0}' terminated by signal {1}.", taskLabel, signal));
             } else {
-                return this.doPostTaskAction(`Task '${taskName}' terminated for unknown reason.`);
+                return this.doPostTaskAction(nls.localize('theia/debug/taskTerminatedForUnknownReason', "Task '{0}' terminated for unknown reason.", taskLabel));
             }
         }
     }
 
     protected async doPostTaskAction(errorMessage: string): Promise<boolean> {
-        const actions = ['Open launch.json', 'Cancel', 'Configure Task', 'Debug Anyway'];
+        const actions = [
+            nls.localizeByDefault('Open {0}', 'launch.json'),
+            nls.localizeByDefault('Cancel'),
+            nls.localizeByDefault('Configure Task'),
+            nls.localizeByDefault('Debug Anyway')
+        ];
         const result = await this.messageService.error(errorMessage, ...actions);
         switch (result) {
             case actions[0]: // open launch.json

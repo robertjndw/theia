@@ -17,43 +17,50 @@ import { injectable } from '@theia/core/shared/inversify';
 import { PluginDeployOptions, PluginIdentifiers, PluginServer, PluginStorageKind, PluginType } from '../../common';
 import { KeysToAnyValues, KeysToKeysToAnyValue } from '../../common/types';
 
+/**
+ * Plugins of a browser-only application are deployed at build time, so they cannot be
+ * installed, uninstalled, enabled or disabled at runtime. The queries report an empty
+ * result rather than failing, so that callers such as the plugin view can render.
+ */
 @injectable()
 export class FrontendPluginServer implements PluginServer {
     install(pluginEntry: string, type?: PluginType, options?: PluginDeployOptions): Promise<void> {
-        throw new Error('Method not implemented.');
+        throw new Error('Installing plugins is not supported in a browser-only application.');
     }
-    enablePlugin(pluginId: PluginIdentifiers.VersionedId): Promise<boolean> {
-        throw new Error('Method not implemented.');
+
+    uninstall(pluginId: PluginIdentifiers.VersionedId): Promise<void> {
+        throw new Error('Uninstalling plugins is not supported in a browser-only application.');
     }
-    disablePlugin(pluginId: PluginIdentifiers.VersionedId): Promise<boolean> {
-        throw new Error('Method not implemented.');
+
+    enablePlugin(pluginId: PluginIdentifiers.UnversionedId): Promise<boolean> {
+        throw new Error('Enabling plugins is not supported in a browser-only application.');
     }
-    getInstalledPlugins(): Promise<readonly PluginIdentifiers.VersionedId[]> {
-        throw new Error('Method not implemented.');
+
+    disablePlugin(pluginId: PluginIdentifiers.UnversionedId): Promise<boolean> {
+        throw new Error('Disabling plugins is not supported in a browser-only application.');
     }
-    getUninstalledPlugins(): Promise<readonly PluginIdentifiers.VersionedId[]> {
-        throw new Error('Method not implemented.');
+
+    async getInstalledPlugins(): Promise<readonly PluginIdentifiers.VersionedId[]> {
+        return [];
     }
-    getDisabledPlugins(): Promise<readonly PluginIdentifiers.VersionedId[]> {
-        throw new Error('Method not implemented.');
+
+    async getUninstalledPlugins(): Promise<readonly PluginIdentifiers.VersionedId[]> {
+        return [];
     }
-    deploy(pluginEntry: string, type?: PluginType | undefined, options?: PluginDeployOptions | undefined): Promise<void> {
-        throw new Error('Method not implemented.');
+
+    async getDisabledPlugins(): Promise<readonly PluginIdentifiers.UnversionedId[]> {
+        return [];
     }
-    uninstall(pluginId: `${string}.${string}@${string}`): Promise<void> {
-        throw new Error('Method not implemented.');
+
+    async setStorageValue(key: string, value: KeysToAnyValues, kind: PluginStorageKind): Promise<boolean> {
+        return false;
     }
-    undeploy(pluginId: `${string}.${string}@${string}`): Promise<void> {
-        throw new Error('Method not implemented.');
-    }
-    setStorageValue(key: string, value: KeysToAnyValues, kind: PluginStorageKind): Promise<boolean> {
-        throw new Error('Method not implemented.');
-    }
-    getStorageValue(key: string, kind: PluginStorageKind): Promise<KeysToAnyValues> {
-        throw new Error('Method not implemented.');
-    }
-    async getAllStorageValues(kind: PluginStorageKind): Promise<KeysToKeysToAnyValue> {
+
+    async getStorageValue(key: string, kind: PluginStorageKind): Promise<KeysToAnyValues> {
         return {};
     }
 
+    async getAllStorageValues(kind: PluginStorageKind): Promise<KeysToKeysToAnyValue> {
+        return {};
+    }
 }

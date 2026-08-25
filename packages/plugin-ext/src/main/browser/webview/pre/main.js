@@ -154,29 +154,29 @@ globalThis.acquireVsCodeApi = (function() {
 
     let state = ${state ? `JSON.parse(${JSON.stringify(state)})` : undefined};
 
-    const forwardConsoleLog = (level, msg, args) => {
+    const forwardConsoleLog = (level, msg, ...args) => {
         let message, optionalParams;
         try {
             if (msg) {
                 message = JSON.stringify(msg) ?? null;
             }
-            if (args) {
+            if (args.length > 0) {
                 optionalParams = JSON.stringify(args) ?? null;
             }
         } catch (e) {
             // Log non serializable objects inside of view
-            originalConsole[level](msg, args);
+            originalConsole[level](msg, ...args);
             return;
         }
         originalPostMessage({ command: 'onconsole', data: { level, message, optionalParams } }, targetOrigin);
     };
 
-    console.log = (message, args) => forwardConsoleLog('log', message, args);
-    console.info = (message, args) => forwardConsoleLog('info', message, args);
-    console.warn = (message, args) => forwardConsoleLog('warn', message, args);
-    console.error = (message, args) => forwardConsoleLog('error', message, args);
-    console.debug = (message, args) => forwardConsoleLog('debug', message, args);
-    console.trace = (message, args) => forwardConsoleLog('trace', message, args);
+    console.log = (message, ...args) => forwardConsoleLog('log', message, ...args);
+    console.info = (message, ...args) => forwardConsoleLog('info', message, ...args);
+    console.warn = (message, ...args) => forwardConsoleLog('warn', message, ...args);
+    console.error = (message, ...args) => forwardConsoleLog('error', message, ...args);
+    console.debug = (message, ...args) => forwardConsoleLog('debug', message, ...args);
+    console.trace = (message, ...args) => forwardConsoleLog('trace', message, ...args);
 
     return () => {
         if (acquired) {
@@ -199,9 +199,8 @@ globalThis.acquireVsCodeApi = (function() {
     };
 })();
 globalThis.acquireTheiaApi = acquireVsCodeApi;
-delete window.parent;
-delete window.top;
-delete window.frameElement;        
+window.parent = window;
+window.frameElement = null;
 `;
     }
 
@@ -250,9 +249,11 @@ delete window.frameElement;
             }
 
             let baseElement = event.view.document.getElementsByTagName('base')[0];
-            /** @type {any} */
-            let node = event.target;
-            while (node) {
+
+            // Use composedPath to get the event path through shadow DOM
+            const path = event.composedPath ? event.composedPath() : [event.target];
+
+            for (const node of path) {
                 if (node.tagName && node.tagName.toLowerCase() === 'a' && node.href) {
                     if (node.getAttribute('href') === '#') {
                         event.view.scrollTo(0, 0);
@@ -267,7 +268,6 @@ delete window.frameElement;
                     event.preventDefault();
                     break;
                 }
-                node = node.parentNode;
             }
         };
 
@@ -282,13 +282,14 @@ delete window.frameElement;
                 }
 
                 if (event.button === 1) {
-                    let node = /** @type {any} */ (event.target);
-                    while (node) {
+                    // Use composedPath to get the event path through shadow DOM
+                    const path = event.composedPath ? event.composedPath() : [event.target];
+
+                    for (const node of path) {
                         if (node.tagName && node.tagName.toLowerCase() === 'a' && node.href) {
                             event.preventDefault();
                             break;
                         }
-                        node = node.parentNode;
                     }
                 }
             };
@@ -354,16 +355,17 @@ delete window.frameElement;
             host.postMessage('did-context-menu', {
                 clientX: e.clientX,
                 clientY: e.clientY,
-                context: findVscodeContext(e.target)
+                context: findVscodeContext(e.composedPath(), 0)
             });
         };
 
-        function findVscodeContext(node) {
+        function findVscodeContext(nodes, index) {
+            const node = nodes[index];
             if (node) {
                 if (node.dataset?.vscodeContext) {
                     return JSON.parse(node.dataset.vscodeContext);
                 }
-                return findVscodeContext(node.parentElement);
+                return findVscodeContext(nodes, ++index);
             }
             return {};
         }

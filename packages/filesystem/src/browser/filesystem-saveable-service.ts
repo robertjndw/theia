@@ -14,8 +14,8 @@
 // SPDX-License-Identifier: EPL-2.0 OR GPL-2.0-only WITH Classpath-exception-2.0
 // *****************************************************************************
 
-import { environment, MessageService, nls } from '@theia/core';
-import { inject, injectable } from '@theia/core/shared/inversify';
+import { environment, MessageService, nls, ILogger } from '@theia/core';
+import { inject, injectable, named } from '@theia/core/shared/inversify';
 import { Navigatable, Saveable, SaveableSource, SaveOptions, Widget, open, OpenerService, ConfirmDialog, CommonCommands, LabelProvider } from '@theia/core/lib/browser';
 import { SaveableService } from '@theia/core/lib/browser/saveable-service';
 import URI from '@theia/core/lib/common/uri';
@@ -36,6 +36,9 @@ export class FilesystemSaveableService extends SaveableService {
     protected readonly openerService: OpenerService;
     @inject(LabelProvider)
     protected readonly labelProvider: LabelProvider;
+
+    @inject(ILogger) @named('filesystem:FilesystemSaveableService')
+    protected override readonly logger: ILogger;
 
     /**
      * This method ensures a few things about `widget`:
@@ -61,11 +64,15 @@ export class FilesystemSaveableService extends SaveableService {
         let selected: URI | undefined;
         const canSave = this.canSaveNotSaveAs(sourceWidget);
         const uri: URI = sourceWidget.getResourceUri()!;
+        let filters: { [name: string]: string[] } = { 'All Files': ['*'] };
+        if (sourceWidget.saveable.filters) {
+            filters = { ...sourceWidget.saveable.filters(), ...filters };
+        }
         do {
             selected = await this.fileDialogService.showSaveDialog(
                 {
                     title: CommonCommands.SAVE_AS.label!,
-                    filters: {},
+                    filters: filters,
                     inputValue: uri.path.base
                 });
             if (selected) {
@@ -82,7 +89,7 @@ export class FilesystemSaveableService extends SaveableService {
                 await this.saveSnapshot(sourceWidget, selected, overwrite);
                 return selected;
             } catch (e) {
-                console.warn(e);
+                this.logger.warn(e);
             }
         }
     }

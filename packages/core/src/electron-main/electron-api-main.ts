@@ -15,7 +15,8 @@
 // *****************************************************************************
 
 import {
-    ipcMain, BrowserWindow, Menu, MenuItemConstructorOptions, webContents, WebContents, session, shell, clipboard, IpcMainEvent
+    ipcMain, BrowserWindow, Menu, MenuItemConstructorOptions, webContents, WebContents, session, shell, clipboard, IpcMainEvent,
+    app, JumpListCategory, JumpListItem
 } from '@theia/electron/shared/electron';
 import * as nativeKeymap from '@theia/electron/shared/native-keymap';
 
@@ -56,11 +57,15 @@ import {
     CHANNEL_ABOUT_TO_CLOSE,
     CHANNEL_OPEN_WITH_SYSTEM_APP,
     CHANNEL_OPEN_URL,
-    CHANNEL_SET_THEME
+    CHANNEL_SET_THEME,
+    CHANNEL_OPEN_DEVTOOLS_FOR_WINDOW,
+    CHANNEL_UPDATE_RECENT_WORKSPACES
 } from '../electron-common/electron-api';
 import { ElectronMainApplication, ElectronMainApplicationContribution } from './electron-main-application';
-import { Disposable, DisposableCollection, isOSX, MaybePromise } from '../common';
+import { Disposable, DisposableCollection, isOSX, isWindows, MaybePromise, URI } from '../common';
+import { FileUri } from '../node';
 import { createDisposableListener } from './event-utils';
+import * as path from 'node:path';
 
 @injectable()
 export class TheiaMainApi implements ElectronMainApplicationContribution {
@@ -135,6 +140,8 @@ export class TheiaMainApi implements ElectronMainApplicationContribution {
             }
             popup.popup({
                 window: electronWindow,
+                x,
+                y,
                 callback: () => {
                     this.openPopups.delete(menuId);
                     event.sender.send(CHANNEL_ON_CLOSE_POPUP, menuId);
@@ -207,8 +214,27 @@ export class TheiaMainApi implements ElectronMainApplicationContribution {
             event.sender.toggleDevTools();
         });
 
-        ipcMain.on(CHANNEL_SET_ZOOM_LEVEL, (event, zoomLevel: number) => {
-            event.sender.setZoomLevel(zoomLevel);
+        ipcMain.on(CHANNEL_OPEN_DEVTOOLS_FOR_WINDOW, (event, windowName: string) => {
+            const electronWindow = BrowserWindow.getAllWindows().find(win => win.webContents.mainFrame.name === windowName);
+            if (electronWindow) {
+                electronWindow.webContents.openDevTools();
+            } else {
+                console.warn(`There is no known window '${windowName}'. Thus, the devtools could not be opened.`);
+            }
+        });
+
+        ipcMain.on(CHANNEL_SET_ZOOM_LEVEL, (event, zoomLevel: number, windowName: string | undefined) => {
+            let electronWindow;
+            if (windowName) {
+                electronWindow = BrowserWindow.getAllWindows().find(win => win.webContents.mainFrame.name === windowName);
+            } else {
+                electronWindow = BrowserWindow.fromWebContents(event.sender);
+            }
+            if (electronWindow) {
+                electronWindow.webContents.setZoomLevel(zoomLevel);
+            } else {
+                console.warn(`There is no known window '${windowName}'. Thus, the zoom level could not be set.`);
+            }
         });
 
         ipcMain.handle(CHANNEL_GET_ZOOM_LEVEL, event => event.sender.getZoomLevel());
@@ -241,6 +267,55 @@ export class TheiaMainApi implements ElectronMainApplicationContribution {
             };
             for (const webContent of webContents.getAllWebContents()) {
                 webContent.send('keyboardLayoutChanged', newLayout);
+            }
+        });
+
+        ipcMain.on(CHANNEL_UPDATE_RECENT_WORKSPACES, (_event, workspaces: string[], categoryName: string) => {
+            if (!isWindows) {
+                return;
+            }
+
+            const jumpListSettings = app.getJumpListSettings();
+            const isDev = !app.isPackaged;
+            const appPath = app.getAppPath();
+
+            const items: JumpListItem[] = workspaces
+                .filter(w => new URI(w).scheme === 'file')
+                .map(workspace => {
+                    const uri = new URI(workspace);
+                    const wspathPretty = uri.path.fsPath();
+                    const wspath = FileUri.fsPath(uri);
+                    const item: JumpListItem = {
+                        type: 'task',
+                        // Windows is picky about the length of some attributes. See: https://github.com/microsoft/vscode/issues/111177#issuecomment-739942612
+                        title: uri.path.base.substring(0, 255),
+                        description: wspathPretty.substring(0, 255),
+                        program: process.execPath,
+                        args: isDev ? `"${path.resolve(appPath, 'theia-electron-main.js')}" "${wspath}"` : `"${wspath}"`,
+                        iconPath: process.execPath,
+                        iconIndex: 0
+                    };
+
+                    // We need to remove items that the user has explicitly removed from the jump list. Otherwise
+                    // Windows will not show our custom category at all.
+                    if (jumpListSettings.removedItems.some(removedItem => removedItem.args === item.args)) {
+                        return undefined;
+                    }
+
+                    return item;
+                })
+                .filter(item => !!item);
+
+            const jumpList: JumpListCategory[] = [{
+                type: 'custom',
+                name: categoryName || 'Recent Workspaces',
+                items
+            }];
+
+            const result = app.setJumpList(jumpList);
+
+            if (result !== 'ok') {
+                console.warn(`Could not set Jump List with recent workspaces (result = "${result}")`);
             }
         });
     }
@@ -323,13 +398,13 @@ export namespace TheiaRendererAPI {
         const disposables = new DisposableCollection();
 
         return new Promise<boolean>(resolve => {
-            wc.send(CHANNEL_REQUEST_CLOSE, stopReason, confirmChannel, cancelChannel);
             createDisposableListener(ipcMain, confirmChannel, e => {
                 resolve(true);
             }, disposables);
             createDisposableListener(ipcMain, cancelChannel, e => {
                 resolve(false);
             }, disposables);
+            wc.send(CHANNEL_REQUEST_CLOSE, stopReason, confirmChannel, cancelChannel);
         }).finally(() => disposables.dispose());
     }
 
@@ -340,13 +415,13 @@ export namespace TheiaRendererAPI {
         const disposables = new DisposableCollection();
 
         return new Promise<boolean>(resolve => {
-            mainWindow.send(CHANNEL_REQUEST_SECONDARY_CLOSE, secondaryWindow.mainFrame.name, confirmChannel, cancelChannel);
             createDisposableListener(ipcMain, confirmChannel, e => {
                 resolve(true);
             }, disposables);
             createDisposableListener(ipcMain, cancelChannel, e => {
                 resolve(false);
             }, disposables);
+            mainWindow.send(CHANNEL_REQUEST_SECONDARY_CLOSE, secondaryWindow.mainFrame.name, confirmChannel, cancelChannel);
         }).finally(() => disposables.dispose());
     }
 

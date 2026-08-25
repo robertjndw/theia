@@ -17,16 +17,16 @@
 import * as monaco from '@theia/monaco-editor-core';
 
 import { AIActivationService } from '@theia/ai-core/lib/browser';
-import { Disposable } from '@theia/core';
-import { FrontendApplicationContribution, KeybindingContribution, KeybindingRegistry, PreferenceService } from '@theia/core/lib/browser';
-import { inject, injectable } from '@theia/core/shared/inversify';
+import { Disposable, PreferenceService, ILogger } from '@theia/core';
+import { FrontendApplicationContribution, KeybindingContribution, KeybindingRegistry } from '@theia/core/lib/browser';
+import { inject, injectable, named } from '@theia/core/shared/inversify';
 import { InlineCompletionTriggerKind } from '@theia/monaco-editor-core/esm/vs/editor/common/languages';
 import {
     PREF_AI_INLINE_COMPLETION_AUTOMATIC_ENABLE,
     PREF_AI_INLINE_COMPLETION_DEBOUNCE_DELAY,
     PREF_AI_INLINE_COMPLETION_EXCLUDED_EXTENSIONS,
     PREF_AI_INLINE_COMPLETION_CACHE_CAPACITY
-} from './ai-code-completion-preference';
+} from '../common/ai-code-completion-preference';
 import { AICodeInlineCompletionsProvider } from './ai-code-inline-completion-provider';
 import { InlineCompletionDebouncer } from './code-completion-debouncer';
 import { CodeCompletionCache } from './code-completion-cache';
@@ -41,6 +41,9 @@ export class AIFrontendApplicationContribution implements FrontendApplicationCon
 
     @inject(AIActivationService)
     protected readonly activationService: AIActivationService;
+
+    @inject(ILogger) @named('ai-code-completion:AIFrontendApplicationContribution')
+    protected readonly logger: ILogger;
 
     private completionCache = new CodeCompletionCache();
     private debouncer = new InlineCompletionDebouncer();
@@ -71,14 +74,14 @@ export class AIFrontendApplicationContribution implements FrontendApplicationCon
                 this.toDispose.set('inlineCompletions', handler());
             }
             if (event.preferenceName === PREF_AI_INLINE_COMPLETION_DEBOUNCE_DELAY) {
-                this.debounceDelay = event.newValue;
+                this.debounceDelay = this.preferenceService.get<number>(PREF_AI_INLINE_COMPLETION_DEBOUNCE_DELAY, 300);
             }
             if (event.preferenceName === PREF_AI_INLINE_COMPLETION_CACHE_CAPACITY) {
-                this.completionCache.setMaxSize(event.newValue);
+                this.completionCache.setMaxSize(this.preferenceService.get<number>(PREF_AI_INLINE_COMPLETION_CACHE_CAPACITY, 100));
             }
         });
 
-        this.activationService.onDidChangeActiveStatus(change => {
+        this.activationService.onDidChangeCanRun(() => {
             this.toDispose.get('inlineCompletions')?.dispose();
             this.toDispose.set('inlineCompletions', handler());
         });
@@ -93,7 +96,7 @@ export class AIFrontendApplicationContribution implements FrontendApplicationCon
     }
 
     protected handleInlineCompletions(): Disposable {
-        if (!this.activationService.isActive) {
+        if (!this.activationService.canRun) {
             return Disposable.NULL;
         }
         const automatic = this.preferenceService.get<boolean>(PREF_AI_INLINE_COMPLETION_AUTOMATIC_ENABLE, true);
@@ -133,7 +136,7 @@ export class AIFrontendApplicationContribution implements FrontendApplicationCon
 
                             return completion;
                         } catch (error) {
-                            console.error('Error providing inline completions:', error);
+                            this.logger.error('Error providing inline completions:', error);
                             return { items: [] };
                         }
                     };
@@ -144,9 +147,7 @@ export class AIFrontendApplicationContribution implements FrontendApplicationCon
                         return completionHandler();
                     }
                 },
-                freeInlineCompletions: completions => {
-                    this.inlineCodeCompletionProvider.freeInlineCompletions(completions);
-                }
+                disposeInlineCompletions: () => { /* no-op */ }
             }
         );
     }

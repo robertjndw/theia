@@ -15,19 +15,22 @@
 // *****************************************************************************
 
 import { LanguageModelRequirement } from '@theia/ai-core/lib/common';
-import { injectable } from '@theia/core/shared/inversify';
+import { inject, injectable, named } from '@theia/core/shared/inversify';
 import { AbstractStreamParsingChatAgent } from '@theia/ai-chat/lib/common/chat-agents';
-import { nls } from '@theia/core';
+import { ILogger, nls } from '@theia/core';
 import { universalTemplate, universalTemplateVariant } from './universal-prompt-template';
 
 export const UniversalChatAgentId = 'Universal';
 @injectable()
 export class UniversalChatAgent extends AbstractStreamParsingChatAgent {
+    @inject(ILogger) @named('ai-ide:UniversalChatAgent')
+    protected override readonly logger: ILogger;
+
    id: string = UniversalChatAgentId;
    name = UniversalChatAgentId;
    languageModelRequirements: LanguageModelRequirement[] = [{
       purpose: 'chat',
-      identifier: 'openai/gpt-4o',
+      identifier: 'default/universal',
    }];
    protected defaultLanguageModelPurpose: string = 'chat';
    override description = nls.localize('theia/ai/chat/universal/description', 'This agent is designed to help software developers by providing concise and accurate '
@@ -35,6 +38,7 @@ export class UniversalChatAgent extends AbstractStreamParsingChatAgent {
       + 'questions the user might ask. The universal agent currently does not have any context by default, i.e. it cannot '
       + 'access the current user context or the workspace.');
 
-   override prompts = [{ id: 'universal-prompt', defaultVariant: universalTemplate, variants: [universalTemplateVariant] }];
-   protected override systemPromptId: string = 'universal-prompt';
+   override prompts = [{ id: 'universal-system', defaultVariant: universalTemplate, variants: [universalTemplateVariant] }];
+   protected override systemPromptId: string = 'universal-system';
+   override iconClass: string = 'codicon codicon-comment';
 }

@@ -22,7 +22,8 @@ import { DebugWidget } from './view/debug-widget';
 import { DebugPath, DebugService } from '../common/debug-service';
 import {
     WidgetFactory, WebSocketConnectionProvider, FrontendApplicationContribution,
-    bindViewContribution
+    bindViewContribution,
+    OpenHandler
 } from '@theia/core/lib/browser';
 import { DebugSessionManager } from './debug-session-manager';
 import { DebugResourceResolver } from './debug-resource';
@@ -33,22 +34,23 @@ import {
     DebugSessionContributionRegistry,
     DebugSessionContributionRegistryImpl
 } from './debug-session-contribution';
-import { bindContributionProvider, ResourceResolver } from '@theia/core';
+import { bindRootContributionProvider, nls, ResourceResolver } from '@theia/core';
 import { ContextKeyService } from '@theia/core/lib/browser/context-key-service';
 import { DebugFrontendApplicationContribution } from './debug-frontend-application-contribution';
 import { DebugConsoleContribution } from './console/debug-console-contribution';
 import { BreakpointManager } from './breakpoint/breakpoint-manager';
 import { DebugEditorService } from './editor/debug-editor-service';
 import { DebugEditorModelFactory, DebugEditorModel } from './editor/debug-editor-model';
-import { bindDebugPreferences } from './debug-preferences';
+import { bindDebugPreferences } from '../common/debug-preferences';
 import { DebugSchemaUpdater } from './debug-schema-updater';
 import { DebugCallStackItemTypeKey } from './debug-call-stack-item-type-key';
-import { bindLaunchPreferences } from './preferences/launch-preferences';
+import { bindLaunchPreferences } from '../common/launch-preferences';
 import { DebugPrefixConfiguration } from './debug-prefix-configuration';
 import { CommandContribution } from '@theia/core/lib/common/command';
 import { TabBarToolbarContribution } from '@theia/core/lib/browser/shell/tab-bar-toolbar';
 import { ColorContribution } from '@theia/core/lib/browser/color-application-contribution';
 import { DebugWatchManager } from './debug-watch-manager';
+import { DebugExpressionProvider } from './editor/debug-expression-provider';
 import { DebugBreakpointWidget } from './editor/debug-breakpoint-widget';
 import { DebugInlineValueDecorator } from './editor/debug-inline-value-decorator';
 import { JsonSchemaContribution } from '@theia/core/lib/browser/json-schema-store';
@@ -63,16 +65,19 @@ import { bindDisassemblyView } from './disassembly-view/disassembly-view-contrib
 import { StandaloneServices } from '@theia/monaco-editor-core/esm/vs/editor/standalone/browser/standaloneServices';
 import { ICodeEditorService } from '@theia/monaco-editor-core/esm/vs/editor/browser/services/codeEditorService';
 import { DebugSessionConfigurationLabelProvider } from './debug-session-configuration-label-provider';
+import { AddOrEditDataBreakpointAddress } from './breakpoint/debug-data-breakpoint-actions';
+import { WorkspaceRestrictionContribution, WorkspaceRestriction } from '@theia/workspace/lib/browser/workspace-trust-service';
+import { DebugBreakpointOpener } from './model/debug-breakpoint-opener';
 
 export default new ContainerModule((bind: interfaces.Bind) => {
-    bindContributionProvider(bind, DebugContribution);
+    bindRootContributionProvider(bind, DebugContribution);
 
     bind(DebugCallStackItemTypeKey).toDynamicValue(({ container }) =>
         container.get<ContextKeyService>(ContextKeyService).createKey('callStackItemType', undefined)
     ).inSingletonScope();
 
-    bindContributionProvider(bind, DebugSessionContribution);
-    bind(DebugSessionFactory).to(DefaultDebugSessionFactory).inSingletonScope();
+    bindRootContributionProvider(bind, DebugSessionContribution);
+    bind(DebugSessionFactory).toDynamicValue(ctx => new DefaultDebugSessionFactory(ctx.container)).inSingletonScope();
     bind(DebugSessionManager).toSelf().inSingletonScope();
 
     bind(BreakpointManager).toSelf().inSingletonScope();
@@ -118,6 +123,7 @@ export default new ContainerModule((bind: interfaces.Bind) => {
     bindLaunchPreferences(bind);
 
     bind(DebugWatchManager).toSelf().inSingletonScope();
+    bind(DebugExpressionProvider).toSelf().inSingletonScope();
 
     bind(DebugTabBarDecorator).toSelf().inSingletonScope();
     bind(TabBarDecorator).toService(DebugTabBarDecorator);
@@ -133,4 +139,15 @@ export default new ContainerModule((bind: interfaces.Bind) => {
     bindDisassemblyView(bind);
 
     bind(DebugSessionConfigurationLabelProvider).toSelf().inSingletonScope();
+    bind(AddOrEditDataBreakpointAddress).toSelf().inSingletonScope();
+    bind(DebugBreakpointOpener).toSelf().inSingletonScope();
+    bind(OpenHandler).toService(DebugBreakpointOpener);
+
+    bind(WorkspaceRestrictionContribution).toConstantValue({
+        getRestrictions(): WorkspaceRestriction[] {
+            return [{
+                label: nls.localize('theia/debug/debugRestricted', 'Debugging is disabled in Restricted Mode')
+            }];
+        }
+    });
 });

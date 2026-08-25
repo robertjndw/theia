@@ -16,6 +16,8 @@
 
 import { ContainerModule } from '@theia/core/shared/inversify';
 import { ConnectionContainerModule } from '@theia/core/lib/node/messaging/connection-container-module';
+import { DevContainerCliContribution } from './dev-container-cli-contribution';
+import { CliContribution } from '@theia/core/lib/node';
 import { DevContainerConnectionProvider } from './remote-container-connection-provider';
 import { RemoteContainerConnectionProvider, RemoteContainerConnectionProviderPath } from '../electron-common/remote-container-connection-provider';
 import { ContainerCreationContribution, DockerContainerService } from './docker-container-service';
@@ -29,6 +31,7 @@ import { ProfileFileModificationContribution } from './devcontainer-contribution
 import { DevContainerWorkspaceHandler } from './dev-container-workspace-handler';
 import { WorkspaceHandlerContribution } from '@theia/workspace/lib/node/default-workspace-server';
 import { registerVariableResolverContributions, VariableResolverContribution } from './devcontainer-contributions/variable-resolver-contribution';
+import { DockerComposeService } from './docker-compose/compose-service';
 
 export const remoteConnectionModule = ConnectionContainerModule.create(({ bind, bindBackendService }) => {
     bindContributionProvider(bind, ContainerCreationContribution);
@@ -54,6 +57,8 @@ export default new ContainerModule((bind, unbind, isBound, rebind) => {
     bind(DockerContainerService).toSelf().inSingletonScope();
     bind(ConnectionContainerModule).toConstantValue(remoteConnectionModule);
 
+    bind(DockerComposeService).toSelf().inSingletonScope();
+
     bind(DevContainerFileService).toSelf().inSingletonScope();
 
     bind(ExtensionsContribution).toSelf().inSingletonScope();
@@ -63,4 +68,7 @@ export default new ContainerModule((bind, unbind, isBound, rebind) => {
 
     bind(DevContainerWorkspaceHandler).toSelf().inSingletonScope();
     bind(WorkspaceHandlerContribution).toService(DevContainerWorkspaceHandler);
+
+    bind(DevContainerCliContribution).toSelf().inSingletonScope();
+    bind(CliContribution).toService(DevContainerCliContribution);
 });

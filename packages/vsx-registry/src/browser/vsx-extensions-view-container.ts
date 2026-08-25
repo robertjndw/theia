@@ -56,7 +56,7 @@ export class VSXExtensionsViewContainer extends ViewContainer {
     }
 
     protected override onAfterAttach(msg: Message): void {
-        super.onBeforeAttach(msg);
+        super.onAfterAttach(msg);
         this.updateMode();
         this.toDisposeOnDetach.push(this.model.search.onDidChangeQuery(() => this.updateMode()));
     }
@@ -173,9 +173,16 @@ export class VSXExtensionsViewContainer extends ViewContainer {
             id: VSXExtensionsCommands.CLEAR_ALL.id,
             command: VSXExtensionsCommands.CLEAR_ALL.id,
             text: VSXExtensionsCommands.CLEAR_ALL.label,
-            group: 'other_1',
             priority: 1,
             onDidChange: this.model.onDidChange,
+            isVisible: (widget: Widget) => widget === this.getTabBarDelegate()
+        }));
+
+        this.toDisposeOnUpdateTitle.push(this.toolbarRegistry.registerItem({
+            id: VSXExtensionsCommands.REFRESH.id,
+            command: VSXExtensionsCommands.REFRESH.id,
+            tooltip: VSXExtensionsCommands.REFRESH.label,
+            priority: 2,
             isVisible: (widget: Widget) => widget === this.getTabBarDelegate()
         }));
     }

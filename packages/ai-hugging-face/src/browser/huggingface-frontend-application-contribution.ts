@@ -14,10 +14,11 @@
 // SPDX-License-Identifier: EPL-2.0 OR GPL-2.0-only WITH Classpath-exception-2.0
 // *****************************************************************************
 
-import { FrontendApplicationContribution, PreferenceService } from '@theia/core/lib/browser';
+import { FrontendApplicationContribution } from '@theia/core/lib/browser';
 import { inject, injectable } from '@theia/core/shared/inversify';
 import { HuggingFaceLanguageModelsManager, HuggingFaceModelDescription } from '../common';
-import { API_KEY_PREF, MODELS_PREF } from './huggingface-preferences';
+import { API_KEY_PREF, MODELS_PREF } from '../common/huggingface-preferences';
+import { PreferenceService } from '@theia/core';
 
 const HUGGINGFACE_PROVIDER_ID = 'huggingface';
 @injectable()
@@ -36,15 +37,23 @@ export class HuggingFaceFrontendApplicationContribution implements FrontendAppli
             const apiKey = this.preferenceService.get<string>(API_KEY_PREF, undefined);
             this.manager.setApiKey(apiKey);
 
+            const proxyUri = this.preferenceService.get<string>('http.proxy', undefined);
+            this.manager.setProxyUrl(proxyUri);
+
             const models = this.preferenceService.get<string[]>(MODELS_PREF, []);
             this.manager.createOrUpdateLanguageModels(...models.map(modelId => this.createHuggingFaceModelDescription(modelId)));
             this.prevModels = [...models];
 
             this.preferenceService.onPreferenceChanged(event => {
                 if (event.preferenceName === API_KEY_PREF) {
-                    this.manager.setApiKey(event.newValue);
+                    const newApiKey = this.preferenceService.get<string>(API_KEY_PREF, undefined);
+                    this.manager.setApiKey(newApiKey);
+                    this.updateAllModels();
                 } else if (event.preferenceName === MODELS_PREF) {
-                    this.handleModelChanges(event.newValue as string[]);
+                    this.handleModelChanges(this.preferenceService.get<string[]>(MODELS_PREF, []));
+                } else if (event.preferenceName === 'http.proxy') {
+                    this.manager.setProxyUrl(this.preferenceService.get<string>('http.proxy', undefined));
+                    this.updateAllModels();
                 }
             });
         });
@@ -60,6 +69,12 @@ export class HuggingFaceFrontendApplicationContribution implements FrontendAppli
         this.manager.removeLanguageModels(...modelsToRemove.map(model => `${HUGGINGFACE_PROVIDER_ID}/${model}`));
         this.manager.createOrUpdateLanguageModels(...modelsToAdd.map(modelId => this.createHuggingFaceModelDescription(modelId)));
         this.prevModels = newModels;
+    }
+
+    protected updateAllModels(): void {
+        if (this.prevModels && this.prevModels.length > 0) {
+            this.manager.createOrUpdateLanguageModels(...this.prevModels.map(modelId => this.createHuggingFaceModelDescription(modelId)));
+        }
     }
 
     protected createHuggingFaceModelDescription(

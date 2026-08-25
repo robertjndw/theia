@@ -14,9 +14,10 @@
 // SPDX-License-Identifier: EPL-2.0 OR GPL-2.0-only WITH Classpath-exception-2.0
 // *****************************************************************************
 
-import { inject, injectable, postConstruct } from 'inversify';
+import { inject, injectable, optional, postConstruct } from 'inversify';
 import { LoggerWatcher } from './logger-watcher';
 import { ILoggerServer, LogLevel, ConsoleLogger, rootLoggerName } from './logger-protocol';
+import { LoggerSanitizer } from './logger-sanitizer';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
@@ -54,6 +55,9 @@ export function setRootLogger(aLogger: ILogger): void {
 
 export type Log = (message: any, ...params: any[]) => void;
 export type Loggable = (log: Log) => void;
+
+/** Shared no-op {@link Log} returned for a disabled level so that callers neither block nor emit. */
+const nullLogger: Log = () => { };
 
 export const LoggerFactory = Symbol('LoggerFactory');
 export type LoggerFactory = (name: string) => ILogger;
@@ -239,6 +243,7 @@ export class Logger implements ILogger {
     @inject(LoggerWatcher) protected readonly loggerWatcher: LoggerWatcher;
     @inject(LoggerFactory) protected readonly factory: LoggerFactory;
     @inject(LoggerName) protected name: string;
+    @inject(LoggerSanitizer) @optional() protected readonly sanitizer: LoggerSanitizer | undefined;
 
     protected cache = new Map<string, ILogger>();
 
@@ -302,6 +307,9 @@ export class Logger implements ILogger {
     }
     log(logLevel: number, arg2: any | Loggable, ...params: any[]): Promise<void> {
         return this.getLog(logLevel).then(log => {
+            if (log === nullLogger) {
+                return;
+            }
             if (typeof arg2 === 'function') {
                 const loggable = arg2;
                 loggable(log);
@@ -311,18 +319,47 @@ export class Logger implements ILogger {
         });
     }
     protected getLog(logLevel: number): Promise<Log> {
-        return this.ifEnabled(logLevel).then(() =>
-            this.created.then(() =>
+        return this.isEnabled(logLevel).then(enabled => {
+            if (!enabled) {
+                return nullLogger;
+            }
+            return this.created.then(() =>
                 (message: any, ...params: any[]) =>
                     this.server.log(this.name, logLevel, this.format(message), params.map(p => this.format(p)))
-            )
-        );
+            );
+        });
     }
     protected format(value: any): any {
-        if (value instanceof Error) {
-            return value.stack || value.toString();
+        switch (typeof value) {
+            case 'object':
+                if (value instanceof Error) {
+                    return this.sanitize(value.stack || value.toString());
+                } else if (!value) {
+                    return value;
+                } else if (Array.isArray(value)) {
+                    return value.map(item => this.format(item));
+                } else {
+                    try {
+                        const stringified = JSON.stringify(value);
+                        const sanitized = this.sanitize(stringified);
+                        try {
+                            return JSON.parse(sanitized);
+                        } catch {
+                            return sanitized;
+                        }
+                    } catch {
+                        return value;
+                    }
+                }
+            case 'string':
+                return this.sanitize(value);
+            default:
+                return value;
         }
-        return value;
+    }
+
+    protected sanitize(message: string): string {
+        return this.sanitizer?.sanitize(message) ?? message;
     }
 
     isTrace(): Promise<boolean> {

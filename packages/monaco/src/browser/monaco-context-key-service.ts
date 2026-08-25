@@ -17,17 +17,22 @@
 import { injectable, postConstruct } from '@theia/core/shared/inversify';
 import {
     ContextKeyService as TheiaContextKeyService, ContextKey, ContextKeyChangeEvent,
-    ScopedValueStore, ContextMatcher, ContextKeyValue
+    ScopedValueStore, ContextMatcher, ContextKeyValue, Context
 } from '@theia/core/lib/browser/context-key-service';
-import { Emitter } from '@theia/core';
-import { AbstractContextKeyService } from '@theia/monaco-editor-core/esm/vs/platform/contextkey/browser/contextKeyService';
+import { Emitter, Event } from '@theia/core';
+import { AbstractContextKeyService, Context as MonacoContext } from '@theia/monaco-editor-core/esm/vs/platform/contextkey/browser/contextKeyService';
 import { ContextKeyExpr, ContextKeyExpression, IContext, IContextKeyService } from '@theia/monaco-editor-core/esm/vs/platform/contextkey/common/contextkey';
 import { StandaloneServices } from '@theia/monaco-editor-core/esm/vs/editor/standalone/browser/standaloneServices';
 
 @injectable()
 export class MonacoContextKeyService implements TheiaContextKeyService {
     protected readonly onDidChangeEmitter = new Emitter<ContextKeyChangeEvent>();
-    readonly onDidChange = this.onDidChangeEmitter.event;
+    get onDidChange(): Event<ContextKeyChangeEvent> {
+        if (this.activeContext && 'onDidChange' in this.activeContext && this.activeContext.onDidChange) {
+            return this.activeContext.onDidChange;
+        }
+        return this.onDidChangeEmitter.event;
+    }
 
     get contextKeyService(): AbstractContextKeyService {
         return StandaloneServices.get(IContextKeyService) as AbstractContextKeyService;
@@ -46,7 +51,7 @@ export class MonacoContextKeyService implements TheiaContextKeyService {
         return this.contextKeyService.createKey(key, defaultValue);
     }
 
-    activeContext?: HTMLElement | IContext;
+    activeContext?: HTMLElement | IContext | Context;
 
     match(expression: string, context?: HTMLElement): boolean {
         const parsed = this.parse(expression);
@@ -91,18 +96,25 @@ export class MonacoContextKeyService implements TheiaContextKeyService {
     }
 
     with<T>(values: Record<string, unknown>, callback: () => T): T {
-        const oldActive = this.activeContext;
         const id = this.contextKeyService.createChildContext();
         const child = this.contextKeyService.getContextValuesContainer(id);
         for (const [key, value] of Object.entries(values)) {
             child.setValue(key, value);
         }
-        this.activeContext = child;
+        try {
+            return this.withContext(child, callback);
+        } finally {
+            this.contextKeyService.disposeContext(id);
+        }
+    }
+
+    withContext<T>(context: Context, callback: () => T): T {
+        const oldActive = this.activeContext;
+        this.activeContext = context;
         try {
             return callback();
         } finally {
             this.activeContext = oldActive;
-            this.contextKeyService.disposeContext(id);
         }
     }
 
@@ -135,10 +147,23 @@ export class MonacoContextKeyService implements TheiaContextKeyService {
         this.contextKeyService.setContext(key, value);
     }
 
+    getLocalContextKeys(element: HTMLElement): Set<string> {
+        const context = this.contextKeyService.getContext(element);
+        // Get local values
+        if (context && context instanceof MonacoContext) {
+            const localValues = context.value;
+            // Filter out the internal '_contextId' key
+            const res = new Set(Object.keys(localValues));
+            res.delete('_contextId');
+            return res;
+        }
+        // For other IContext implementations (like NullContext), return empty set
+        return new Set<string>();
+    }
+
     dispose(): void {
         this.activeContext = undefined;
         this.onDidChangeEmitter.dispose();
         this.contextKeyService.dispose();
     }
 }
-

@@ -83,8 +83,9 @@ export interface TheiaCoreAPI {
     setSecondaryWindowCloseRequestHandler(windowName: string, handler: () => Promise<boolean>): void;
 
     toggleDevTools(): void;
+    openDevToolsForWindow(windowName: string): void;
     getZoomLevel(): Promise<number>;
-    setZoomLevel(desired: number): void;
+    setZoomLevel(desired: number, windowName?: string): void;
 
     isFullScreenable(): boolean; // TODO: this should really be async, since it blocks the renderer process
     isFullScreen(): boolean; // TODO: this should really be async, since it blocks the renderer process
@@ -103,6 +104,8 @@ export interface TheiaCoreAPI {
     sendData(data: Uint8Array): void;
     onData(handler: (data: Uint8Array) => void): Disposable;
     useNativeElements: boolean;
+
+    updateRecentWorkspaces(workspaceUris: string[], categoryName: string): void;
 }
 
 declare global {
@@ -141,6 +144,7 @@ export const CHANNEL_OPEN_URL = 'OpenUrl';
 export const CHANNEL_UNMAXIMIZE = 'UnMaximize';
 export const CHANNEL_ON_WINDOW_EVENT = 'OnWindowEvent';
 export const CHANNEL_TOGGLE_DEVTOOLS = 'ToggleDevtools';
+export const CHANNEL_OPEN_DEVTOOLS_FOR_WINDOW = 'OpenDevtoolsForWindow';
 export const CHANNEL_GET_ZOOM_LEVEL = 'GetZoomLevel';
 export const CHANNEL_SET_ZOOM_LEVEL = 'SetZoomLevel';
 export const CHANNEL_IS_FULL_SCREENABLE = 'IsFullScreenable';
@@ -160,3 +164,5 @@ export const CHANNEL_WRITE_CLIPBOARD = 'WriteClipboard';
 
 export const CHANNEL_KEYBOARD_LAYOUT_CHANGED = 'KeyboardLayoutChanged';
 export const CHANNEL_IPC_CONNECTION = 'IpcConnection';
+
+export const CHANNEL_UPDATE_RECENT_WORKSPACES = 'UpdateRecentWorkspaces';

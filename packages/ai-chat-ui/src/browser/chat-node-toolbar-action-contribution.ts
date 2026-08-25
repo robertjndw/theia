@@ -13,7 +13,7 @@
 //
 // SPDX-License-Identifier: EPL-2.0 OR GPL-2.0-only WITH Classpath-exception-2.0
 // *****************************************************************************
-import { Command, nls } from '@theia/core';
+import { Command, Event, nls } from '@theia/core';
 import { codicon } from '@theia/core/lib/browser';
 import { isRequestNode, RequestNode, ResponseNode } from './chat-tree-view';
 import { EditableChatRequestModel } from '@theia/ai-chat';
@@ -63,6 +63,12 @@ export interface ChatNodeToolbarActionContribution {
      * Returns the toolbar actions for the given node.
      */
     getToolbarActions(node: RequestNode | ResponseNode): ChatNodeToolbarAction[];
+    /**
+     * Optional event fired when the contributed actions may have changed (e.g. because a setting that gates
+     * them was toggled). The chat view listens to it and re-renders the node toolbars, so contributions can
+     * update live without waiting for the next response.
+     */
+    onDidChange?: Event<void>;
 }
 
 export namespace ChatNodeToolbarCommands {
@@ -92,13 +98,13 @@ export class DefaultChatNodeToolbarActionContribution implements ChatNodeToolbar
                 return [{
                     commandId: ChatNodeToolbarCommands.CANCEL.id,
                     icon: codicon('close'),
-                    tooltip: nls.localize('theia/ai/chat-ui/node/toolbar/cancel', 'Cancel'),
+                    tooltip: nls.localizeByDefault('Cancel'),
                 }];
             }
             return [{
                 commandId: ChatNodeToolbarCommands.EDIT.id,
                 icon: codicon('edit'),
-                tooltip: nls.localize('theia/ai/chat-ui/node/toolbar/edit', 'Edit'),
+                tooltip: nls.localizeByDefault('Edit'),
             }];
         } else {
             const shouldShowRetry = node.response.isError || node.response.isCanceled;
@@ -106,7 +112,7 @@ export class DefaultChatNodeToolbarActionContribution implements ChatNodeToolbar
                 return [{
                     commandId: ChatNodeToolbarCommands.RETRY.id,
                     icon: codicon('refresh'),
-                    tooltip: nls.localize('theia/ai/chat-ui/node/toolbar/retry', 'Retry'),
+                    tooltip: nls.localizeByDefault('Retry'),
                     priority: -1 // Higher priority to show it first
                 }];
             }

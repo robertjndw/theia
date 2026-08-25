@@ -18,8 +18,8 @@
 describe('SCM', function () {
 
     const { assert } = chai;
+    const { timeout } = require('@theia/core/lib/common/promise-util');
 
-    const { animationFrame } = require('@theia/core/lib/browser/browser');
     const { HostedPluginSupport } = require('@theia/plugin-ext/lib/hosted/browser/hosted-plugin');
     const Uri = require('@theia/core/lib/common/uri');
     const { ApplicationShell } = require('@theia/core/lib/browser/shell/application-shell');
@@ -55,30 +55,20 @@ describe('SCM', function () {
          * @param {string | undefined} [message]
          * @returns {Promise<void>}
          */
-    function waitForAnimation(condition, timeout, message) {
-        const success = new Promise(async (resolve, reject) => {
-            if (timeout === undefined) {
-                timeout = 100000;
+    async function waitForAnimation(condition, maxWait, message) {
+        if (maxWait === undefined) {
+            maxWait = 100000;
+        }
+        const endTime = Date.now() + maxWait;
+        do {
+            await (timeout(100));
+            if (condition()) {
+                return true;
             }
-
-            let timedOut = false;
-            const handle = setTimeout(() => {
-                console.log(message);
-                timedOut = true;
-            }, timeout);
-
-            do {
-                await animationFrame();
-            } while (!timedOut && !condition());
-            if (timedOut) {
-                reject(new Error(message ?? 'Wait for animation timed out.'));
-            } else {
-                clearTimeout(handle);
-                resolve(undefined);
+            if (Date.now() > endTime) {
+                throw new Error(message ?? 'Wait for animation timed out.');
             }
-
-        });
-        return success;
+        } while (true);
     }
 
 
@@ -117,33 +107,13 @@ describe('SCM', function () {
                 assert.isTrue(scmWidget.resourceWidget.isVisible);
             });
 
-            it('the view should not display the resource tree when no repository is present', () => {
+            it('the view should remain visible when no repository is present (shows welcome content)', () => {
 
                 // Store the current selected repository so it can be restored.
                 const cachedSelectedRepository = scmService.selectedRepository;
 
                 scmService.selectedRepository = undefined;
-                assert.isFalse(scmWidget.resourceWidget.isVisible);
-
-                // Restore the selected repository.
-                scmService.selectedRepository = cachedSelectedRepository;
-            });
-
-        });
-
-        describe('\'ScmNoRepositoryWidget\'', () => {
-
-            it('should not be visible when a repository is present', () => {
-                assert.isFalse(scmWidget.noRepositoryWidget.isVisible);
-            });
-
-            it('should be visible when no repository is present', () => {
-
-                // Store the current selected repository so it can be restored.
-                const cachedSelectedRepository = scmService.selectedRepository;
-
-                scmService.selectedRepository = undefined;
-                assert.isTrue(scmWidget.noRepositoryWidget.isVisible);
+                assert.isTrue(scmWidget.resourceWidget.isVisible);
 
                 // Restore the selected repository.
                 scmService.selectedRepository = cachedSelectedRepository;

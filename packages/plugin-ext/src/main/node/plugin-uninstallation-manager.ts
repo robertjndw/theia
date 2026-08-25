@@ -14,8 +14,8 @@
 // SPDX-License-Identifier: EPL-2.0 OR GPL-2.0-only WITH Classpath-exception-2.0
 // *****************************************************************************
 
-import { Emitter, Event } from '@theia/core';
-import { inject, injectable, postConstruct } from '@theia/core/shared/inversify';
+import { Emitter, Event, ILogger } from '@theia/core';
+import { inject, injectable, postConstruct, named } from '@theia/core/shared/inversify';
 import { PluginIdentifiers } from '../../common';
 import { SettingService } from '@theia/core/lib/node';
 import { Deferred } from '@theia/core/lib/common/promise-util';
@@ -27,14 +27,17 @@ export class PluginUninstallationManager {
     @inject(SettingService)
     protected readonly settingService: SettingService;
 
+    @inject(ILogger) @named('plugin-ext:PluginUninstallationManager')
+    protected readonly logger: ILogger;
+
     protected readonly onDidChangeUninstalledPluginsEmitter = new Emitter<readonly PluginIdentifiers.VersionedId[]>();
     onDidChangeUninstalledPlugins: Event<readonly PluginIdentifiers.VersionedId[]> = this.onDidChangeUninstalledPluginsEmitter.event;
 
-    protected readonly onDidChangeDisabledPluginsEmitter = new Emitter<readonly PluginIdentifiers.VersionedId[]>();
-    onDidChangeDisabledPlugins: Event<readonly PluginIdentifiers.VersionedId[]> = this.onDidChangeDisabledPluginsEmitter.event;
+    protected readonly onDidChangeDisabledPluginsEmitter = new Emitter<readonly PluginIdentifiers.UnversionedId[]>();
+    onDidChangeDisabledPlugins: Event<readonly PluginIdentifiers.UnversionedId[]> = this.onDidChangeDisabledPluginsEmitter.event;
 
     protected uninstalledPlugins: Set<PluginIdentifiers.VersionedId> = new Set();
-    protected disabledPlugins: Set<PluginIdentifiers.VersionedId> = new Set();
+    protected disabledPlugins: Set<PluginIdentifiers.UnversionedId> = new Set();
 
     protected readonly initialized = new Deferred<void>();
 
@@ -45,11 +48,13 @@ export class PluginUninstallationManager {
 
     protected async load(): Promise<void> {
         try {
-            const disabled: PluginIdentifiers.VersionedId[] = JSON.parse(await this.settingService.get(PluginUninstallationManager.DISABLED_PLUGINS) || '[]');
-            disabled.forEach(id => this.disabledPlugins.add(id));
+            const disabled: (PluginIdentifiers.VersionedId | PluginIdentifiers.UnversionedId)[] =
+                JSON.parse(await this.settingService.get(PluginUninstallationManager.DISABLED_PLUGINS) || '[]');
+
+            disabled.forEach(id => this.disabledPlugins.add(PluginIdentifiers.toUnversioned(id)));
         } catch (e) {
             // settings may be corrupt; just carry on
-            console.warn(e);
+            this.logger.warn(e);
         }
     }
 
@@ -91,7 +96,7 @@ export class PluginUninstallationManager {
         return [...this.uninstalledPlugins];
     }
 
-    async markAsDisabled(...pluginIds: PluginIdentifiers.VersionedId[]): Promise<boolean> {
+    async markAsDisabled(...pluginIds: PluginIdentifiers.UnversionedId[]): Promise<boolean> {
         await this.initialized.promise;
         let didChange = false;
         for (const id of pluginIds) {
@@ -107,7 +112,7 @@ export class PluginUninstallationManager {
         return didChange;
     }
 
-    async markAsEnabled(...pluginIds: PluginIdentifiers.VersionedId[]): Promise<boolean> {
+    async markAsEnabled(...pluginIds: PluginIdentifiers.UnversionedId[]): Promise<boolean> {
         await this.initialized.promise;
         let didChange = false;
         for (const id of pluginIds) {
@@ -120,12 +125,12 @@ export class PluginUninstallationManager {
         return didChange;
     }
 
-    async isDisabled(pluginId: PluginIdentifiers.VersionedId): Promise<boolean> {
+    async isDisabled(pluginId: PluginIdentifiers.UnversionedId): Promise<boolean> {
         await this.initialized.promise;
         return this.disabledPlugins.has(pluginId);
     }
 
-    async getDisabledPluginIds(): Promise<readonly PluginIdentifiers.VersionedId[]> {
+    async getDisabledPluginIds(): Promise<readonly PluginIdentifiers.UnversionedId[]> {
         await this.initialized.promise;
         return [...this.disabledPlugins];
     }

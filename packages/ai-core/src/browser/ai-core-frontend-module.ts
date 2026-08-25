@@ -13,12 +13,18 @@
 //
 // SPDX-License-Identifier: EPL-2.0 OR GPL-2.0-only WITH Classpath-exception-2.0
 // *****************************************************************************
-import { bindContributionProvider, CommandContribution, CommandHandler, ResourceResolver } from '@theia/core';
+
+import { bindRootContributionProvider, CommandContribution, CommandHandler, PreferenceContribution, ResourceResolver } from '@theia/core';
 import {
     RemoteConnectionProvider,
     ServiceConnectionProvider,
 } from '@theia/core/lib/browser/messaging/service-connection-provider';
 import { ContainerModule } from '@theia/core/shared/inversify';
+import { DefaultLanguageModelAliasRegistry } from './frontend-language-model-alias-registry';
+import { HideAiPreferencesContribution, aiConfigurationOpenPlaceholderSchema } from './hide-ai-preferences-contribution';
+import { TrustAwarePreferenceReader } from './trust-aware-preference-reader';
+import { AiConfigurationServiceImpl } from './ai-configuration-service-impl';
+import { LanguageModelAliasRegistry } from '../common/language-model-alias';
 import {
     AIVariableContribution,
     AIVariableService,
@@ -40,18 +46,20 @@ import {
     TOKEN_USAGE_SERVICE_PATH,
     TokenUsageServiceClient,
     AIVariableResourceResolver,
-    ConfigurableInMemoryResources
+    ConfigurableInMemoryResources,
+    Agent,
+    FrontendLanguageModelRegistry,
+    AiConfigurationService
 } from '../common';
 import {
     FrontendLanguageModelRegistryImpl,
     LanguageModelDelegateClientImpl,
 } from './frontend-language-model-registry';
-import { FrontendApplicationContribution, LabelProviderContribution, PreferenceContribution } from '@theia/core/lib/browser';
+import { FrontendApplicationContribution, LabelProviderContribution } from '@theia/core/lib/browser';
 import { TabBarToolbarContribution } from '@theia/core/lib/browser/shell/tab-bar-toolbar';
 import { LanguageGrammarDefinitionContribution } from '@theia/monaco/lib/browser/textmate';
 import { AICoreFrontendApplicationContribution } from './ai-core-frontend-application-contribution';
-import { bindAICorePreferences } from './ai-core-preferences';
-import { AgentSettingsPreferenceSchema } from './agent-preferences';
+import { bindAICorePreferences } from '../common/ai-core-preferences';
 import { AISettingsServiceImpl } from './ai-settings-service';
 import { DefaultPromptFragmentCustomizationService } from './frontend-prompt-customization-service';
 import { DefaultFrontendVariableService, FrontendVariableService } from './frontend-variable-service';
@@ -61,22 +69,34 @@ import { TheiaVariableContribution } from './theia-variable-contribution';
 import { TodayVariableContribution } from '../common/today-variable-contribution';
 import { AgentsVariableContribution } from '../common/agents-variable-contribution';
 import { OpenEditorsVariableContribution } from './open-editors-variable-contribution';
-import { AIActivationService } from './ai-activation-service';
+import { SkillsVariableContribution } from './skills-variable-contribution';
+import { AIActivationService, AIActivationServiceImpl } from './ai-activation-service';
 import { AgentService, AgentServiceImpl } from '../common/agent-service';
 import { AICommandHandlerFactory } from './ai-command-handler-factory';
 import { AISettingsService } from '../common/settings-service';
+import { DefaultSkillService, SkillService } from './skill-service';
+import { SkillPromptCoordinator } from './skill-prompt-coordinator';
 import { AiCoreCommandContribution } from './ai-core-command-contribution';
-import { PromptVariableContribution } from '../common/prompt-variable-contribution';
+import { PromptVariableContribution } from './prompt-variable-contribution';
+import { ProductNameVariableContribution } from './product-name-variable-contribution';
+import { CapabilityVariableContribution } from '../common/capability-variable-contribution';
+import { GenericCapabilitiesVariableContribution } from './generic-capabilities-variable-contribution';
+import { GenericCapabilitiesPromptFragmentContribution } from './generic-capabilities-prompt-fragment-contribution';
 import { LanguageModelService } from '../common/language-model-service';
 import { FrontendLanguageModelServiceImpl } from './frontend-language-model-service';
 import { TokenUsageFrontendService } from './token-usage-frontend-service';
 import { TokenUsageFrontendServiceImpl, TokenUsageServiceClientImpl } from './token-usage-frontend-service-impl';
 import { AIVariableUriLabelProvider } from './ai-variable-uri-label-provider';
+import { AgentNotificationService } from './agent-notification-service';
+import { OSNotificationService } from './os-notification-service';
+import { WindowBlinkService } from './window-blink-service';
 
 export default new ContainerModule(bind => {
-    bindContributionProvider(bind, LanguageModelProvider);
+    bindRootContributionProvider(bind, Agent);
+    bindRootContributionProvider(bind, LanguageModelProvider);
 
     bind(FrontendLanguageModelRegistryImpl).toSelf().inSingletonScope();
+    bind(FrontendLanguageModelRegistry).toService(FrontendLanguageModelRegistryImpl);
     bind(LanguageModelRegistry).toService(FrontendLanguageModelRegistryImpl);
 
     bind(LanguageModelDelegateClientImpl).toSelf().inSingletonScope();
@@ -100,7 +120,6 @@ export default new ContainerModule(bind => {
         .inSingletonScope();
 
     bindAICorePreferences(bind);
-    bind(PreferenceContribution).toConstantValue({ schema: AgentSettingsPreferenceSchema });
 
     bind(DefaultPromptFragmentCustomizationService).toSelf().inSingletonScope();
     bind(PromptFragmentCustomizationService).toService(DefaultPromptFragmentCustomizationService);
@@ -112,8 +131,15 @@ export default new ContainerModule(bind => {
     bind(CommandContribution).toService(PromptTemplateContribution);
     bind(TabBarToolbarContribution).toService(PromptTemplateContribution);
 
-    bind(AISettingsService).to(AISettingsServiceImpl).inRequestScope();
-    bindContributionProvider(bind, AIVariableContribution);
+    bind(AISettingsServiceImpl).toSelf().inSingletonScope();
+    bind(AISettingsService).toService(AISettingsServiceImpl);
+
+    bind(DefaultSkillService).toSelf().inSingletonScope();
+    bind(SkillService).toService(DefaultSkillService);
+
+    bind(SkillPromptCoordinator).toSelf().inSingletonScope();
+    bind(FrontendApplicationContribution).toService(SkillPromptCoordinator);
+    bindRootContributionProvider(bind, AIVariableContribution);
     bind(DefaultFrontendVariableService).toSelf().inSingletonScope();
     bind(FrontendVariableService).toService(DefaultFrontendVariableService);
     bind(AIVariableService).toService(FrontendVariableService);
@@ -122,27 +148,41 @@ export default new ContainerModule(bind => {
     bind(TheiaVariableContribution).toSelf().inSingletonScope();
     bind(AIVariableContribution).toService(TheiaVariableContribution);
 
-    bind(AIVariableContribution).to(PromptVariableContribution).inSingletonScope();
+    bind(PromptVariableContribution).toSelf().inSingletonScope();
+    bind(AIVariableContribution).toService(PromptVariableContribution);
     bind(AIVariableContribution).to(TodayVariableContribution).inSingletonScope();
     bind(AIVariableContribution).to(FileVariableContribution).inSingletonScope();
-    bind(AIVariableContribution).to(AgentsVariableContribution).inSingletonScope();
+    bind(AgentsVariableContribution).toSelf().inSingletonScope();
+    bind(AIVariableContribution).toService(AgentsVariableContribution);
     bind(AIVariableContribution).to(OpenEditorsVariableContribution).inSingletonScope();
+    bind(SkillsVariableContribution).toSelf().inSingletonScope();
+    bind(AIVariableContribution).toService(SkillsVariableContribution);
+    bind(AIVariableContribution).to(CapabilityVariableContribution).inSingletonScope();
+    bind(AIVariableContribution).to(ProductNameVariableContribution).inSingletonScope();
+
+    bind(GenericCapabilitiesVariableContribution).toSelf().inSingletonScope();
+    bind(AIVariableContribution).toService(GenericCapabilitiesVariableContribution);
+
+    bind(GenericCapabilitiesPromptFragmentContribution).toSelf().inSingletonScope();
+    bind(FrontendApplicationContribution).toService(GenericCapabilitiesPromptFragmentContribution);
 
     bind(FrontendApplicationContribution).to(AICoreFrontendApplicationContribution).inSingletonScope();
 
     bind(ToolInvocationRegistry).to(ToolInvocationRegistryImpl).inSingletonScope();
-    bindContributionProvider(bind, ToolProvider);
+    bindRootContributionProvider(bind, ToolProvider);
 
-    bind(AIActivationService).toSelf().inSingletonScope();
+    bind(AIActivationServiceImpl).toSelf().inSingletonScope();
+    bind(AIActivationService).toService(AIActivationServiceImpl);
     bind(FrontendApplicationContribution).toService(AIActivationService);
+
     bind(AgentServiceImpl).toSelf().inSingletonScope();
     bind(AgentService).toService(AgentServiceImpl);
 
     bind(AICommandHandlerFactory).toFactory<CommandHandler>(context => (handler: CommandHandler) => {
-        const activationService = context.container.get(AIActivationService);
+        const activationService = context.container.get<AIActivationService>(AIActivationService);
         return {
             execute: (...args: unknown[]) => handler.execute(...args),
-            isEnabled: (...args: unknown[]) => activationService.isActive && (handler.isEnabled?.(...args) ?? true),
+            isEnabled: (...args: unknown[]) => activationService.canRun && (handler.isEnabled?.(...args) ?? true),
             isVisible: (...args: unknown[]) => activationService.isActive && (handler.isVisible?.(...args) ?? true),
             isToggled: handler.isToggled
         };
@@ -156,6 +196,20 @@ export default new ContainerModule(bind => {
     bind(TokenUsageFrontendService).to(TokenUsageFrontendServiceImpl).inSingletonScope();
     bind(TokenUsageServiceClient).to(TokenUsageServiceClientImpl).inSingletonScope();
 
+    bind(DefaultLanguageModelAliasRegistry).toSelf().inSingletonScope();
+    bind(LanguageModelAliasRegistry).toService(DefaultLanguageModelAliasRegistry);
+
+    // Hide all AI preferences from the Settings UI; they are managed in the AI Configuration view (#316).
+    bind(PreferenceContribution).to(HideAiPreferencesContribution).inSingletonScope();
+    // ...and leave a single placeholder entry there that links to the AI Configuration view.
+    bind(PreferenceContribution).toConstantValue({ schema: aiConfigurationOpenPlaceholderSchema });
+
+    // Internal implementation detail of AiConfigurationService; consumers inject AiConfigurationService.
+    bind(TrustAwarePreferenceReader).toSelf().inSingletonScope();
+
+    bind(AiConfigurationServiceImpl).toSelf().inSingletonScope();
+    bind(AiConfigurationService).toService(AiConfigurationServiceImpl);
+
     bind(TokenUsageService).toDynamicValue(ctx => {
         const connection = ctx.container.get<ServiceConnectionProvider>(RemoteConnectionProvider);
         const client = ctx.container.get<TokenUsageServiceClient>(TokenUsageServiceClient);
@@ -165,6 +219,10 @@ export default new ContainerModule(bind => {
     bind(ResourceResolver).toService(AIVariableResourceResolver);
     bind(AIVariableUriLabelProvider).toSelf().inSingletonScope();
     bind(LabelProviderContribution).toService(AIVariableUriLabelProvider);
+
+    bind(AgentNotificationService).toSelf().inSingletonScope();
+    bind(OSNotificationService).toSelf().inSingletonScope();
+    bind(WindowBlinkService).toSelf().inSingletonScope();
     bind(ConfigurableInMemoryResources).toSelf().inSingletonScope();
     bind(ResourceResolver).toService(ConfigurableInMemoryResources);
 });

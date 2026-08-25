@@ -14,9 +14,9 @@
 // SPDX-License-Identifier: EPL-2.0 OR GPL-2.0-only WITH Classpath-exception-2.0
 // *****************************************************************************
 
-import { Disposable, MessageService, Prioritizeable } from '@theia/core';
+import { Disposable, MessageService, nls, Prioritizeable, ILogger } from '@theia/core';
 import { FrontendApplicationContribution, OpenerService, open } from '@theia/core/lib/browser';
-import { inject, injectable } from '@theia/core/shared/inversify';
+import { inject, injectable, named } from '@theia/core/shared/inversify';
 import {
     AIVariable,
     AIVariableArg,
@@ -108,6 +108,8 @@ export class DefaultFrontendVariableService extends DefaultAIVariableService imp
     @inject(MessageService) protected readonly messageService: MessageService;
     @inject(AIVariableResourceResolver) protected readonly aiResourceResolver: AIVariableResourceResolver;
     @inject(OpenerService) protected readonly openerService: OpenerService;
+    @inject(ILogger) @named('ai-core:DefaultFrontendVariableService')
+    protected override readonly logger: ILogger;
 
     onStart(): void {
         this.initContributions();
@@ -192,22 +194,22 @@ export class DefaultFrontendVariableService extends DefaultAIVariableService imp
         const { variableName, arg } = this.parseRequest(request);
         const variable = this.getVariable(variableName);
         if (!variable) {
-            this.messageService.warn('No variable found for open request.');
+            this.messageService.warn(nls.localize('theia/ai/core/noVariableFoundForOpenRequest', 'No variable found for open request.'));
             return;
         }
         const opener = await this.getOpener(variableName, arg, context);
         try {
             return opener ? opener.open({ variable, arg }, context ?? {}) : this.openReadonly({ variable, arg }, context);
         } catch (err) {
-            console.error('Unable to open variable:', err);
-            this.messageService.error('Unable to display variable value.');
+            this.logger.error('Unable to open variable:', err);
+            this.messageService.error(nls.localize('theia/ai/core/unableToDisplayVariableValue', 'Unable to display variable value.'));
         }
     }
 
     protected async openReadonly(request: AIVariableResolutionRequest, context: AIVariableContext = {}): Promise<void> {
         const resolved = await this.resolveVariable(request, context);
         if (resolved === undefined) {
-            this.messageService.warn('Unable to resolve variable.');
+            this.messageService.warn(nls.localize('theia/ai/core/unableToResolveVariable', 'Unable to resolve variable.'));
             return;
         }
         const resource = this.aiResourceResolver.getOrCreate(request, context, resolved.value);

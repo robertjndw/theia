@@ -14,16 +14,18 @@
 // SPDX-License-Identifier: EPL-2.0 OR GPL-2.0-only WITH Classpath-exception-2.0
 // *****************************************************************************
 
-import { ContributionProvider, MaybePromise, URI } from '@theia/core';
+import { ContributionProvider, MaybePromise, URI, ILogger } from '@theia/core';
+import { VariableContext } from './devcontainer-contributions/variable-resolver-contribution';
 import { inject, injectable, named } from '@theia/core/shared/inversify';
 import { WorkspaceServer } from '@theia/workspace/lib/common';
 import * as fs from '@theia/core/shared/fs-extra';
 import * as Docker from 'dockerode';
 import { ContainerConnectionOptions } from '../electron-common/remote-container-connection-provider';
-import { DevContainerConfiguration } from './devcontainer-file';
+import { DevContainerConfiguration, NonComposeContainerBase } from './devcontainer-file';
 import { DevContainerFileService } from './dev-container-file-service';
 import { ContainerOutputProvider } from '../electron-common/container-output-provider';
-import { RemoteDockerContainerConnection } from './remote-container-connection-provider';
+import { RemoteDockerContainerConnection } from './remote-docker-container-connection';
+import { DockerComposeService } from './docker-compose/compose-service';
 
 export const ContainerCreationContribution = Symbol('ContainerCreationContributions');
 
@@ -60,14 +62,18 @@ export class DockerContainerService {
     @inject(DevContainerFileService)
     protected readonly devContainerFileService: DevContainerFileService;
 
-    container: Docker.Container | undefined;
+    @inject(DockerComposeService)
+    protected readonly dockerComposeService: DockerComposeService;
+
+    @inject(ILogger) @named('dev-container:DockerContainerService')
+    protected readonly logger: ILogger;
 
     async getOrCreateContainer(docker: Docker, options: ContainerConnectionOptions, outputProvider?: ContainerOutputProvider): Promise<Docker.Container> {
         let container;
 
         const workspace = new URI(options.workspacePath ?? await this.workspaceServer.getMostRecentlyUsedWorkspace());
 
-        if (options.lastContainerInfo && fs.statSync(options.devcontainerFile).mtimeMs < options.lastContainerInfo.lastUsed) {
+        if (options.lastContainerInfo && fs.pathExistsSync(options.devcontainerFile) && fs.statSync(options.devcontainerFile).mtimeMs < options.lastContainerInfo.lastUsed) {
             try {
                 container = docker.getContainer(options.lastContainerInfo.id);
                 if ((await container.inspect()).State.Running) {
@@ -77,18 +83,18 @@ export class DockerContainerService {
                 }
             } catch (e) {
                 container = undefined;
-                console.warn('DevContainer: could not find last used container');
+                this.logger.warn('DevContainer: could not find last used container');
             }
         }
         if (!container) {
             container = await this.buildContainer(docker, options.devcontainerFile, workspace, outputProvider);
         }
-        this.container = container;
         return container;
     }
 
-    async postConnect(devcontainerFile: string, connection: RemoteDockerContainerConnection, outputProvider?: ContainerOutputProvider): Promise<void> {
-        const devcontainerConfig = await this.devContainerFileService.getConfiguration(devcontainerFile);
+    async postConnect(devcontainerFile: string, connection: RemoteDockerContainerConnection, outputProvider?: ContainerOutputProvider,
+        context?: VariableContext): Promise<void> {
+        const devcontainerConfig = await this.devContainerFileService.getConfiguration(devcontainerFile, context);
 
         for (const containerCreateContrib of this.containerCreationContributions.getContributions()) {
             await containerCreateContrib.handlePostConnect?.(devcontainerConfig, connection, outputProvider);
@@ -121,9 +127,28 @@ export class DockerContainerService {
             await containerCreateContrib.handleContainerCreation?.(containerCreateOptions, devcontainerConfig, docker, outputProvider);
         }
 
-        // TODO add more config
-        const container = await docker.createContainer(containerCreateOptions);
-        await container.start();
+        // Per the devcontainer spec, overrideCommand defaults to true for non-compose containers.
+        // When true, override the image's CMD with a sleep loop to keep the container alive.
+        if (!devcontainerConfig.dockerComposeFile) {
+            const overrideCommand = (devcontainerConfig as NonComposeContainerBase).overrideCommand;
+            if (overrideCommand !== false) {
+                containerCreateOptions.Cmd = ['/bin/sh', '-c', 'while sleep 1000; do :; done'];
+            }
+        }
+
+        let container: Docker.Container;
+
+        if (devcontainerConfig.dockerComposeFile) {
+            const containerName = await this.dockerComposeService.createContainers(devcontainerConfig, containerCreateOptions, outputProvider);
+            const services = await docker.listContainers({ filters: { label: [`com.docker.compose.service=${containerName}`] } });
+            if (services.length === 0) {
+                throw new Error(`No running container found for docker compose service ${containerName}`);
+            }
+            container = docker.getContainer(services[0].Id);
+        } else {
+            container = await docker.createContainer(containerCreateOptions);
+            await container.start();
+        }
 
         for (const containerCreateContrib of this.containerCreationContributions.getContributions()) {
             await containerCreateContrib.handlePostCreate?.(devcontainerConfig, container, docker, outputProvider);
@@ -131,4 +156,5 @@ export class DockerContainerService {
 
         return container;
     }
+
 }

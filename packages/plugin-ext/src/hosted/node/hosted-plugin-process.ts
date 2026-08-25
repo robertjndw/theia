@@ -22,10 +22,11 @@ import { inject, injectable, named } from '@theia/core/shared/inversify';
 import * as cp from 'child_process';
 import { Duplex } from 'stream';
 import { HostedPluginClient, PLUGIN_HOST_BACKEND, PluginHostEnvironmentVariable, ServerPluginRunner } from '../../common/plugin-protocol';
+import { PluginHostNavigatorState } from '../../main/common/plugin-host-environment-preferences';
 import { HostedPluginCliContribution } from './hosted-plugin-cli-contribution';
 import { HostedPluginLocalizationService } from './hosted-plugin-localization-service';
 import { ProcessTerminateMessage, ProcessTerminatedMessage } from './hosted-plugin-protocol';
-import psTree = require('ps-tree');
+import { ProcessUtils } from '@theia/core/lib/node/process-utils';
 
 export interface IPCConnectionOptions {
     readonly serverName: string;
@@ -45,7 +46,7 @@ export class HostedPluginProcess implements ServerPluginRunner {
     @inject(HostedPluginProcessConfiguration)
     protected configuration: HostedPluginProcessConfiguration;
 
-    @inject(ILogger)
+    @inject(ILogger) @named('plugin-ext:HostedPluginProcess')
     protected readonly logger: ILogger;
 
     @inject(HostedPluginCliContribution)
@@ -60,6 +61,12 @@ export class HostedPluginProcess implements ServerPluginRunner {
 
     @inject(HostedPluginLocalizationService)
     protected readonly localizationService: HostedPluginLocalizationService;
+
+    @inject(ProcessUtils)
+    protected readonly processUtils: ProcessUtils;
+
+    @inject(PluginHostNavigatorState)
+    protected readonly navigatorState: PluginHostNavigatorState;
 
     private childProcess: cp.ChildProcess | undefined;
     private messagePipe?: BinaryMessagePipe;
@@ -130,23 +137,7 @@ export class HostedPluginProcess implements ServerPluginRunner {
     }
 
     killProcessTree(parentPid: number): void {
-        psTree(parentPid, (_, childProcesses) => {
-            childProcesses.forEach(childProcess =>
-                this.killProcess(parseInt(childProcess.PID))
-            );
-            this.killProcess(parentPid);
-        });
-    }
-
-    protected killProcess(pid: number): void {
-        try {
-            process.kill(pid);
-        } catch (e) {
-            if (e && 'code' in e && e.code === 'ESRCH') {
-                return;
-            }
-            this.logger.error(`[${pid}] failed to kill`, e);
-        }
+        this.processUtils.terminateProcessTree(parentPid);
     }
 
     public runPluginServer(serverName?: string): void {
@@ -181,6 +172,9 @@ export class HostedPluginProcess implements ServerPluginRunner {
         env['VSCODE_NLS_CONFIG'] = JSON.stringify(this.localizationService.getNlsConfig());
         // apply external env variables
         this.pluginHostEnvironmentVariables.getContributions().forEach(envVar => envVar.process(env));
+        if (this.navigatorState.supportNodeGlobalNavigator) {
+            env['THEIA_SUPPORT_NODE_GLOBAL_NAVIGATOR'] = 'true';
+        }
         if (this.cli.extensionTestsPath) {
             env.extensionTestsPath = this.cli.extensionTestsPath;
         }

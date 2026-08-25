@@ -14,19 +14,42 @@
 // SPDX-License-Identifier: EPL-2.0 OR GPL-2.0-only WITH Classpath-exception-2.0
 // *****************************************************************************
 
-import { Event, Emitter, URI } from '@theia/core';
-import { inject, injectable, optional, postConstruct } from '@theia/core/shared/inversify';
+import { Event, Emitter, URI, ILogger, DisposableCollection } from '@theia/core';
+import { inject, injectable, optional, postConstruct, named } from '@theia/core/shared/inversify';
 import { AIVariableArg, AIVariableContext, AIVariableService, createAIResolveVariableCache, ResolvedAIVariable } from './variable-service';
 import { ToolInvocationRegistry } from './tool-invocation-registry';
 import { toolRequestToPromptText } from './language-model-util';
 import { ToolRequest } from './language-model';
-import { matchFunctionsRegEx, matchVariablesRegEx } from './prompt-service-util';
+import { FRONT_MATTER_REGEX, matchFunctionsRegEx, matchVariablesRegEx, parseFunctionReference, stripFrontMatter } from './prompt-service-util';
 import { AISettingsService } from './settings-service';
+
+export interface CommandPromptFragmentMetadata {
+    /** Display name for this prompt fragment (defaults to fragment id if not specified) */
+    name?: string;
+
+    /** Description of this prompt fragment's purpose */
+    description?: string;
+
+    /** Mark this template as available as a slash command */
+    isCommand?: boolean;
+
+    /** Display name for the command (defaults to fragment id if not specified) */
+    commandName?: string;
+
+    /** Description shown in command autocomplete */
+    commandDescription?: string;
+
+    /** Hint for command arguments shown in autocomplete detail (e.g., "<topic>", "[options]") */
+    commandArgumentHint?: string;
+
+    /** List of agent IDs this command is available for (undefined means available for all agents) */
+    commandAgents?: string[];
+}
 
 /**
  * Represents a basic prompt fragment with an ID and template content.
  */
-export interface BasePromptFragment {
+export interface BasePromptFragment extends CommandPromptFragmentMetadata {
     /** Unique identifier for this prompt fragment */
     id: string;
 
@@ -74,6 +97,16 @@ export function isCustomizedPromptFragment(fragment: PromptFragment): fragment i
 }
 
 /**
+ * Contains the effective variant ID and customization state for a prompt fragment
+ */
+export interface PromptVariantInfo {
+    /** The effective variant ID for the prompt fragment */
+    variantId: string;
+    /** Whether this variant has been customized by the user */
+    isCustomized: boolean;
+}
+
+/**
  * Map of prompt fragment IDs to prompt fragments
  */
 export interface PromptMap { [id: string]: PromptFragment }
@@ -91,8 +124,43 @@ export interface ResolvedPromptFragment {
     /** All functions referenced in the prompt fragment */
     functionDescriptions?: Map<string, ToolRequest>;
 
+    /**
+     * Ids of functions referenced in the prompt fragment that were marked as
+     * deferred (`~{?functionId}`). Deferred tools should not be loaded into
+     * the model's context upfront. Providers that support deferred tool
+     * loading (e.g. Anthropic, OpenAI) may use this information to set the
+     * appropriate flag on the tool definition and include the tool search
+     * tool in the request.
+     */
+    deferredFunctionIds?: Set<string>;
+
     /** All variables resolved in the prompt fragment */
     variables?: ResolvedAIVariable[];
+}
+
+/**
+ * One alternative prompt template available for a custom agent. Variants are loaded from
+ * `<scope>/agents/<id>/*.prompttemplate` files (one variant per file; id = filename stem).
+ */
+export interface CustomAgentPromptVariant {
+    id: string;
+    template: string;
+}
+
+export namespace CustomAgentPromptVariant {
+    export function equals(a: CustomAgentPromptVariant, b: CustomAgentPromptVariant): boolean {
+        return a.id === b.id && a.template === b.template;
+    }
+
+    export function arrayEquals(a?: readonly CustomAgentPromptVariant[], b?: readonly CustomAgentPromptVariant[]): boolean {
+        const aArr = a ?? [];
+        const bArr = b ?? [];
+        if (aArr.length !== bArr.length) { return false; }
+        for (let i = 0; i < aArr.length; i++) {
+            if (!equals(aArr[i], bArr[i])) { return false; }
+        }
+        return true;
+    }
 }
 
 /**
@@ -108,11 +176,20 @@ export interface CustomAgentDescription {
     /** Description of the agent's purpose and capabilities */
     description: string;
 
-    /** The prompt text for this agent */
+    /** The prompt text for this agent (the default variant body) */
     prompt: string;
 
     /** The default large language model to use with this agent */
     defaultLLM: string;
+
+    /** Whether this agent should appear in the chat UI (defaults to true if not specified) */
+    showInChat?: boolean;
+
+    /**
+     * Optional additional prompt variants for this agent. Loaded from sibling
+     * `.prompttemplate` files in the same `<scope>/agents/<id>/` folder.
+     */
+    promptVariants?: CustomAgentPromptVariant[];
 }
 
 export namespace CustomAgentDescription {
@@ -121,20 +198,53 @@ export namespace CustomAgentDescription {
      */
     export function is(entry: unknown): entry is CustomAgentDescription {
         // eslint-disable-next-line no-null/no-null
-        return typeof entry === 'object' && entry !== null
-            && 'id' in entry && typeof entry.id === 'string'
-            && 'name' in entry && typeof entry.name === 'string'
-            && 'description' in entry && typeof entry.description === 'string'
-            && 'prompt' in entry && typeof entry.prompt === 'string'
-            && 'defaultLLM' in entry && typeof entry.defaultLLM === 'string';
+        if (typeof entry !== 'object' || entry === null) {
+            return false;
+        }
+        if (!('id' in entry && typeof entry.id === 'string')) {
+            return false;
+        }
+        if (!('name' in entry && typeof entry.name === 'string')) {
+            return false;
+        }
+        if (!('description' in entry && typeof entry.description === 'string')) {
+            return false;
+        }
+        if (!('prompt' in entry && typeof entry.prompt === 'string')) {
+            return false;
+        }
+        if (!('defaultLLM' in entry && typeof entry.defaultLLM === 'string')) {
+            return false;
+        }
+        if ('showInChat' in entry && typeof entry.showInChat !== 'boolean') {
+            return false;
+        }
+        return true;
     }
 
     /**
-     * Compares two CustomAgentDescription objects for equality
+     * Compares two CustomAgentDescription objects for equality (including prompt variants).
      */
     export function equals(a: CustomAgentDescription, b: CustomAgentDescription): boolean {
-        return a.id === b.id && a.name === b.name && a.description === b.description && a.prompt === b.prompt && a.defaultLLM === b.defaultLLM;
+        return a.id === b.id
+            && a.name === b.name
+            && a.description === b.description
+            && a.prompt === b.prompt
+            && a.defaultLLM === b.defaultLLM
+            && a.showInChat === b.showInChat
+            && CustomAgentPromptVariant.arrayEquals(a.promptVariants, b.promptVariants);
     }
+}
+
+/**
+ * A discoverable custom-agent location within a single prompt-templates scope. `kind` distinguishes
+ * the per-agent `agents/` directory from the legacy `customAgents.yml` file; consumers should
+ * branch on it rather than inspecting the URI's basename.
+ */
+export interface CustomAgentsLocation {
+    uri: URI;
+    exists: boolean;
+    kind: 'agents-dir' | 'legacy-yaml';
 }
 
 /**
@@ -257,12 +367,56 @@ export interface PromptFragmentCustomizationService {
     getCustomAgents(): Promise<CustomAgentDescription[]>;
 
     /**
-     * Gets the locations of custom agent configuration files
-     * @returns Array of URIs and existence status
+     * Gets the locations of custom agent configuration files. Each scope contributes both an
+     * `agents/` directory entry and a legacy `customAgents.yml` entry, discriminated by
+     * {@link CustomAgentsLocation.kind}.
+     * @returns Array of locations with their kind and existence status
      */
-    getCustomAgentsLocations(): Promise<{ uri: URI, exists: boolean }[]>;
+    getCustomAgentsLocations(): Promise<CustomAgentsLocation[]>;
 
     /**
+     * Creates a per-agent file at `<parentDirectory>/agents/<agent.id>/agent.md` from the given
+     * description, then opens it. Replaces a previously existing `agent.md` for the same id.
+     *
+     * @param parentDirectory The prompt-templates scope (e.g. workspace `.prompts/` or the global templates dir)
+     * @param agent The agent description to serialize
+     * @returns The URI of the created file
+     */
+    createCustomAgentFile(parentDirectory: URI, agent: CustomAgentDescription): Promise<URI>;
+
+    /**
+     * Returns `true` if migration would write anything: a scope still holds a legacy
+     * `customAgents.yml`, or a previously migrated scope has `agent.md` files that can be corrected
+     * (e.g. headings that were folded by an earlier migration). Read-only; performs no writes and is
+     * intended for deciding whether to prompt the user before migrating.
+     */
+    hasPendingCustomAgentMigration(): Promise<boolean>;
+
+    /**
+     * Migrates every reachable `customAgents.yml` to the per-agent `agents/<id>/agent.md` layout and
+     * corrects already-migrated `agent.md` files whose headings were folded by an earlier migration.
+     * The user's original content is never deleted: on success (or on partial failure when no backup
+     * exists yet) the YAML is renamed to `customAgents.yml.bak`; if a `.bak` already exists it is not
+     * overwritten and the YAML is left in place. Corrections only overwrite `agent.md` files the user
+     * has not edited since migration.
+     * Idempotent — rerunning never overwrites an already up-to-date agent file.
+     */
+    migrateCustomAgentsYaml(): Promise<Array<{
+        scope: URI;
+        yamlURI: URI;
+        migrated: number;
+        alreadyPresent: number;
+        failed: number;
+        yamlBackedUp: boolean;
+        promptOverridesMigrated: number;
+        corrected: number;
+    }>>;
+
+    /**
+     * @deprecated Use {@link createCustomAgentFile} to author agents in the new
+     * `<scope>/agents/<id>/agent.md` layout. Kept so legacy callers continue to work
+     * until they are migrated.
+     *
      * Opens an existing customAgents.yml file at the given URI, or creates a new one if it doesn't exist.
      *
      * @param uri The URI of the customAgents.yml file to open or create
@@ -283,7 +437,7 @@ export interface PromptService {
     /**
      * Event fired when the selected variant for a prompt variant set changes
      */
-    readonly onSelectedVariantChange: Event<{ promptVariantSetId: string, variantId: string }>;
+    readonly onSelectedVariantChange: Event<{ promptVariantSetId: string, variantId: string | undefined }>;
 
     /**
      * Gets the raw prompt fragment with comments
@@ -305,6 +459,26 @@ export interface PromptService {
      * @returns The built-in fragment or undefined if not found
      */
     getBuiltInRawPrompt(fragmentId: string): PromptFragment | undefined;
+
+    /**
+     * Gets a prompt fragment by command name (for slash commands)
+     * @param commandName The command name to search for
+     * @returns The fragment with the matching command name or undefined if not found
+     */
+    getPromptFragmentByCommandName(commandName: string): PromptFragment | undefined;
+
+    /**
+     * Checks whether `/name` can be resolved as a slash command.
+     *
+     * This mirrors the lookup performed when resolving the `prompt` variable: the name may either be
+     * the command name of a fragment marked as a command, or the id of any existing prompt fragment.
+     * Use this before interpreting a `/name` token as a command, so that unrelated text such as Unix
+     * paths is not mistaken for a command.
+     *
+     * @param name The command name or prompt fragment id
+     * @returns `true` if a matching command or prompt fragment exists
+     */
+    isKnownCommand(name: string): boolean;
 
     /**
      * Resolves a prompt fragment by replacing variables and function references
@@ -363,11 +537,29 @@ export interface PromptService {
     getVariantIds(promptVariantSetId: string): string[];
 
     /**
-     * Gets the currently selected variant ID of the given set
+     * Gets the explicitly selected variant ID for a prompt fragment from settings.
+     * This returns only the variant that was explicitly selected in settings, not the default.
      * @param promptVariantSetId The prompt variant set id
-     * @returns The selected variant ID or the main ID if no variant is selected
+     * @returns The selected variant ID from settings, or undefined if none is selected
      */
-    getSelectedVariantId(promptVariantSetId: string): Promise<string | undefined>;
+    getSelectedVariantId(promptVariantSetId: string): string | undefined;
+
+    /**
+     * Gets the effective variant ID that is guaranteed to be valid if one exists.
+     * This checks if the selected variant ID is valid, and falls back to the default variant if it isn't.
+     * @param promptVariantSetId The prompt variant set id
+     * @returns A valid variant ID if one exists, or undefined if no valid variant can be found
+     */
+    getEffectiveVariantId(promptVariantSetId: string): string | undefined;
+
+    /**
+     * Gets the effective variant ID and customization state for a prompt fragment.
+     * This is a convenience method that combines getEffectiveVariantId and customization check.
+     * @param fragmentId The prompt fragment ID or variant set ID
+     * @param modeId Optional mode ID to use as variant override (if it's a valid variant for the fragment)
+     * @returns The variant info or undefined if no valid variant exists
+     */
+    getPromptVariantInfo(fragmentId: string, modeId?: string): PromptVariantInfo | undefined;
 
     /**
      * Gets the default variant ID of the given set
@@ -391,6 +583,13 @@ export interface PromptService {
     getPromptVariantSets(): Map<string, string[]>;
 
     /**
+     * Gets all prompt fragments marked as commands, optionally filtered by agent
+     * @param agentId Optional agent ID to filter commands (undefined returns commands for all agents)
+     * @returns Array of command prompt fragments
+     */
+    getCommands(agentId?: string): PromptFragment[];
+
+    /**
      * The following methods delegate to the PromptFragmentCustomizationService
      */
     createCustomization(fragmentId: string): Promise<void>;
@@ -408,11 +607,17 @@ export interface PromptService {
 
 @injectable()
 export class PromptServiceImpl implements PromptService {
+    @inject(ILogger) @named('ai-core:PromptServiceImpl')
+    protected readonly logger: ILogger;
+
     @inject(AISettingsService) @optional()
     protected readonly settingsService: AISettingsService | undefined;
 
     @inject(PromptFragmentCustomizationService) @optional()
     protected readonly customizationService: PromptFragmentCustomizationService | undefined;
+
+    // Map to store selected variant for each prompt variant set (key: promptVariantSetId, value: variantId)
+    protected _selectedVariantsMap = new Map<string, string>();
 
     @inject(AIVariableService) @optional()
     protected readonly variableService: AIVariableService | undefined;
@@ -434,19 +639,78 @@ export class PromptServiceImpl implements PromptService {
     readonly onPromptsChange = this._onPromptsChangeEmitter.event;
 
     // Event emitter for selected variant changes
-    protected _onSelectedVariantChangeEmitter = new Emitter<{ promptVariantSetId: string, variantId: string }>();
+    protected _onSelectedVariantChangeEmitter = new Emitter<{ promptVariantSetId: string, variantId: string | undefined }>();
     readonly onSelectedVariantChange = this._onSelectedVariantChangeEmitter.event;
+
+    protected promptChangeDebounceTimer?: NodeJS.Timeout;
+
+    protected toDispose = new DisposableCollection();
+
+    protected fireOnPromptsChangeDebounced(): void {
+        if (this.promptChangeDebounceTimer) {
+            clearTimeout(this.promptChangeDebounceTimer);
+        }
+        this.promptChangeDebounceTimer = setTimeout(() => {
+            this._onPromptsChangeEmitter.fire();
+        }, 300);
+    }
 
     @postConstruct()
     protected init(): void {
         if (this.customizationService) {
-            this.customizationService.onDidChangePromptFragmentCustomization(() => {
-                this._onPromptsChangeEmitter.fire();
-            });
-            this.customizationService.onDidChangeCustomAgents(() => {
-                this._onPromptsChangeEmitter.fire();
-            });
+            this.toDispose.pushAll([
+                this.customizationService.onDidChangePromptFragmentCustomization(() => {
+                    this.fireOnPromptsChangeDebounced();
+                }),
+                this.customizationService.onDidChangeCustomAgents(() => {
+                    this.fireOnPromptsChangeDebounced();
+                })
+            ]);
         }
+        if (this.settingsService) {
+            this.recalculateSelectedVariantsMap();
+            this.toDispose.push(
+                this.settingsService!.onDidChange(async () => {
+                    await this.recalculateSelectedVariantsMap();
+                })
+            );
+        }
+    }
+
+    /**
+     * Recalculates the selected variants map for all variant sets and fires the onSelectedVariantChangeEmitter
+     * if the selectedVariants field has changed.
+     */
+    protected async recalculateSelectedVariantsMap(): Promise<void> {
+        if (!this.settingsService) {
+            return;
+        }
+        const agentSettingsMap = await this.settingsService.getSettings();
+        const newSelectedVariants = new Map<string, string>();
+        for (const agentSettings of Object.values(agentSettingsMap)) {
+            if (agentSettings.selectedVariants) {
+                for (const [variantSetId, variantId] of Object.entries(agentSettings.selectedVariants)) {
+                    if (!newSelectedVariants.has(variantSetId)) {
+                        newSelectedVariants.set(variantSetId, variantId);
+                    }
+                }
+            }
+        }
+        // Compare with the old map and fire events for changes and removed variant sets
+        for (const [variantSetId, newVariantId] of newSelectedVariants.entries()) {
+            const oldVariantId = this._selectedVariantsMap.get(variantSetId);
+            if (oldVariantId !== newVariantId) {
+                this._onSelectedVariantChangeEmitter.fire({ promptVariantSetId: variantSetId, variantId: newVariantId });
+            }
+        }
+        for (const oldVariantSetId of this._selectedVariantsMap.keys()) {
+            if (!newSelectedVariants.has(oldVariantSetId)) {
+                this._onSelectedVariantChangeEmitter.fire({ promptVariantSetId: oldVariantSetId, variantId: undefined });
+            }
+        }
+        this._selectedVariantsMap = newSelectedVariants;
+        // Also fire a full prompts change, because other fields (like effectiveVariantId) might have changed
+        this.fireOnPromptsChangeDebounced();
     }
 
     // ===== Fragment Retrieval Methods =====
@@ -460,6 +724,10 @@ export class PromptServiceImpl implements PromptService {
         return this._builtInFragments.find(fragment => fragment.id === fragmentId);
     }
 
+    protected findBuiltInFragmentByName(fragmentName: string): BasePromptFragment | undefined {
+        return this._builtInFragments.find(fragment => fragment.commandName === fragmentName);
+    }
+
     getRawPromptFragment(fragmentId: string): PromptFragment | undefined {
         if (this.customizationService?.isPromptFragmentCustomized(fragmentId)) {
             const customizedFragment = this.customizationService.getActivePromptFragmentCustomization(fragmentId);
@@ -471,7 +739,7 @@ export class PromptServiceImpl implements PromptService {
     }
 
     getBuiltInRawPrompt(fragmentId: string): PromptFragment | undefined {
-        return this.findBuiltInFragmentById(fragmentId);
+        return this.findBuiltInFragmentById(fragmentId) ?? this.findBuiltInFragmentByName(fragmentId);
     }
 
     getPromptFragment(fragmentId: string): PromptFragment | undefined {
@@ -481,8 +749,35 @@ export class PromptServiceImpl implements PromptService {
         }
         return {
             ...rawFragment,
-            template: this.stripComments(rawFragment.template)
+            template: stripFrontMatter(this.stripComments(rawFragment.template))
         };
+    }
+
+    getPromptFragmentByCommandName(commandName: string): PromptFragment | undefined {
+        // First check customized fragments
+        if (this.customizationService) {
+            const customizedIds = this.customizationService.getCustomizedPromptFragmentIds();
+            for (const fragmentId of customizedIds) {
+                const fragment = this.customizationService.getActivePromptFragmentCustomization(fragmentId);
+                if (fragment?.isCommand && fragment.commandName === commandName) {
+                    return fragment;
+                }
+            }
+        }
+
+        // Then check built-in fragments
+        return this._builtInFragments.find(fragment =>
+            fragment.isCommand && fragment.commandName === commandName
+        );
+    }
+
+    isKnownCommand(name: string): boolean {
+        if (!name) {
+            return false;
+        }
+        // Both lookups are needed because the `prompt` variable resolves a command either by its
+        // command name or, as a fallback, by prompt fragment id.
+        return this.getPromptFragmentByCommandName(name) !== undefined || this.getRawPromptFragment(name) !== undefined;
     }
 
     /**
@@ -495,27 +790,97 @@ export class PromptServiceImpl implements PromptService {
         return commentRegex.test(templateText) ? templateText.replace(commentRegex, '').trimStart() : templateText;
     }
 
-    async getSelectedVariantId(fragmentId: string): Promise<string | undefined> {
-        if (this.settingsService) {
-            const agentSettingsMap = await this.settingsService.getSettings();
-
-            for (const agentSettings of Object.values(agentSettingsMap)) {
-                if (agentSettings.selectedVariants && agentSettings.selectedVariants[fragmentId]) {
-                    return agentSettings.selectedVariants[fragmentId];
+    /**
+     * Extracts metadata fields from YAML front matter in the template and
+     * merges them onto the fragment. Programmatic fields take precedence over
+     * front matter values so callers can still override individual fields.
+     */
+    protected enrichWithFrontMatter(fragment: BasePromptFragment): BasePromptFragment {
+        const match = fragment.template.match(FRONT_MATTER_REGEX);
+        if (!match) {
+            return fragment;
+        }
+        const yamlBlock = match[1];
+        const extracted: Partial<CommandPromptFragmentMetadata> = {};
+        for (const line of yamlBlock.split('\n')) {
+            const kv = line.match(/^\s*(\w+)\s*:\s*(.*?)\s*$/);
+            if (kv) {
+                const [, key, value] = kv;
+                if (key === 'name' && !fragment.name) {
+                    extracted.name = value;
+                } else if (key === 'description' && !fragment.description) {
+                    extracted.description = value;
                 }
             }
         }
-        return this.getDefaultVariantId(fragmentId);
+        if (extracted.name || extracted.description) {
+            return { ...fragment, ...extracted };
+        }
+        return fragment;
     }
 
-    protected async resolvePotentialSystemPrompt(promptFragmentId: string): Promise<PromptFragment | undefined> {
-        if (this._promptVariantSetsMap.has(promptFragmentId)) {
-            // This is a systemPrompt find the selected variant
-            const selectedVariantId = await this.getSelectedVariantId(promptFragmentId);
-            if (selectedVariantId === undefined) {
+    getSelectedVariantId(variantSetId: string): string | undefined {
+        return this._selectedVariantsMap.get(variantSetId);
+    }
+
+    getEffectiveVariantId(variantSetId: string): string | undefined {
+        const selectedVariantId = this.getSelectedVariantId(variantSetId);
+
+        // Check if the selected variant actually exists
+        if (selectedVariantId) {
+            const variantIds = this.getVariantIds(variantSetId);
+            if (!variantIds.includes(selectedVariantId)) {
+                this.logger.warn(`Selected variant '${selectedVariantId}' for prompt set '${variantSetId}' does not exist. Falling back to default variant.`);
+            } else {
+                return selectedVariantId;
+            }
+        }
+
+        // Fall back to default variant
+        const defaultVariantId = this.getDefaultVariantId(variantSetId);
+        if (defaultVariantId) {
+            const variantIds = this.getVariantIds(variantSetId);
+            if (!variantIds.includes(defaultVariantId)) {
+                this.logger.error(`Default variant '${defaultVariantId}' for prompt set '${variantSetId}' does not exist.`);
                 return undefined;
             }
-            return this.getPromptFragment(selectedVariantId);
+            return defaultVariantId;
+        }
+
+        // No valid selected or default variant
+        if (this.getVariantIds(variantSetId).length > 0) {
+            this.logger.error(`No valid selected or default variant found for prompt set '${variantSetId}'.`);
+        }
+        return undefined;
+    }
+
+    getPromptVariantInfo(fragmentId: string, modeId?: string): PromptVariantInfo | undefined {
+        // If modeId is provided and is a valid variant, use it; otherwise use effective variant
+        let variantId: string | undefined;
+        if (modeId) {
+            const variantIds = this.getVariantIds(fragmentId);
+            if (variantIds.includes(modeId)) {
+                variantId = modeId;
+            }
+        }
+        variantId ??= this.getEffectiveVariantId(fragmentId) ?? fragmentId;
+
+        const rawFragment = this.getRawPromptFragment(variantId);
+        if (!rawFragment) {
+            return undefined;
+        }
+        const isCustomized = isCustomizedPromptFragment(rawFragment);
+        return { variantId, isCustomized };
+    }
+
+    protected resolvePotentialSystemPrompt(promptFragmentId: string): PromptFragment | undefined {
+        if (this._promptVariantSetsMap.has(promptFragmentId)) {
+            // This is a systemPrompt find the effective variant
+            const effectiveVariantId = this.getEffectiveVariantId(promptFragmentId);
+            if (effectiveVariantId === undefined) {
+                return undefined;
+            }
+            return this.getPromptFragment(effectiveVariantId);
         }
         return this.getPromptFragment(promptFragmentId);
     }
@@ -523,7 +888,7 @@ export class PromptServiceImpl implements PromptService {
     // ===== Fragment Resolution Methods =====
 
     async getResolvedPromptFragment(systemOrFragmentId: string, args?: { [key: string]: unknown }, context?: AIVariableContext): Promise<ResolvedPromptFragment | undefined> {
-        const promptFragment = await this.resolvePotentialSystemPrompt(systemOrFragmentId);
+        const promptFragment = this.resolvePotentialSystemPrompt(systemOrFragmentId);
         if (promptFragment === undefined) {
             return undefined;
         }
@@ -538,12 +903,16 @@ export class PromptServiceImpl implements PromptService {
         // This allows to resolve function references contained in resolved variables (e.g. prompt fragments)
         const functionMatches = matchFunctionsRegEx(resolvedTemplate);
         const functionMap = new Map<string, ToolRequest>();
+        const deferredFunctionIds = new Set<string>();
         const functionReplacements = functionMatches.map(match => {
             const completeText = match[0];
-            const functionId = match[1];
+            const { id: functionId, deferred } = parseFunctionReference(match[1]);
             const toolRequest = this.toolInvocationRegistry?.getFunction(functionId);
             if (toolRequest) {
                 functionMap.set(toolRequest.id, toolRequest);
+                if (deferred) {
+                    deferredFunctionIds.add(toolRequest.id);
+                }
             }
             return {
                 placeholder: completeText,
@@ -557,6 +926,7 @@ export class PromptServiceImpl implements PromptService {
             id: systemOrFragmentId,
             text: resolvedTemplate,
             functionDescriptions: functionMap.size > 0 ? functionMap : undefined,
+            deferredFunctionIds: deferredFunctionIds.size > 0 ? deferredFunctionIds : undefined,
             variables: variableAndArgResolutions.resolvedVariables
         };
     }
@@ -567,7 +937,7 @@ export class PromptServiceImpl implements PromptService {
         context?: AIVariableContext,
         resolveVariable?: (variable: AIVariableArg) => Promise<ResolvedAIVariable | undefined>
     ): Promise<Omit<ResolvedPromptFragment, 'functionDescriptions'> | undefined> {
-        const promptFragment = await this.resolvePotentialSystemPrompt(systemOrFragmentId);
+        const promptFragment = this.resolvePotentialSystemPrompt(systemOrFragmentId);
         if (promptFragment === undefined) {
             return undefined;
         }
@@ -722,7 +1092,7 @@ export class PromptServiceImpl implements PromptService {
             }
         }
 
-        this._onPromptsChangeEmitter.fire();
+        this.fireOnPromptsChangeDebounced();
     }
 
     getVariantIds(variantSetId: string): string[] {
@@ -783,13 +1153,16 @@ export class PromptServiceImpl implements PromptService {
     }
 
     addBuiltInPromptFragment(promptFragment: BasePromptFragment, promptVariantSetId?: string, isDefault: boolean = false): void {
-        const existingIndex = this._builtInFragments.findIndex(fragment => fragment.id === promptFragment.id);
+        const enriched = this.enrichWithFrontMatter(promptFragment);
+        this.checkCommandUniqueness(enriched);
+
+        const existingIndex = this._builtInFragments.findIndex(fragment => fragment.id === enriched.id);
         if (existingIndex !== -1) {
             // Replace existing fragment with the same ID
-            this._builtInFragments[existingIndex] = promptFragment;
+            this._builtInFragments[existingIndex] = enriched;
         } else {
             // Add new fragment
-            this._builtInFragments.push(promptFragment);
+            this._builtInFragments.push(enriched);
         }
 
         // If this is a variant of a prompt variant set, record it in the variants map
@@ -797,7 +1170,27 @@ export class PromptServiceImpl implements PromptService {
             this.addFragmentVariant(promptVariantSetId, promptFragment.id, isDefault);
         }
 
-        this._onPromptsChangeEmitter.fire();
+        this.fireOnPromptsChangeDebounced();
+    }
+
+    protected checkCommandUniqueness(promptFragment: BasePromptFragment): void {
+        if (promptFragment.isCommand && promptFragment.commandName) {
+            const commandName = promptFragment.commandName;
+            const duplicates = this._builtInFragments.filter(
+                f => f.isCommand && f.commandName === commandName && (
+                    // undefined commandAgents means applicable to all agents
+                    f.commandAgents === undefined ||
+                    promptFragment.commandAgents === undefined ||
+                    // Check for overlapping command agents
+                    f.commandAgents.some(agent => promptFragment.commandAgents!.includes(agent))
+                )
+            );
+            if (duplicates.length > 0) {
+                this.logger.warn(
+                    `Command name '${commandName}' is used by multiple fragments: ${promptFragment.id} and ${duplicates.map(d => d.id).join(', ')}`
+                );
+            }
+        }
     }
 
     // ===== Variant Management Methods =====
@@ -945,5 +1338,15 @@ export class PromptServiceImpl implements PromptService {
             const builtInTemplate = this.findBuiltInFragmentById(fragmentId);
             await this.customizationService.editBuiltInPromptFragmentCustomization(fragmentId, builtInTemplate?.template);
         }
+    }
+
+    getCommands(agentId?: string): PromptFragment[] {
+        const allCommands = this.getActivePromptFragments().filter(fragment => fragment.isCommand === true);
+
+        if (!agentId) {
+            return allCommands;
+        }
+
+        return allCommands.filter(fragment => !fragment.commandAgents || fragment.commandAgents.includes(agentId));
     }
 }

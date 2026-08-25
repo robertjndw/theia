@@ -20,6 +20,7 @@ import { FrontendApplicationContribution } from './frontend-application-contribu
 import { Emitter, MaybePromise, URI } from '../common';
 import { timeout, Deferred } from '../common/promise-util';
 import { IJSONSchema } from '../common/json-schema';
+import { ILogger } from '../common/logger';
 
 export interface JsonSchemaConfiguration {
     fileMatch: string | string[];
@@ -40,6 +41,9 @@ export class JsonSchemaStore implements FrontendApplicationContribution {
 
     @inject(ContributionProvider) @named(JsonSchemaContribution)
     protected readonly contributions: ContributionProvider<JsonSchemaContribution>;
+
+    @inject(ILogger) @named('core:JsonSchemaStore')
+    protected readonly logger: ILogger;
 
     protected readonly _schemas = new Deferred<JsonSchemaConfiguration[]>();
     get schemas(): Promise<JsonSchemaConfiguration[]> {
@@ -68,9 +72,9 @@ export class JsonSchemaStore implements FrontendApplicationContribution {
             if (result) {
                 pendingRegistrations.push(result.then(() => { }, e => {
                     if (e instanceof Error && e.message === frozenErrorCode) {
-                        console.error(`${contribution.constructor.name}.registerSchemas is taking more than ${registerTimeout.toFixed(1)} ms, new schemas are ignored.`);
+                        this.logger.error(`${contribution.constructor.name}.registerSchemas is taking more than ${registerTimeout.toFixed(1)} ms, new schemas are ignored.`);
                     } else {
-                        console.error(e);
+                        this.logger.error(e);
                     }
                 }));
             }
@@ -127,10 +131,15 @@ export class JsonSchemaDataStore {
 
 @injectable()
 export class DefaultJsonSchemaContribution implements JsonSchemaContribution {
+
+    private static excludedSchemaUrls = [
+        'https://www.schemastore.org/task.json'
+    ];
+
     async registerSchemas(context: JsonSchemaRegisterContext): Promise<void> {
         const catalog = require('./catalog.json') as { schemas: DefaultJsonSchemaContribution.SchemaData[] };
         for (const s of catalog.schemas) {
-            if (s.fileMatch) {
+            if (s.fileMatch && this.shouldRegisterSchema(s)) {
                 context.registerSchema({
                     fileMatch: s.fileMatch,
                     url: s.url
@@ -139,6 +148,9 @@ export class DefaultJsonSchemaContribution implements JsonSchemaContribution {
         }
     }
 
+    protected shouldRegisterSchema(s: DefaultJsonSchemaContribution.SchemaData): boolean {
+        return !DefaultJsonSchemaContribution.excludedSchemaUrls.includes(s.url);
+    }
 }
 export namespace DefaultJsonSchemaContribution {
     export interface SchemaData {

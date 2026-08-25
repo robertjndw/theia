@@ -14,7 +14,7 @@
 // SPDX-License-Identifier: EPL-2.0 OR GPL-2.0-only WITH Classpath-exception-2.0
 // *****************************************************************************
 
-import { injectable, inject, optional, postConstruct } from 'inversify';
+import { injectable, inject, optional, postConstruct, named } from 'inversify';
 import { ArrayExt, find, toArray, each } from '@lumino/algorithm';
 import {
     BoxLayout, BoxPanel, DockLayout, DockPanel, FocusTracker, Layout, Panel, SplitLayout,
@@ -35,17 +35,18 @@ import { TabBarToolbarRegistry, TabBarToolbarFactory } from './tab-bar-toolbar';
 import { ContextKeyService } from '../context-key-service';
 import { Emitter } from '../../common/event';
 import { waitForRevealed, waitForClosed, PINNED_CLASS, UnsafeWidgetUtilities } from '../widgets';
-import { CorePreferences } from '../core-preferences';
+import { CorePreferences } from '../../common/core-preferences';
 import { BreadcrumbsRendererFactory } from '../breadcrumbs/breadcrumbs-renderer';
 import { Deferred } from '../../common/promise-util';
 import { SaveableService } from '../saveable-service';
 import { nls } from '../../common/nls';
-import { SecondaryWindowHandler } from '../secondary-window-handler';
+import { extractSecondaryWindow, SecondaryWindowHandler } from '../secondary-window-handler';
 import URI from '../../common/uri';
 import { OpenerService } from '../opener-service';
 import { PreviewableWidget } from '../widgets/previewable-widget';
 import { WindowService } from '../window/window-service';
 import { TheiaSplitPanel } from './theia-split-panel';
+import { ILogger } from '../../common/logger';
 
 /** The class name added to ApplicationShell instances. */
 export const APPLICATION_SHELL_CLASS = 'theia-ApplicationShell';
@@ -78,7 +79,7 @@ export const applicationShellLayoutVersion: ApplicationShellLayoutVersion = 5.0;
 export const ApplicationShellOptions = Symbol('ApplicationShellOptions');
 export const DockPanelRendererFactory = Symbol('DockPanelRendererFactory');
 export interface DockPanelRendererFactory {
-    (): DockPanelRenderer
+    (document?: Document | ShadowRoot): DockPanelRenderer
 }
 
 /**
@@ -88,6 +89,12 @@ export interface DockPanelRendererFactory {
 export class DockPanelRenderer implements DockLayout.IRenderer {
     readonly tabBarClasses: string[] = [];
 
+    /**
+     * In case of DockPanels rendered in secondary windows, will be set
+     * to the document of that window
+     */
+    document?: Document | ShadowRoot;
+
     private readonly onDidCreateTabBarEmitter = new Emitter<TabBar<Widget>>();
 
     constructor(
@@ -95,7 +102,7 @@ export class DockPanelRenderer implements DockLayout.IRenderer {
         @inject(TabBarToolbarRegistry) protected readonly tabBarToolbarRegistry: TabBarToolbarRegistry,
         @inject(TabBarToolbarFactory) protected readonly tabBarToolbarFactory: TabBarToolbarFactory,
         @inject(BreadcrumbsRendererFactory) protected readonly breadcrumbsRendererFactory: BreadcrumbsRendererFactory,
-        @inject(CorePreferences) protected readonly corePreferences: CorePreferences
+        @inject(CorePreferences) protected readonly corePreferences: CorePreferences,
     ) { }
 
     get onDidCreateTabBar(): CommonEvent<TabBar<Widget>> {
@@ -120,6 +127,7 @@ export class DockPanelRenderer implements DockLayout.IRenderer {
             this.tabBarToolbarFactory,
             this.breadcrumbsRendererFactory,
             {
+                document: this.document,
                 renderer
             },
             {
@@ -173,6 +181,12 @@ interface WidgetDragState {
 }
 
 export const MAXIMIZED_CLASS = 'theia-maximized';
+export const WidgetAreaResolver = Symbol('WidgetAreaResolver');
+export interface WidgetAreaResolver {
+    resolveArea(widgetId: string, requestedArea: ApplicationShell.Area): ApplicationShell.Area | undefined;
+    setActivePlacementMap(map: Map<string, ApplicationShell.Area>): void;
+}
+
 /**
  * The application shell manages the top-level widgets of the application. Use this class to
  * add, remove, or activate a widget.
@@ -234,6 +248,9 @@ export class ApplicationShell extends Widget {
 
     @inject(UntitledResourceResolver)
     protected readonly untitledResourceResolver: UntitledResourceResolver;
+
+    @inject(ILogger) @named('core:ApplicationShell')
+    protected readonly logger: ILogger;
 
     protected readonly onDidAddWidgetEmitter = new Emitter<Widget>();
     readonly onDidAddWidget = this.onDidAddWidgetEmitter.event;
@@ -313,8 +330,8 @@ export class ApplicationShell extends Widget {
         };
         if (corePreferences) {
             corePreferences.onPreferenceChanged(preference => {
-                if (preference.preferenceName === 'window.menuBarVisibility' && (preference.newValue === 'visible' || preference.oldValue === 'visible')) {
-                    this.handleMenuBarVisibility(preference.newValue);
+                if (preference.preferenceName === 'window.menuBarVisibility') {
+                    this.handleMenuBarVisibility(corePreferences['window.menuBarVisibility']);
                 }
             });
         }
@@ -332,7 +349,7 @@ export class ApplicationShell extends Widget {
             });
             this.corePreferences.onPreferenceChanged(preference => {
                 if (preference.preferenceName === 'window.menuBarVisibility') {
-                    this.setTopPanelVisibility(preference.newValue);
+                    this.setTopPanelVisibility(this.corePreferences['window.menuBarVisibility']);
                 }
             });
         }
@@ -344,6 +361,7 @@ export class ApplicationShell extends Widget {
                 });
             }
         });
+        this.refreshBottomPanelToggleButton();
         this.initializedDeferred.resolve();
     }
 
@@ -366,7 +384,7 @@ export class ApplicationShell extends Widget {
         this.rightPanelHandler.dockPanel.widgetAdded.connect((_, widget) => this.fireDidAddWidget(widget));
         this.rightPanelHandler.dockPanel.widgetRemoved.connect((_, widget) => this.fireDidRemoveWidget(widget));
 
-        this.secondaryWindowHandler.init(this);
+        this.secondaryWindowHandler.init(this, this.dockPanelRendererFactory);
         this.secondaryWindowHandler.onDidAddWidget(([widget, window]) => this.fireDidAddWidget(widget));
         this.secondaryWindowHandler.onDidRemoveWidget(([widget, window]) => this.fireDidRemoveWidget(widget));
 
@@ -588,7 +606,7 @@ export class ApplicationShell extends Widget {
                 const opener = await this.openerService.getOpener(fileUri);
                 opener.open(fileUri);
             } catch (e) {
-                console.info(`no opener found for '${fileUri}'`);
+                this.logger.info(`no opener found for '${fileUri}'`);
             }
         };
 
@@ -656,7 +674,7 @@ export class ApplicationShell extends Widget {
         this.additionalDraggedUris = undefined;
     }
 
-    protected static getDraggedEditorUris(dataTransfer: DataTransfer): URI[] {
+    static getDraggedEditorUris(dataTransfer: DataTransfer): URI[] {
         const data = dataTransfer.getData('theia-editor-dnd');
         return data ? data.split('\n').map(entry => new URI(entry)) : [];
     }
@@ -678,14 +696,10 @@ export class ApplicationShell extends Widget {
             spacing: 0
         }, area => this.doToggleMaximized(area));
         dockPanel.id = BOTTOM_AREA_ID;
-        dockPanel.widgetAdded.connect((sender, widget) => {
-            this.refreshBottomPanelToggleButton();
-        });
         dockPanel.widgetRemoved.connect((sender, widget) => {
             if (sender.isEmpty) {
                 this.collapseBottomPanel();
             }
-            this.refreshBottomPanelToggleButton();
         }, this);
         dockPanel.node.addEventListener('lm-dragenter', event => {
             // Make sure that the main panel hides its overlay when the bottom panel is expanded
@@ -876,7 +890,6 @@ export class ApplicationShell extends Widget {
                     }
                 });
             }
-            this.refreshBottomPanelToggleButton();
         }
         // Proceed with the main panel once all others are set up
         await this.bottomPanelState.pendingUpdate;
@@ -958,6 +971,20 @@ export class ApplicationShell extends Widget {
         }
     }
 
+    @inject(WidgetAreaResolver) @optional()
+    protected readonly widgetAreaResolver: WidgetAreaResolver | undefined;
+
+    protected resolveWidgetArea(widget: Widget, options?: Readonly<ApplicationShell.WidgetOptions>): Readonly<ApplicationShell.WidgetOptions> | undefined {
+        if (this.widgetAreaResolver && !options?.ref) {
+            const requestedArea = options?.area || 'main';
+            const resolvedArea = this.widgetAreaResolver.resolveArea(widget.id, requestedArea);
+            if (resolvedArea && resolvedArea !== requestedArea) {
+                return { ...options, area: resolvedArea };
+            }
+        }
+        return options;
+    }
+
     /**
      * Add a widget to the application shell. The given widget must have a unique `id` property,
      * which will be used as the DOM id.
@@ -968,10 +995,11 @@ export class ApplicationShell extends Widget {
      */
     async addWidget(widget: Widget, options?: Readonly<ApplicationShell.WidgetOptions>): Promise<void> {
         if (!widget.id) {
-            console.error('Widgets added to the application shell must have a unique id property.');
+            this.logger.error('Widgets added to the application shell must have a unique id property.');
             return;
         }
-        const { area, addOptions } = this.getInsertionOptions(options);
+        const resolvedOptions = this.resolveWidgetArea(widget, options);
+        const { area, addOptions } = this.getInsertionOptions(resolvedOptions);
         const sidePanelOptions: SidePanel.WidgetOptions = { rank: options?.rank };
         switch (area) {
             case 'main':
@@ -990,8 +1018,19 @@ export class ApplicationShell extends Widget {
                 this.rightPanelHandler.addWidget(widget, sidePanelOptions);
                 break;
             case 'secondaryWindow':
-                /** At the moment, widgets are only moved to this area (i.e. a secondary window) by moving them from one of the other areas. */
-                throw new Error('Widgets cannot be added directly to a secondary window');
+                const secondaryWindow = extractSecondaryWindow(addOptions.ref);
+                if (secondaryWindow) {
+                    this.secondaryWindowHandler.addWidgetToSecondaryWindow(widget, secondaryWindow, addOptions);
+                } else {
+                    // Fall back to adding widgets to the main area. This is preferred to throwing an error, because toolbar actions on secondary windows/commands
+                    // may e.g. open further editors, e.g. a markdown preview.
+                    this.mainPanel.addWidget(widget, {
+                        ...addOptions,
+                        ref: undefined
+                    });
+                }
+
+                break;
             default:
                 throw new Error('Unexpected area: ' + options?.area);
         }
@@ -1399,23 +1438,24 @@ export class ApplicationShell extends Widget {
         this.toDisposeOnActivationCheck.push(Disposable.create(() => widget.disposed.disconnect(onDispose)));
 
         let start = 0;
-        const step: FrameRequestCallback = timestamp => {
+        const step = (): void => {
             const activeElement = widget.node.ownerDocument.activeElement;
             if (activeElement && widget.node.contains(activeElement)) {
                 return;
             }
+            const now = Date.now();
             if (!start) {
-                start = timestamp;
+                start = now;
             }
-            const delta = timestamp - start;
+            const delta = now - start;
             if (delta < this.activationTimeout) {
-                request = window.requestAnimationFrame(step);
+                request = window.setTimeout(step, 0);
             } else {
-                console.warn(`Widget was activated, but did not accept focus after ${this.activationTimeout}ms: ${widget.id}`);
+                this.logger.warn(`Widget was activated, but did not accept focus after ${this.activationTimeout}ms: ${widget.id}`);
             }
         };
-        let request = window.requestAnimationFrame(step);
-        this.toDisposeOnActivationCheck.push(Disposable.create(() => window.cancelAnimationFrame(request)));
+        let request = window.setTimeout(step, 0);
+        this.toDisposeOnActivationCheck.push(Disposable.create(() => window.clearTimeout(request)));
     }
 
     /**
@@ -1547,9 +1587,11 @@ export class ApplicationShell extends Widget {
             let size: number | undefined;
             if (bottomPanel.isEmpty) {
                 bottomPanel.node.style.minHeight = '0';
-                size = this.options.bottomPanel.emptySize;
-            } else if (this.bottomPanelState.lastPanelSize) {
+            }
+            if (this.bottomPanelState.lastPanelSize) {
                 size = this.bottomPanelState.lastPanelSize;
+            } else if (bottomPanel.isEmpty) {
+                size = this.options.bottomPanel.emptySize;
             } else {
                 size = this.getDefaultBottomPanelSize();
             }
@@ -1608,24 +1650,20 @@ export class ApplicationShell extends Widget {
      * and refers to the command `core.toggle.bottom.panel`.
      */
     protected refreshBottomPanelToggleButton(): void {
-        if (this.bottomPanel.isEmpty) {
-            this.statusBar.removeElement(BOTTOM_PANEL_TOGGLE_ID);
-        } else {
-            const label = nls.localize('theia/core/common/collapseBottomPanel', 'Toggle Bottom Panel');
-            const element: StatusBarEntry = {
-                name: label,
-                text: '$(codicon-window)',
-                alignment: StatusBarAlignment.RIGHT,
-                tooltip: label,
-                command: 'core.toggle.bottom.panel',
-                accessibilityInformation: {
-                    label: label,
-                    role: 'button'
-                },
-                priority: -1000
-            };
-            this.statusBar.setElement(BOTTOM_PANEL_TOGGLE_ID, element);
-        }
+        const label = nls.localize('theia/core/common/collapseBottomPanel', 'Toggle Bottom Panel');
+        const element: StatusBarEntry = {
+            name: label,
+            text: '$(codicon-window)',
+            alignment: StatusBarAlignment.RIGHT,
+            tooltip: label,
+            command: 'core.toggle.bottom.panel',
+            accessibilityInformation: {
+                label: label,
+                role: 'button'
+            },
+            priority: -1000
+        };
+        this.statusBar.setElement(BOTTOM_PANEL_TOGGLE_ID, element);
     }
 
     /**
@@ -1846,7 +1884,7 @@ export class ApplicationShell extends Widget {
                 case 'right':
                     return this.rightPanelHandler.tabBar;
                 case 'secondaryWindow':
-                    // Secondary windows don't have a tab bar
+                    // there may be multiple secondary windows, so we can't return a single tabbar here
                     return undefined;
                 default:
                     throw new Error('Illegal argument: ' + widgetOrArea);
@@ -1872,6 +1910,10 @@ export class ApplicationShell extends Widget {
         const rightPanelTabBar = this.rightPanelHandler.tabBar;
         if (ArrayExt.firstIndexOf(rightPanelTabBar.titles, widgetTitle) > -1) {
             return rightPanelTabBar;
+        }
+        const secondaryWindowTabBar = this.secondaryWindowHandler.getTabBarFor(widget);
+        if (secondaryWindowTabBar) {
+            return secondaryWindowTabBar;
         }
         return undefined;
     }

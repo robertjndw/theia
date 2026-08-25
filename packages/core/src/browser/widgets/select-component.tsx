@@ -34,6 +34,8 @@ export interface SelectOption {
 }
 
 export interface SelectComponentProps {
+    id?: string
+    className?: string
     options: readonly SelectOption[]
     defaultValue?: string | number
     onChange?: (option: SelectOption, index: number) => void,
@@ -58,6 +60,11 @@ export class SelectComponent extends React.Component<SelectComponentProps, Selec
     protected mountedListeners: Map<string, EventListenerOrEventListenerObject> = new Map();
     protected optimalWidth = 0;
     protected optimalHeight = 0;
+    protected resizeObserver: ResizeObserver | undefined;
+    /** Window the scroll/wheel/resize listeners are attached to; may differ from the main window in secondary windows. */
+    protected listenersWindow: Window | undefined;
+    /** Perfect-scrollbar ancestors the `ps-scroll-y` listener was attached to. The field may have moved to another window since, so the elements are remembered. */
+    protected psScrollListenerTargets: HTMLElement[] = [];
 
     constructor(props: SelectComponentProps) {
         super(props);
@@ -68,14 +75,28 @@ export class SelectComponent extends React.Component<SelectComponentProps, Selec
             hover: selected
         };
 
-        let list = document.getElementById(SELECT_COMPONENT_CONTAINER);
+        this.dropdownElement = this.resolveDropdownContainer(document);
+    }
+
+    /**
+     * The document that currently hosts this component. Falls back to the main document before
+     * the first render. Widgets can be moved to secondary windows, so this must be re-queried
+     * instead of captured once.
+     */
+    protected getHostDocument(): Document {
+        return this.fieldRef.current?.ownerDocument ?? document;
+    }
+
+    /** Finds or creates the dropdown portal container in the given document. */
+    protected resolveDropdownContainer(hostDocument: Document): HTMLElement {
+        let list = hostDocument.getElementById(SELECT_COMPONENT_CONTAINER);
         if (!list) {
-            list = document.createElement('div');
+            list = hostDocument.createElement('div');
             list.id = SELECT_COMPONENT_CONTAINER;
             list.className = 'theia-select-component-container';
-            document.body.appendChild(list);
+            hostDocument.body.appendChild(list);
         }
-        this.dropdownElement = list;
+        return list;
     }
 
     protected getInitialSelectedIndex(props: SelectComponentProps): number {
@@ -88,7 +109,20 @@ export class SelectComponent extends React.Component<SelectComponentProps, Selec
         return selected;
     }
 
-    override componentDidUpdate(prevProps: SelectComponentProps): void {
+    override componentDidUpdate(prevProps: SelectComponentProps, prevState: SelectComponentState): void {
+        if (prevState.selected !== this.state.selected && this.state.dimensions) {
+            const dropdownContainer = this.dropdownRef?.current;
+            const selectedOption = dropdownContainer?.querySelector(`[data-option-index="${this.state.selected}"]`) as HTMLElement | undefined;
+            if (dropdownContainer && selectedOption) {
+                const optionBottom = selectedOption.offsetTop + selectedOption.offsetHeight;
+                const visibleBottom = dropdownContainer.scrollTop + dropdownContainer.clientHeight;
+                if (optionBottom > visibleBottom) {
+                    dropdownContainer.scrollTop = optionBottom - dropdownContainer.clientHeight;
+                } else if (selectedOption.offsetTop < dropdownContainer.scrollTop) {
+                    dropdownContainer.scrollTop = selectedOption.offsetTop;
+                }
+            }
+        }
         if (prevProps.defaultValue !== this.props.defaultValue || prevProps.options !== this.props.options) {
             const selected = this.getInitialSelectedIndex(this.props);
             this.setState({
@@ -147,13 +181,15 @@ export class SelectComponent extends React.Component<SelectComponentProps, Selec
     }
 
     protected attachListeners(): void {
-        const hide = (event: MouseEvent) => {
+        const hide = (event: Event) => {
             if (!this.dropdownRef.current?.contains(event.target as Node)) {
                 this.hide();
             }
         };
+        const hideOnResize = () => this.hide();
         this.mountedListeners.set('scroll', hide);
         this.mountedListeners.set('wheel', hide);
+        this.mountedListeners.set('resize', hideOnResize);
 
         let parent = this.fieldRef.current?.parentElement;
         while (parent) {
@@ -161,27 +197,69 @@ export class SelectComponent extends React.Component<SelectComponentProps, Selec
             // neither triggers the `scroll`, `wheel` nor `blur` event
             if (parent.classList.contains('ps')) {
                 parent.addEventListener('ps-scroll-y', hide);
+                this.psScrollListenerTargets.push(parent);
             }
             parent = parent.parentElement;
         }
 
+        this.listenersWindow = this.getHostDocument().defaultView ?? window;
         for (const [key, listener] of this.mountedListeners.entries()) {
-            window.addEventListener(key, listener);
+            this.listenersWindow.addEventListener(key, listener);
+        }
+
+        // Catch Lumino sash drags globally - observe the closest lm-Widget panel
+        const fieldEl = this.fieldRef.current;
+        const resizablePanel = fieldEl?.closest('.lm-Widget') ?? fieldEl?.parentElement;
+
+        if (resizablePanel && typeof ResizeObserver !== 'undefined') {
+            let lastWidth = 0;
+            let lastHeight = 0;
+            let isFirstFire = true;
+
+            this.resizeObserver = new ResizeObserver(entries => {
+                for (const entry of entries) {
+                    const { width, height } = entry.contentRect;
+
+                    // Ignore the initial automatic fire when the observer attaches
+                    if (isFirstFire) {
+                        lastWidth = width;
+                        lastHeight = height;
+                        isFirstFire = false;
+                        continue;
+                    }
+
+                    // Only hide if the panel dimensions actually changed by more than 2 pixels
+                    if (this.state.dimensions && (Math.abs(width - lastWidth) > 2 || Math.abs(height - lastHeight) > 2)) {
+                        this.hide();
+                    }
+
+                    lastWidth = width;
+                    lastHeight = height;
+                }
+            });
+            this.resizeObserver.observe(resizablePanel);
         }
     }
 
     override componentWillUnmount(): void {
+        this.detachListeners();
+    }
+
+    protected detachListeners(): void {
+        this.resizeObserver?.disconnect();
+        this.resizeObserver = undefined;
         if (this.mountedListeners.size > 0) {
             const eventListener = this.mountedListeners.get('scroll')!;
-            let parent = this.fieldRef.current?.parentElement;
-            while (parent) {
-                parent.removeEventListener('ps-scroll-y', eventListener);
-                parent = parent.parentElement;
+            for (const target of this.psScrollListenerTargets) {
+                target.removeEventListener('ps-scroll-y', eventListener);
             }
             for (const [key, listener] of this.mountedListeners.entries()) {
-                window.removeEventListener(key, listener);
+                (this.listenersWindow ?? window).removeEventListener(key, listener);
             }
+            this.mountedListeners.clear();
         }
+        this.psScrollListenerTargets = [];
+        this.listenersWindow = undefined;
     }
 
     override render(): React.ReactNode {
@@ -191,12 +269,18 @@ export class SelectComponent extends React.Component<SelectComponentProps, Selec
             selected = this.nextNotSeparator('forwards');
         }
         const selectedItemLabel = options[selected]?.label ?? options[selected]?.value;
+        // Expose when the currently shown option is disabled so consumers can style the field to match
+        // it (e.g. the option previewed while navigating), instead of a fixed committed-value class.
+        const selectionDisabled = !!options[selected]?.disabled;
+        const fieldClassName = `theia-select-component${this.props.className ? ` ${this.props.className}` : ''}`
+            + `${selectionDisabled ? ' theia-select-component-selection-disabled' : ''}`;
         return <>
             <div
+                id={this.props.id}
                 key="select-component"
                 ref={this.fieldRef}
                 tabIndex={0}
-                className="theia-select-component"
+                className={fieldClassName}
                 onClick={e => this.handleClickEvent(e)}
                 onBlur={
                     () => {
@@ -214,11 +298,11 @@ export class SelectComponent extends React.Component<SelectComponentProps, Selec
         </>;
     }
 
-    protected nextNotSeparator(direction: 'forwards' | 'backwards'): number {
+    protected nextNotSeparator(direction: 'forwards' | 'backwards', startFrom?: number): number {
         const { options } = this.props;
         const step = direction === 'forwards' ? 1 : -1;
         const length = this.props.options.length;
-        let selected = this.state.selected;
+        let selected = startFrom ?? this.state.selected;
         let count = 0;
         do {
             selected = (selected + step) % length;
@@ -227,7 +311,8 @@ export class SelectComponent extends React.Component<SelectComponentProps, Selec
             }
             count++;
         }
-        while (options[selected]?.separator && count < length);
+        // Skip separators and disabled options so keyboard navigation never lands on a non-selectable entry.
+        while ((options[selected]?.separator || options[selected]?.disabled) && count < length);
         return selected;
     }
 
@@ -236,23 +321,26 @@ export class SelectComponent extends React.Component<SelectComponentProps, Selec
             return;
         }
         if (ev.key === 'ArrowUp') {
-            const selected = this.nextNotSeparator('backwards');
+            const selected = this.nextNotSeparator('backwards', this.state.hover);
             this.setState({
                 selected,
                 hover: selected
             });
         } else if (ev.key === 'ArrowDown') {
             if (this.state.dimensions) {
-                const selected = this.nextNotSeparator('forwards');
+                const selected = this.nextNotSeparator('forwards', this.state.hover);
                 this.setState({
                     selected,
                     hover: selected
                 });
             } else {
                 this.toggleVisibility();
+                // Start on the first selectable option (startFrom -1 evaluates index 0 first), so a
+                // leading separator or disabled option is skipped instead of becoming the active row.
+                const selected = this.nextNotSeparator('forwards', -1);
                 this.setState({
-                    selected: 0,
-                    hover: 0,
+                    selected,
+                    hover: selected,
                 });
             }
         } else if (ev.key === 'Enter') {
@@ -260,10 +348,13 @@ export class SelectComponent extends React.Component<SelectComponentProps, Selec
                 this.toggleVisibility();
             } else {
                 const selected = this.state.selected;
-                this.selectOption(selected, this.props.options[selected]);
+                const option = this.props.options[selected];
+                if (!option?.disabled) {
+                    this.selectOption(selected, option);
+                }
             }
         } else if (ev.key === 'Escape' || ev.key === 'Tab') {
-            this.hide();
+            this.hide(undefined, true);
         }
         ev.stopPropagation();
         ev.nativeEvent.stopImmediatePropagation();
@@ -280,6 +371,14 @@ export class SelectComponent extends React.Component<SelectComponentProps, Selec
             return;
         }
         if (!this.state.dimensions) {
+            // Re-resolve the portal container and listener window against the document that
+            // currently hosts the field: the widget may have been moved to a secondary window
+            // (or back to the main window) since the last time the dropdown was opened.
+            const hostDocument = this.getHostDocument();
+            this.dropdownElement = this.resolveDropdownContainer(hostDocument);
+            if (this.listenersWindow && this.listenersWindow !== hostDocument.defaultView) {
+                this.detachListeners();
+            }
             const rect = this.fieldRef.current.getBoundingClientRect();
             this.setState({ dimensions: rect });
         } else {
@@ -287,7 +386,7 @@ export class SelectComponent extends React.Component<SelectComponentProps, Selec
         }
     }
 
-    protected hide(index?: number): void {
+    protected hide(index?: number, releaseFocus = false): void {
         const selectedIndex = index === undefined ? this.state.original : index;
         this.setState({
             dimensions: undefined,
@@ -295,6 +394,11 @@ export class SelectComponent extends React.Component<SelectComponentProps, Selec
             original: selectedIndex,
             hover: selectedIndex
         });
+        // Force releasing focus of the select element to allow closing via escape later on
+        const hostDocument = this.getHostDocument();
+        if (releaseFocus && hostDocument.activeElement && hostDocument.activeElement === this.fieldRef.current) {
+            this.fieldRef.current.blur();
+        }
     }
 
     protected renderDropdown(): React.ReactNode {
@@ -302,7 +406,9 @@ export class SelectComponent extends React.Component<SelectComponentProps, Selec
             return;
         }
 
-        const shellArea = document.getElementById('theia-app-shell')!.getBoundingClientRect();
+        // Secondary windows have no 'theia-app-shell' element; use the document element as the boundary there.
+        const hostDocument = this.getHostDocument();
+        const shellArea = (hostDocument.getElementById('theia-app-shell') ?? hostDocument.documentElement).getBoundingClientRect();
         const maxWidth = this.alignLeft ? shellArea.width - this.state.dimensions.left : this.state.dimensions.right;
         if (this.mountedListeners.size === 0) {
             // Only attach our listeners once we render our dropdown menu
@@ -357,17 +463,21 @@ export class SelectComponent extends React.Component<SelectComponentProps, Selec
             return <div key={index} className="theia-select-component-separator" />;
         }
         const selected = this.state.hover;
+        const disabled = !!option.disabled;
         return (
             <div
                 key={index}
-                className={`theia-select-component-option${index === selected ? ' selected' : ''}`}
+                data-option-index={index}
+                className={`theia-select-component-option${index === selected ? ' selected' : ''}${disabled ? ' disabled' : ''}`}
                 onMouseOver={() => {
                     this.setState({
                         hover: index
                     });
                 }}
                 onMouseDown={() => {
-                    this.selectOption(index, option);
+                    if (!disabled) {
+                        this.selectOption(index, option);
+                    }
                 }}
             >
                 <div key="value" className="theia-select-component-option-value">{option.label ?? option.value}</div>

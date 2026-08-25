@@ -22,7 +22,7 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
 import { generateUuid } from '@theia/core/lib/common/uuid';
-import { injectable, inject, postConstruct } from '@theia/core/shared/inversify';
+import { injectable, inject, postConstruct, named } from '@theia/core/shared/inversify';
 import { PluginWorker } from './plugin-worker';
 import { getPluginId, DeployedPlugin, HostedPluginServer } from '../../common/plugin-protocol';
 import { HostedPluginWatcher } from './hosted-plugin-watcher';
@@ -33,9 +33,9 @@ import {
     Disposable, DisposableCollection, isCancelled,
     CommandRegistry, WillExecuteCommandEvent,
     CancellationTokenSource, ProgressService, nls,
-    RpcProxy
+    RpcProxy, ILogger
 } from '@theia/core';
-import { PreferenceServiceImpl, PreferenceProviderProvider } from '@theia/core/lib/browser/preferences';
+import { PreferenceServiceImpl, PreferenceProviderProvider } from '@theia/core/lib/common/preferences';
 import { WorkspaceService } from '@theia/workspace/lib/browser';
 import { PluginContributionHandler } from '../../main/browser/plugin-contribution-handler';
 import { getQueryParameters } from '../../main/browser/env-main';
@@ -72,6 +72,7 @@ import {
     ALL_ACTIVATION_EVENT, isConnectionScopedBackendPlugin
 } from '../common/hosted-plugin';
 import { isRemote } from '@theia/core/lib/browser/browser';
+import { WorkspaceTrustService } from '@theia/workspace/lib/browser/workspace-trust-service';
 
 export type DebugActivationEvent = 'onDebugResolve' | 'onDebugInitialConfigurations' | 'onDebugAdapterProtocolTracker' | 'onDebugDynamicConfigurations';
 
@@ -179,6 +180,12 @@ export class HostedPluginSupport extends AbstractHostedPluginSupport<PluginManag
     @inject(ApplicationServer)
     protected readonly applicationServer: ApplicationServer;
 
+    @inject(WorkspaceTrustService)
+    protected readonly workspaceTrustService: WorkspaceTrustService;
+
+    @inject(ILogger) @named('plugin-ext:HostedPluginSupport')
+    protected override readonly logger: ILogger;
+
     constructor() {
         super(generateUuid());
     }
@@ -198,8 +205,12 @@ export class HostedPluginSupport extends AbstractHostedPluginSupport<PluginManag
         this.debugSessionManager.onWillStartDebugSession(event => this.ensureDebugActivation(event));
         this.debugSessionManager.onWillResolveDebugConfiguration(event => this.ensureDebugActivation(event, 'onDebugResolve', event.debugType));
         this.debugConfigurationManager.onWillProvideDebugConfiguration(event => this.ensureDebugActivation(event, 'onDebugInitialConfigurations'));
-        // Activate all providers of dynamic configurations, i.e. Let the user pick a configuration from all the available ones.
-        this.debugConfigurationManager.onWillProvideDynamicDebugConfiguration(event => this.ensureDebugActivation(event, 'onDebugDynamicConfigurations', ALL_ACTIVATION_EVENT));
+        // Activate providers of dynamic configurations. When a specific debugType is provided,
+        // only activate that type's extension. Otherwise, activate all providers.
+        this.debugConfigurationManager.onWillProvideDynamicDebugConfiguration(event => {
+            const debugType = 'debugType' in event ? event.debugType : undefined;
+            this.ensureDebugActivation(event, 'onDebugDynamicConfigurations', debugType ?? ALL_ACTIVATION_EVENT);
+        });
         this.viewRegistry.onDidExpandView(id => this.activateByView(id));
         this.taskProviderRegistry.onWillProvideTaskProvider(event => this.ensureTaskActivation(event));
         this.taskResolverRegistry.onWillProvideTaskResolver(event => this.ensureTaskActivation(event));
@@ -259,16 +270,31 @@ export class HostedPluginSupport extends AbstractHostedPluginSupport<PluginManag
     }
 
     protected override async beforeLoadContributions(toDisconnect: DisposableCollection): Promise<void> {
-        // make sure that the previous state, including plugin widgets, is restored
-        // and core layout is initialized, i.e. explorer, scm, debug views are already added to the shell
-        // but shell is not yet revealed
-        await this.appState.reachedState('initialized_layout');
+        // Make sure the shell is attached so that registries (commands, menus, views, etc.)
+        // are ready to accept contributions. We intentionally do NOT wait for initialized_layout
+        // here, because layout restoration may depend on plugin-provided file system providers
+        // (e.g. git: scheme for merge editors), and those providers are registered during
+        // startPlugins which runs after this point. Waiting for initialized_layout would deadlock.
+        await this.appState.reachedState('attached_shell');
+        this.workspaceTrusted = await this.workspaceTrustService.getWorkspaceTrust();
     }
 
     protected override async afterLoadContributions(toDisconnect: DisposableCollection): Promise<void> {
-        await this.viewRegistry.initWidgets();
-        // remove restored plugin widgets which were not registered by contributions
-        this.viewRegistry.removeStaleWidgets();
+        // Defer view initialization until the layout has been restored: initWidgets/removeStaleWidgets
+        // must not run while the ShellLayoutRestorer still holds restored plugin view widgets, otherwise
+        // removeStaleWidgets can dispose a restored view container mid-restore and abort the whole
+        // layout restoration (see https://github.com/eclipse-theia/theia/issues/17770).
+        // Deliberately not awaited: startPlugins runs after this hook and may register file system
+        // providers the layout restoration depends on (see beforeLoadContributions).
+        this.appState.reachedState('initialized_layout').then(async () => {
+            if (toDisconnect.disposed) {
+                return;
+            }
+            await this.viewRegistry.initWidgets();
+            // remove restored plugin widgets which were not registered by contributions
+            this.viewRegistry.removeStaleWidgets();
+        }).catch(e => this.logger.error(e));
+        this.workspaceTrustService.refreshRestrictedModeIndicator();
     }
 
     protected handleContributions(plugin: DeployedPlugin): Disposable {
@@ -454,12 +480,17 @@ export class HostedPluginSupport extends AbstractHostedPluginSupport<PluginManag
     }
 
     protected ensureFileSystemActivation(event: FileSystemProviderActivationEvent): void {
-        event.waitUntil(this.activateByFileSystem(event).then(() => {
+        event.waitUntil((async () => {
+            // Wait until plugins are synced so that activation events are recorded
+            // and will be replayed when managers start. This does not depend on
+            // layout initialization, so it cannot deadlock.
+            await this.willStart;
+            await this.activateByFileSystem(event);
             if (!this.fileService.hasProvider(event.scheme)) {
                 return waitForEvent(Event.filter(this.fileService.onDidChangeFileSystemProviderRegistrations,
                     ({ added, scheme }) => added && scheme === event.scheme), 3000);
             }
-        }));
+        })());
     }
 
     protected ensureCommandHandlerRegistration(event: WillExecuteCommandEvent): void {
@@ -555,7 +586,7 @@ export class HostedPluginSupport extends AbstractHostedPluginSupport<PluginManag
                     return result.length > 0;
                 } catch (e) {
                     if (!isCancelled(e)) {
-                        console.error(e);
+                        this.logger.error(e);
                     }
                     return false;
                 } finally {
@@ -616,7 +647,7 @@ export class HostedPluginSupport extends AbstractHostedPluginSupport<PluginManag
                 webview.setHTML(this.getDeserializationFailedContents(`
                 An error occurred while restoring '${webview.viewType}' view. Please check logs.
                 `));
-                console.error('Failed to restore the webview', e);
+                this.logger.error('Failed to restore the webview', e);
             }
         }
     }

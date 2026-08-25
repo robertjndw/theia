@@ -16,7 +16,6 @@
 
 import { ContainerModule, interfaces } from '@theia/core/shared/inversify';
 import { bindOPFSInitialization } from './filesystem/example-filesystem-initialization';
-import { bindPluginInitialization } from './plugin-sample/example-plugin-initialization';
 
 export default new ContainerModule((
     bind: interfaces.Bind,
@@ -25,5 +24,4 @@ export default new ContainerModule((
     rebind: interfaces.Rebind,
 ) => {
     bindOPFSInitialization(bind, rebind);
-    bindPluginInitialization(bind, rebind);
 });

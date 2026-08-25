@@ -9,9 +9,6 @@
       "path": "../../dev-packages/cli"
     },
     {
-      "path": "../../dev-packages/native-webpack-plugin"
-    },
-    {
       "path": "../../packages/ai-anthropic"
     },
     {
@@ -21,10 +18,22 @@
       "path": "../../packages/ai-chat-ui"
     },
     {
+      "path": "../../packages/ai-claude-code"
+    },
+    {
       "path": "../../packages/ai-code-completion"
     },
     {
+      "path": "../../packages/ai-codex"
+    },
+    {
+      "path": "../../packages/ai-copilot"
+    },
+    {
       "path": "../../packages/ai-core"
+    },
+    {
+      "path": "../../packages/ai-core-ui"
     },
     {
       "path": "../../packages/ai-editor"
@@ -48,10 +57,19 @@
       "path": "../../packages/ai-mcp"
     },
     {
+      "path": "../../packages/ai-mcp-server"
+    },
+    {
+      "path": "../../packages/ai-mcp-ui"
+    },
+    {
       "path": "../../packages/ai-ollama"
     },
     {
       "path": "../../packages/ai-openai"
+    },
+    {
+      "path": "../../packages/ai-registry"
     },
     {
       "path": "../../packages/ai-scanoss"
@@ -60,7 +78,7 @@
       "path": "../../packages/ai-terminal"
     },
     {
-      "path": "../../packages/ai-vercel-ai"
+      "path": "../../packages/ai-tool-sketchpad"
     },
     {
       "path": "../../packages/bulk-edit"
@@ -150,9 +168,6 @@
       "path": "../../packages/preferences"
     },
     {
-      "path": "../../packages/preview"
-    },
-    {
       "path": "../../packages/process"
     },
     {
@@ -168,9 +183,6 @@
       "path": "../../packages/scm"
     },
     {
-      "path": "../../packages/scm-extra"
-    },
-    {
       "path": "../../packages/search-in-workspace"
     },
     {
@@ -180,7 +192,13 @@
       "path": "../../packages/task"
     },
     {
+      "path": "../../packages/telemetry"
+    },
+    {
       "path": "../../packages/terminal"
+    },
+    {
+      "path": "../../packages/terminal-manager"
     },
     {
       "path": "../../packages/test"

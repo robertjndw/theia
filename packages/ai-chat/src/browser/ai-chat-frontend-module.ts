@@ -14,9 +14,9 @@
 // SPDX-License-Identifier: EPL-2.0 OR GPL-2.0-only WITH Classpath-exception-2.0
 // *****************************************************************************
 
-import { Agent, AgentService, AIVariableContribution, bindToolProvider } from '@theia/ai-core/lib/common';
-import { bindContributionProvider, CommandContribution } from '@theia/core';
-import { FrontendApplicationContribution, LabelProviderContribution, PreferenceContribution } from '@theia/core/lib/browser';
+import { Agent, AgentService, AISettingsService, AIVariableContribution, bindToolProvider, CustomAgentPromptVariant } from '@theia/ai-core/lib/common';
+import { bindRootContributionProvider, CommandContribution, PreferenceContribution } from '@theia/core';
+import { FrontendApplicationContribution, LabelProviderContribution } from '@theia/core/lib/browser';
 import { ContainerModule } from '@theia/core/shared/inversify';
 import {
     ChatAgent,
@@ -26,6 +26,7 @@ import {
     ChatRequestParserImpl,
     ChatService,
     ToolCallChatResponseContentFactory,
+    ServerToolCallResponseContentFactory,
     PinChatAgent,
     ChatServiceFactory,
     ChatAgentServiceFactory
@@ -33,8 +34,7 @@ import {
 import { ChatAgentsVariableContribution } from '../common/chat-agents-variable-contribution';
 import { CustomChatAgent } from '../common/custom-chat-agent';
 import { DefaultResponseContentFactory, DefaultResponseContentMatcherProvider, ResponseContentMatcherProvider } from '../common/response-content-matcher';
-import { aiChatPreferences } from './ai-chat-preferences';
-import { bindChatToolPreferences, ToolConfirmationManager } from './chat-tool-preferences';
+import { aiChatPreferences } from '../common/ai-chat-preferences';
 import { ChangeSetElementArgs, ChangeSetFileElement, ChangeSetFileElementFactory } from './change-set-file-element';
 import { AICustomAgentsFrontendApplicationContribution } from './custom-agent-frontend-application-contribution';
 import { FrontendChatServiceImpl } from './frontend-chat-service';
@@ -42,6 +42,8 @@ import { CustomAgentFactory } from './custom-agent-factory';
 import { ChatToolRequestService } from '../common/chat-tool-request-service';
 import { FrontendChatToolRequestService } from './chat-tool-request-service';
 import { ChangeSetFileService } from './change-set-file-service';
+import { FileReadTracker } from '../common/file-read-tracker';
+import { FileReadTrackerImpl } from './file-read-tracker-impl';
 import { ContextVariableLabelProvider } from './context-variable-label-provider';
 import { ContextFileVariableLabelProvider } from './context-file-variable-label-provider';
 import { FileChatVariableContribution } from './file-chat-variable-contribution';
@@ -57,11 +59,41 @@ import { TaskContextService, TaskContextStorageService } from './task-context-se
 import { InMemoryTaskContextStorage } from './task-context-storage-service';
 import { AIChatFrontendContribution } from './ai-chat-frontend-contribution';
 import { ImageContextVariableContribution } from './image-context-variable-contribution';
+import { DefaultPendingImageRegistry, PendingImageRegistry } from './pending-image-registry';
 import { AgentDelegationTool } from './agent-delegation-tool';
+import { ToolConfirmationManager } from './chat-tool-preference-bindings';
+import { bindChatToolPreferences } from '../common/chat-tool-preferences';
+import { PendingToolConfirmationTracker } from './pending-tool-confirmation-tracker';
+import { ChatSessionStore } from '../common/chat-session-store';
+import { ChatSessionStoreImpl } from './chat-session-store-impl';
+import {
+    ChatContentDeserializerContribution,
+    ChatContentDeserializerRegistry,
+    ChatContentDeserializerRegistryImpl,
+    DefaultChatContentDeserializerContribution
+} from '../common/chat-content-deserializer';
+import {
+    ChangeSetElementDeserializerContribution,
+    ChangeSetElementDeserializerRegistry,
+    ChangeSetElementDeserializerRegistryImpl
+} from '../common/change-set-element-deserializer';
+import { ChangeSetFileElementDeserializerContribution } from './change-set-file-element-deserializer';
 
 export default new ContainerModule(bind => {
-    bindContributionProvider(bind, Agent);
-    bindContributionProvider(bind, ChatAgent);
+    bindRootContributionProvider(bind, ChatAgent);
+
+    bind(ChatContentDeserializerRegistryImpl).toSelf().inSingletonScope();
+    bind(ChatContentDeserializerRegistry).toService(ChatContentDeserializerRegistryImpl);
+    bindRootContributionProvider(bind, ChatContentDeserializerContribution);
+    bind(ChatContentDeserializerContribution).to(DefaultChatContentDeserializerContribution).inSingletonScope();
+
+    bind(ChangeSetElementDeserializerRegistryImpl).toSelf().inSingletonScope();
+    bind(ChangeSetElementDeserializerRegistry).toService(ChangeSetElementDeserializerRegistryImpl);
+    bindRootContributionProvider(bind, ChangeSetElementDeserializerContribution);
+    bind(ChangeSetElementDeserializerContribution).to(ChangeSetFileElementDeserializerContribution).inSingletonScope();
+
+    bind(ChatSessionStoreImpl).toSelf().inSingletonScope();
+    bind(ChatSessionStore).toService(ChatSessionStoreImpl);
 
     bind(FrontendChatToolRequestService).toSelf().inSingletonScope();
     bind(ChatToolRequestService).toService(FrontendChatToolRequestService);
@@ -74,7 +106,7 @@ export default new ContainerModule(bind => {
     bind(ChatSessionNamingAgent).toSelf().inSingletonScope();
     bind(Agent).toService(ChatSessionNamingAgent);
 
-    bindContributionProvider(bind, ResponseContentMatcherProvider);
+    bindRootContributionProvider(bind, ResponseContentMatcherProvider);
     bind(DefaultResponseContentMatcherProvider).toSelf().inSingletonScope();
     bind(ResponseContentMatcherProvider).toService(DefaultResponseContentMatcherProvider);
     bind(DefaultResponseContentFactory).toSelf().inSingletonScope();
@@ -99,29 +131,47 @@ export default new ContainerModule(bind => {
     // Tool confirmation preferences
     bindChatToolPreferences(bind);
     bind(ToolConfirmationManager).toSelf().inSingletonScope();
+    bind(PendingToolConfirmationTracker).toSelf().inSingletonScope();
 
     bind(CustomChatAgent).toSelf();
-    bind(CustomAgentFactory).toFactory<CustomChatAgent, [string, string, string, string, string]>(
-        ctx => (id: string, name: string, description: string, prompt: string, defaultLLM: string) => {
+    bind(CustomAgentFactory).toFactory<CustomChatAgent, [string, string, string, string, string, boolean | undefined, CustomAgentPromptVariant[] | undefined]>(
+        ctx => (id, name, description, prompt, defaultLLM, showInChat, promptVariants) => {
             const agent = ctx.container.get<CustomChatAgent>(CustomChatAgent);
             agent.id = id;
             agent.name = name;
             agent.description = description;
             agent.prompt = prompt;
+            agent.promptVariants = promptVariants;
             agent.languageModelRequirements = [{
                 purpose: 'chat',
                 identifier: defaultLLM,
             }];
             ctx.container.get<ChatAgentService>(ChatAgentService).registerChatAgent(agent);
             ctx.container.get<AgentService>(AgentService).registerAgent(agent);
+
+            // Initialize showInChat preference from YAML if not already set
+            if (showInChat === false) {
+                const settingsService = ctx.container.get<AISettingsService>(AISettingsService);
+                settingsService.getAgentSettings(id).then(settings => {
+                    if (settings?.showInChat === undefined) {
+                        settingsService.updateAgentSettings(id, { showInChat: false });
+                    }
+                });
+            }
+
             return agent;
         });
-    bind(FrontendApplicationContribution).to(AICustomAgentsFrontendApplicationContribution).inSingletonScope();
+    bind(AICustomAgentsFrontendApplicationContribution).toSelf().inSingletonScope();
+    bind(FrontendApplicationContribution).toService(AICustomAgentsFrontendApplicationContribution);
+    bind(CommandContribution).toService(AICustomAgentsFrontendApplicationContribution);
 
     bind(ContextVariableLabelProvider).toSelf().inSingletonScope();
     bind(LabelProviderContribution).toService(ContextVariableLabelProvider);
     bind(ContextFileVariableLabelProvider).toSelf().inSingletonScope();
     bind(LabelProviderContribution).toService(ContextFileVariableLabelProvider);
+
+    bind(FileReadTrackerImpl).toSelf().inSingletonScope();
+    bind(FileReadTracker).toService(FileReadTrackerImpl);
 
     bind(ChangeSetFileService).toSelf().inSingletonScope();
     bind(ChangeSetFileElementFactory).toFactory(ctx => (args: ChangeSetElementArgs) => {
@@ -133,8 +183,9 @@ export default new ContainerModule(bind => {
 
     bind(ChangeSetDecoratorService).toSelf().inSingletonScope();
     bind(FrontendApplicationContribution).toService(ChangeSetDecoratorService);
-    bindContributionProvider(bind, ChangeSetDecorator);
+    bindRootContributionProvider(bind, ChangeSetDecorator);
     bind(ToolCallChatResponseContentFactory).toSelf().inSingletonScope();
+    bind(ServerToolCallResponseContentFactory).toSelf().inSingletonScope();
     bind(AIVariableContribution).to(FileChatVariableContribution).inSingletonScope();
     bind(AIVariableContribution).to(ContextSummaryVariableContribution).inSingletonScope();
     bind(AIVariableContribution).to(ContextDetailsVariableContribution).inSingletonScope();
@@ -151,6 +202,9 @@ export default new ContainerModule(bind => {
     bind(ImageContextVariableContribution).toSelf().inSingletonScope();
     bind(AIVariableContribution).toService(ImageContextVariableContribution);
     bind(LabelProviderContribution).toService(ImageContextVariableContribution);
+
+    bind(DefaultPendingImageRegistry).toSelf().inSingletonScope();
+    bind(PendingImageRegistry).toService(DefaultPendingImageRegistry);
 
     bind(TaskContextService).toSelf().inSingletonScope();
     bind(InMemoryTaskContextStorage).toSelf().inSingletonScope();

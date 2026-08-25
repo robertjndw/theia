@@ -15,9 +15,9 @@
 
 import { Channel, WriteBuffer } from '../../common/message-rpc';
 import { MessagingService } from './messaging-service';
-import { inject, injectable } from 'inversify';
+import { inject, injectable, interfaces, named } from 'inversify';
 import { Socket } from 'socket.io';
-import { ConnectionHandlers } from './default-messaging-service';
+import { ConnectionHandlers, MessagingContainer } from './default-messaging-service';
 import { SocketWriteBuffer } from '../../common/messaging/socket-write-buffer';
 import { FrontendConnectionService } from './frontend-connection-service';
 import { AbstractChannel } from '../../common/message-rpc/channel';
@@ -25,13 +25,19 @@ import { Uint8ArrayReadBuffer, Uint8ArrayWriteBuffer } from '../../common/messag
 import { BackendApplicationConfigProvider } from '../backend-application-config-provider';
 import { WebsocketEndpoint } from './websocket-endpoint';
 import { ConnectionManagementMessages } from '../../common/messaging/connection-management';
-import { Disposable, DisposableCollection } from '../../common';
+import { Disposable, DisposableCollection, ILogger } from '../../common';
 
 @injectable()
 export class WebsocketFrontendConnectionService implements FrontendConnectionService {
 
     @inject(WebsocketEndpoint)
     protected readonly websocketServer: WebsocketEndpoint;
+
+    @inject(MessagingContainer)
+    protected readonly container: interfaces.Container;
+
+    @inject(ILogger) @named('core:WebsocketFrontendConnectionService')
+    protected readonly logger: ILogger;
 
     protected readonly wsHandlers = new ConnectionHandlers();
     protected readonly connectionsByFrontend = new Map<string, ReconnectableSocketChannel>();
@@ -62,7 +68,7 @@ export class WebsocketFrontendConnectionService implements FrontendConnectionSer
             socket.off(ConnectionManagementMessages.RECONNECT, reconnectListener);
             const channel = this.connectionsByFrontend.get(frontEndId);
             if (channel) {
-                console.info(`Reconnecting to front end ${frontEndId}`);
+                this.logger.info(`Reconnecting to front end ${frontEndId}`);
                 socket.emit(ConnectionManagementMessages.RECONNECT, true);
                 channel.connect(socket);
                 this.handleSocketDisconnect(socket, channel, frontEndId);
@@ -70,7 +76,7 @@ export class WebsocketFrontendConnectionService implements FrontendConnectionSer
                 clearTimeout(pendingTimeout);
                 this.closeTimeouts.delete(frontEndId);
             } else {
-                console.info(`Reconnecting failed for ${frontEndId}`);
+                this.logger.info(`Reconnecting failed for ${frontEndId}`);
                 socket.emit(ConnectionManagementMessages.RECONNECT, false);
             }
         };
@@ -79,7 +85,7 @@ export class WebsocketFrontendConnectionService implements FrontendConnectionSer
     }
 
     protected closeConnection(frontEndId: string, reason: string): void {
-        console.info(`closing connection for ${frontEndId}`);
+        this.logger.info(`closing connection for ${frontEndId}`);
         const connection = this.connectionsByFrontend.get(frontEndId)!; // not called when no connection is present
 
         this.connectionsByFrontend.delete(frontEndId);
@@ -89,12 +95,13 @@ export class WebsocketFrontendConnectionService implements FrontendConnectionSer
         this.closeTimeouts.delete(frontEndId);
 
         connection.onCloseEmitter.fire({ reason });
+        connection.drainBuffer();
         connection.close();
     }
 
     protected createConnection(socket: Socket, frontEndId: string): ReconnectableSocketChannel {
-        console.info(`creating connection for ${frontEndId}`);
-        const channel = new ReconnectableSocketChannel();
+        this.logger.info(`creating connection for ${frontEndId}`);
+        const channel = this.container.get(ReconnectableSocketChannel);
         channel.connect(socket);
 
         this.connectionsByFrontend.set(frontEndId, channel);
@@ -103,7 +110,7 @@ export class WebsocketFrontendConnectionService implements FrontendConnectionSer
 
     handleSocketDisconnect(socket: Socket, channel: ReconnectableSocketChannel, frontEndId: string): void {
         socket.on('disconnect', evt => {
-            console.info('socket closed');
+            this.logger.info('socket closed');
             channel.disconnect();
 
             const timeout = this.frontendConnectionTimeout();
@@ -111,7 +118,7 @@ export class WebsocketFrontendConnectionService implements FrontendConnectionSer
             if (timeout === 0 || isMarkedForClose) {
                 this.closeConnection(frontEndId, evt);
             } else if (timeout > 0) {
-                console.info(`setting close timeout for id ${frontEndId} to ${timeout}`);
+                this.logger.info(`setting close timeout for id ${frontEndId} to ${timeout}`);
                 const handle = setTimeout(() => {
                     this.closeConnection(frontEndId, evt);
                 }, timeout);
@@ -136,12 +143,17 @@ export class WebsocketFrontendConnectionService implements FrontendConnectionSer
     }
 }
 
-class ReconnectableSocketChannel extends AbstractChannel {
-    private socket: Socket | undefined;
-    private socketBuffer = new SocketWriteBuffer();
-    private disposables = new DisposableCollection();
+@injectable()
+export class ReconnectableSocketChannel extends AbstractChannel {
+    protected socket: Socket | undefined;
+
+    @inject(SocketWriteBuffer)
+    protected socketBuffer: SocketWriteBuffer;
+
+    protected disposables = new DisposableCollection();
 
     connect(socket: Socket): void {
+        this.disposables.dispose();
         this.disposables = new DisposableCollection();
         this.socket = socket;
         const errorHandler = (err: Error) => {
@@ -169,6 +181,10 @@ class ReconnectableSocketChannel extends AbstractChannel {
     disconnect(): void {
         this.disposables.dispose();
         this.socket = undefined;
+    }
+
+    drainBuffer(): void {
+        this.socketBuffer.drain();
     }
 
     override getWriteBuffer(): WriteBuffer {

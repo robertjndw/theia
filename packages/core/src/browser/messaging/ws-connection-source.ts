@@ -14,17 +14,23 @@
 // SPDX-License-Identifier: EPL-2.0 OR GPL-2.0-only WITH Classpath-exception-2.0
 // *****************************************************************************
 
-import { AbstractChannel, Channel, Disposable, DisposableCollection, Emitter, Event, servicesPath } from '../../common';
+// Manages the socket the frontend logger's RPC rides on, so logging through an ILogger here
+// would be circular.
+/* eslint-disable @theia/named-logger-check */
+
+import { Emitter, Event } from '../../common/event';
 import { ConnectionSource } from './connection-source';
 import { Socket, io } from 'socket.io-client';
 import { Endpoint } from '../endpoint';
-import { ForwardingChannel } from '../../common/message-rpc/channel';
+import { AbstractChannel, Channel, ForwardingChannel } from '../../common/message-rpc/channel';
 import { Uint8ArrayReadBuffer, Uint8ArrayWriteBuffer } from '../../common/message-rpc/uint8-array-message-buffer';
 import { inject, injectable, postConstruct } from 'inversify';
 import { FrontendIdProvider } from './frontend-id-provider';
 import { FrontendApplicationConfigProvider } from '../frontend-application-config-provider';
 import { SocketWriteBuffer } from '../../common/messaging/socket-write-buffer';
 import { ConnectionManagementMessages } from '../../common/messaging/connection-management';
+import { servicesPath } from '../../common/messaging/handler';
+import { Disposable, DisposableCollection } from '../../common/disposable';
 
 @injectable()
 export class WebSocketConnectionSource implements ConnectionSource {
@@ -33,7 +39,8 @@ export class WebSocketConnectionSource implements ConnectionSource {
     @inject(FrontendIdProvider)
     protected readonly frontendIdProvider: FrontendIdProvider;
 
-    private readonly writeBuffer = new SocketWriteBuffer();
+    @inject(SocketWriteBuffer)
+    protected readonly writeBuffer: SocketWriteBuffer;
 
     private _socket: Socket;
     get socket(): Socket {
@@ -135,8 +142,8 @@ export class WebSocketConnectionSource implements ConnectionSource {
 
     connectNewChannel(): void {
         if (this.currentChannel) {
-            this.currentChannel.close();
             this.currentChannel.onCloseEmitter.fire({ reason: 'reconnecting channel' });
+            this.currentChannel.close();
         }
         this.writeBuffer.drain();
         this.currentChannel = this.createChannel();
@@ -205,12 +212,7 @@ export class WebSocketConnectionSource implements ConnectionSource {
             reconnection: true,
             reconnectionDelay: 1000,
             reconnectionDelayMax: 10000,
-            reconnectionAttempts: Infinity,
-            extraHeaders: {
-                // Socket.io strips the `origin` header
-                // We need to provide our own for validation
-                'fix-origin': window.location.origin
-            }
+            reconnectionAttempts: Infinity
         });
     }
 

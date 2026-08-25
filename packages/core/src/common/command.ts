@@ -21,6 +21,7 @@ import { ContributionProvider } from './contribution-provider';
 import { nls } from './nls';
 import debounce = require('p-debounce');
 import { isObject } from './types';
+import { ILogger } from './logger';
 
 /**
  * A command is a unique identifier of a function
@@ -190,6 +191,9 @@ export interface CommandService {
 @injectable()
 export class CommandRegistry implements CommandService {
 
+    @inject(ILogger) @named('core:CommandRegistry')
+    protected readonly logger: ILogger;
+
     protected readonly _commands: { [id: string]: Command } = {};
     protected readonly _handlers: { [id: string]: CommandHandler[] } = {};
 
@@ -197,6 +201,19 @@ export class CommandRegistry implements CommandService {
 
     // List of recently used commands.
     protected _recent: string[] = [];
+
+    /**
+     * Unidirectional alias map from a target command id to the alias command ids registered for it.
+     * When the target (for instance a native Theia command) is executed, events also fire for its
+     * aliases (for instance the VS Code command ids).
+     */
+    protected readonly _aliases = new Map<string, Set<string>>();
+
+    /**
+     * How often each command is currently executing, so that an alias event can be skipped while the
+     * alias command itself is on the stack.
+     */
+    protected readonly executionDepth = new Map<string, number>();
 
     protected readonly onWillExecuteCommandEmitter = new Emitter<WillExecuteCommandEvent>();
     readonly onWillExecuteCommand = this.onWillExecuteCommandEmitter.event;
@@ -232,7 +249,7 @@ export class CommandRegistry implements CommandService {
      */
     registerCommand(command: Command, handler?: CommandHandler): Disposable {
         if (this._commands[command.id]) {
-            console.warn(`A command ${command.id} is already registered.`);
+            this.logger.warn(`A command ${command.id} is already registered.`);
             return Disposable.NULL;
         }
         const toDispose = new DisposableCollection(this.doRegisterCommand(command));
@@ -271,6 +288,42 @@ export class CommandRegistry implements CommandService {
         if (toUnregister) {
             toUnregister.dispose();
         }
+    }
+
+    /**
+     * Register a unidirectional alias from a target command to an alias command.
+     * When the target command is executed, {@link onDidExecuteCommand} and {@link onWillExecuteCommand}
+     * fire for the alias id as well.
+     *
+     * This does not affect command handlers, enablement or visibility, only event emission. A target may
+     * carry several aliases.
+     *
+     * No event is fired for an alias while that alias is executing, which keeps an alias command that
+     * delegates to its target from reporting itself twice. The check is by command id rather than by call
+     * stack, so an unrelated execution of the alias that happens to overlap suppresses the event as well.
+     *
+     * @param aliasId the alias command id, for instance a VS Code command id
+     * @param targetId the target command id, for instance the native Theia command id
+     * @returns a `Disposable` that removes this alias again
+     */
+    registerAlias(aliasId: string, targetId: string): Disposable {
+        const aliases = this._aliases.get(targetId) ?? new Set<string>();
+        aliases.add(aliasId);
+        this._aliases.set(targetId, aliases);
+        return Disposable.create(() => {
+            const registered = this._aliases.get(targetId);
+            if (registered?.delete(aliasId) && registered.size === 0) {
+                this._aliases.delete(targetId);
+            }
+        });
+    }
+
+    /**
+     * Returns the alias ids registered for the given command id.
+     */
+    getAliases(commandId: string): readonly string[] {
+        const aliases = this._aliases.get(commandId);
+        return aliases ? Array.from(aliases) : [];
     }
 
     /**
@@ -337,10 +390,23 @@ export class CommandRegistry implements CommandService {
     async executeCommand<T>(commandId: string, ...args: any[]): Promise<T | undefined> {
         const handler = this.getActiveHandler(commandId, ...args);
         if (handler) {
-            await this.fireWillExecuteCommand(commandId, args);
-            const result = await handler.execute(...args);
-            this.onDidExecuteCommandEmitter.fire({ commandId, args });
-            return result;
+            this.executionDepth.set(commandId, (this.executionDepth.get(commandId) ?? 0) + 1);
+            try {
+                await this.fireWillExecuteCommand(commandId, args);
+                const result = await handler.execute(...args);
+                this.onDidExecuteCommandEmitter.fire({ commandId, args });
+                for (const alias of this.getPendingAliases(commandId)) {
+                    this.onDidExecuteCommandEmitter.fire({ commandId: alias, args });
+                }
+                return result;
+            } finally {
+                const depth = this.executionDepth.get(commandId) ?? 1;
+                if (depth > 1) {
+                    this.executionDepth.set(commandId, depth - 1);
+                } else {
+                    this.executionDepth.delete(commandId);
+                }
+            }
         }
         throw Object.assign(new Error(`The command '${commandId}' cannot be executed. There are no active handlers available for the command.`), { code: 'NO_ACTIVE_HANDLER' });
     }
@@ -348,6 +414,17 @@ export class CommandRegistry implements CommandService {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     protected async fireWillExecuteCommand(commandId: string, args: any[] = []): Promise<void> {
         await WaitUntilEvent.fire(this.onWillExecuteCommandEmitter, { commandId, args }, 30000);
+        for (const alias of this.getPendingAliases(commandId)) {
+            await WaitUntilEvent.fire(this.onWillExecuteCommandEmitter, { commandId: alias, args }, 30000);
+        }
+    }
+
+    /**
+     * The aliases of the given command that are not executing themselves, and for which events are
+     * therefore still owed.
+     */
+    protected getPendingAliases(commandId: string): readonly string[] {
+        return this.getAliases(commandId).filter(alias => !this.executionDepth.has(alias));
     }
 
     /**
@@ -363,7 +440,7 @@ export class CommandRegistry implements CommandService {
                         return handler;
                     }
                 } catch (error) {
-                    console.error(error);
+                    this.logger.error(error);
                 }
             }
         }
@@ -383,7 +460,7 @@ export class CommandRegistry implements CommandService {
                         return handler;
                     }
                 } catch (error) {
-                    console.error(error);
+                    this.logger.error(error);
                 }
             }
         }
@@ -403,7 +480,7 @@ export class CommandRegistry implements CommandService {
                         return handler;
                     }
                 } catch (error) {
-                    console.error(error);
+                    this.logger.error(error);
                 }
             }
         }

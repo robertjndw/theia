@@ -14,40 +14,53 @@
 // SPDX-License-Identifier: EPL-2.0 OR GPL-2.0-only WITH Classpath-exception-2.0
 // *****************************************************************************
 
-import { LanguageModelRegistry } from '@theia/ai-core';
-import { inject, injectable } from '@theia/core/shared/inversify';
+import { LanguageModelRegistry, LanguageModelStatus } from '@theia/ai-core';
+import { getProxyUrl } from '@theia/ai-core/lib/node';
+import { inject, injectable, named } from '@theia/core/shared/inversify';
 import { HuggingFaceModel } from './huggingface-language-model';
 import { HuggingFaceLanguageModelsManager, HuggingFaceModelDescription } from '../common';
+import { ILogger } from '@theia/core';
 
 @injectable()
 export class HuggingFaceLanguageModelsManagerImpl implements HuggingFaceLanguageModelsManager {
 
     protected _apiKey: string | undefined;
+    protected _proxyUrl: string | undefined;
 
     @inject(LanguageModelRegistry)
     protected readonly languageModelRegistry: LanguageModelRegistry;
 
+    @inject(ILogger) @named('ai-huggingface:HuggingFaceLanguageModelsManagerImpl')
+    protected readonly logger: ILogger;
+
     get apiKey(): string | undefined {
         return this._apiKey ?? process.env.HUGGINGFACE_API_KEY;
+    }
+
+    protected calculateStatus(apiKey: string | undefined): LanguageModelStatus {
+        return apiKey ? { status: 'ready' } : { status: 'unavailable', message: 'No Hugging Face API key set' };
     }
 
     async createOrUpdateLanguageModels(...modelDescriptions: HuggingFaceModelDescription[]): Promise<void> {
         for (const modelDescription of modelDescriptions) {
             const model = await this.languageModelRegistry.getLanguageModel(modelDescription.id);
             const apiKeyProvider = () => this.apiKey;
+            const status = this.calculateStatus(this.apiKey);
+
+            const proxyUrl = getProxyUrl('https://api-inference.huggingface.co', this._proxyUrl);
 
             if (model) {
                 if (!(model instanceof HuggingFaceModel)) {
-                    console.warn(`Hugging Face: model ${modelDescription.id} is not a Hugging Face model`);
+                    this.logger.warn(`Hugging Face: model ${modelDescription.id} is not a Hugging Face model`);
                     continue;
                 }
-                model.model = modelDescription.model;
-                model.apiKey = apiKeyProvider;
+                await this.languageModelRegistry.patchLanguageModel<HuggingFaceModel>(modelDescription.id, { status, proxy: proxyUrl });
             } else {
                 this.languageModelRegistry.addLanguageModels([
                     new HuggingFaceModel(
                         modelDescription.id,
                         modelDescription.model,
+                        status,
                         apiKeyProvider,
                         undefined,
                         undefined,
@@ -55,6 +68,7 @@ export class HuggingFaceLanguageModelsManagerImpl implements HuggingFaceLanguage
                         undefined,
                         undefined,
                         undefined,
+                        proxyUrl,
                     )
                 ]);
             }
@@ -67,5 +81,13 @@ export class HuggingFaceLanguageModelsManagerImpl implements HuggingFaceLanguage
 
     setApiKey(apiKey: string | undefined): void {
         this._apiKey = apiKey || undefined;
+    }
+
+    setProxyUrl(proxyUrl: string | undefined): void {
+        if (proxyUrl) {
+            this._proxyUrl = proxyUrl;
+        } else {
+            this._proxyUrl = undefined;
+        }
     }
 }

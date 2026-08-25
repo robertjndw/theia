@@ -19,14 +19,14 @@ import * as fs from '@theia/core/shared/fs-extra';
 import * as path from 'path';
 import { generateUuid } from '@theia/core/lib/common/uuid';
 import { Request, Response } from '@theia/core/shared/express';
-import { inject, injectable } from '@theia/core/shared/inversify';
+import { inject, injectable, named } from '@theia/core/shared/inversify';
 import { OK, BAD_REQUEST, METHOD_NOT_ALLOWED, NOT_FOUND, INTERNAL_SERVER_ERROR, REQUESTED_RANGE_NOT_SATISFIABLE, PARTIAL_CONTENT } from 'http-status-codes';
 import URI from '@theia/core/lib/common/uri';
 import { isEmpty } from '@theia/core/lib/common/objects';
 import { ILogger } from '@theia/core/lib/common/logger';
 import { FileUri } from '@theia/core/lib/common/file-uri';
 import { DirectoryArchiver } from './directory-archiver';
-import { FileDownloadData } from '../../common/download/file-download-data';
+import { FileDownloadData } from '../../common/download/file-download';
 import { FileDownloadCache, DownloadStorageItem } from './file-download-cache';
 
 interface PrepareDownloadOptions {
@@ -39,7 +39,7 @@ interface PrepareDownloadOptions {
 @injectable()
 export abstract class FileDownloadHandler {
 
-    @inject(ILogger)
+    @inject(ILogger) @named('filesystem:FileDownloadHandler')
     protected readonly logger: ILogger;
 
     @inject(DirectoryArchiver)

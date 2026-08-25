@@ -23,7 +23,7 @@ import { LanguageGrammarDefinitionContribution, getEncodedLanguageId } from './t
 import { createTextmateTokenizer, TokenizerOption } from './textmate-tokenizer';
 import { TextmateRegistry } from './textmate-registry';
 import { MonacoThemeRegistry } from './monaco-theme-registry';
-import { EditorPreferences } from '@theia/editor/lib/browser/editor-preferences';
+import { EditorPreferences } from '@theia/editor/lib/common/editor-preferences';
 import * as monaco from '@theia/monaco-editor-core';
 import { TokenizationRegistry } from '@theia/monaco-editor-core/esm/vs/editor/common/languages';
 import { IStandaloneThemeService } from '@theia/monaco-editor-core/esm/vs/editor/standalone/common/standaloneTheme';
@@ -50,7 +50,7 @@ export class MonacoTextmateService implements FrontendApplicationContribution {
     @inject(TextmateRegistry)
     protected readonly textmateRegistry: TextmateRegistry;
 
-    @inject(ILogger)
+    @inject(ILogger) @named('monaco:MonacoTextmateService')
     protected readonly logger: ILogger;
 
     @inject(OnigasmProvider)
@@ -70,7 +70,7 @@ export class MonacoTextmateService implements FrontendApplicationContribution {
 
     initialize(): void {
         if (!isBasicWasmSupported) {
-            console.log('Textmate support deactivated because WebAssembly is not detected.');
+            this.logger.info('Textmate support deactivated because WebAssembly is not detected.');
             return;
         }
 
@@ -78,7 +78,7 @@ export class MonacoTextmateService implements FrontendApplicationContribution {
             try {
                 grammarProvider.registerTextmateLanguage(this.textmateRegistry);
             } catch (err) {
-                console.error(err);
+                this.logger.error(err);
             }
         }
 
@@ -87,7 +87,7 @@ export class MonacoTextmateService implements FrontendApplicationContribution {
         this.tokenizerOption.lineLimit = this.preferences['editor.maxTokenizationLineLength'];
         this.preferences.onPreferenceChanged(e => {
             if (e.preferenceName === 'editor.maxTokenizationLineLength') {
-                this.tokenizerOption.lineLimit = e.newValue;
+                this.tokenizerOption.lineLimit = this.preferences['editor.maxTokenizationLineLength'];
             }
         });
 
@@ -119,7 +119,8 @@ export class MonacoTextmateService implements FrontendApplicationContribution {
     }
 
     protected get currentEditorTheme(): string {
-        return this.themeService.getCurrentTheme().editorTheme || MonacoThemeRegistry.DARK_DEFAULT_THEME;
+        const theme = this.themeService.getCurrentTheme();
+        return theme.editorTheme || MonacoThemeRegistry.getDefaultTheme(theme.type);
     }
 
     activateLanguage(language: string): Disposable {

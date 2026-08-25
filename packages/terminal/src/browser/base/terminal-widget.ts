@@ -14,7 +14,7 @@
 // SPDX-License-Identifier: EPL-2.0 OR GPL-2.0-only WITH Classpath-exception-2.0
 // *****************************************************************************
 
-import { Event, ViewColumn } from '@theia/core';
+import { Disposable, Event, ViewColumn } from '@theia/core';
 import { BaseWidget } from '@theia/core/lib/browser';
 import { MarkdownString } from '@theia/core/lib/common/markdown-rendering/markdown-string';
 import { ThemeIcon } from '@theia/core/lib/common/theme';
@@ -54,8 +54,14 @@ export interface TerminalBuffer {
     /**
      * @param start zero based index of the first line to return
      * @param length the max number or lines to return
+     * @param trimRight if true, removes trailing whitespaces used for terminal grid alignment
      */
-    getLines(start: number, length: number): string[];
+    getLines(start: number, length: number, trimRight?: boolean): string[];
+}
+
+export interface TerminalBlock {
+    readonly command: string;
+    readonly output: string;
 }
 
 /**
@@ -163,6 +169,25 @@ export abstract class TerminalWidget extends BaseWidget {
      */
     abstract selectAll(): void;
 
+    /**
+     * Get the current selection text from the terminal.
+     * @returns the selected text, or empty string if no selection
+     */
+    abstract getSelection(): string;
+
+    /**
+     * Check whether the terminal has an active text selection.
+     * @returns true if text is selected, false otherwise
+     */
+    abstract hasSelection(): boolean;
+
+    /**
+     * Paste the given text into the terminal as if it were typed by the user.
+     * Honors bracketed paste mode when enabled by the running program.
+     * @param text the text to paste
+     */
+    abstract paste(text: string): void;
+
     abstract writeLine(line: string): void;
 
     abstract write(data: string): void;
@@ -178,9 +203,57 @@ export abstract class TerminalWidget extends BaseWidget {
      */
     abstract hasChildProcesses(): Promise<boolean>;
 
+    protected hasUserTitle: boolean = false;
+
     abstract setTitle(title: string): void;
 
     abstract waitOnExit(waitOnExit?: boolean | string): void;
+
+    abstract get commandHistoryState(): TerminalCommandHistoryState | undefined;
+
+}
+
+/**
+ * State of command history in terminal.
+ */
+export interface TerminalCommandHistoryState extends Disposable {
+
+    /**
+     * Array of executed commands and their output in the terminal.
+     */
+    readonly commandHistory: TerminalBlock[];
+
+    /**
+     * The hex-decoded command currently being executed, or empty string if idle.
+     */
+    readonly currentCommand: string;
+
+    /**
+     * Marks the start of a new command execution.
+     * @param command the hexencoded command string
+     */
+    startCommand(command: string): void;
+
+    /**
+     * Records the finished command and its output as a new history block.
+     */
+    finishCommand(block: TerminalBlock): void;
+
+    /**
+     * Clears the current in-progress command state.
+     */
+    clearCommandCollectionState(): void;
+
+    /**
+     * Event which fires when terminal command starts executing.
+     */
+    onTerminalCommandStart: Event<void>;
+
+    /**
+     * Event which fires when terminal prompt is shown.
+     */
+    onTerminalPromptShown: Event<void>;
+
 }
 
 /**
@@ -268,4 +341,18 @@ export interface TerminalWidgetOptions {
      * When enabled, the terminal will not be persisted across window reloads.
      */
     readonly isTransient?: boolean;
+
+    /**
+     * The nonce to use to verify shell integration sequences are coming from a trusted source.
+     * An example impact of UX of this is if the command line is reported with a nonce, it will
+     * not need to verify with the user that the command line is correct before rerunning it
+     * via the [shell integration command decoration](https://code.visualstudio.com/docs/terminal/shell-integration#_command-decorations-and-the-overview-ruler).
+     *
+     * This should be used if the terminal includes [custom shell integration support](https://code.visualstudio.com/docs/terminal/shell-integration#_supported-escape-sequences).
+     * It should be set to a random GUID which will then set the `VSCODE_NONCE` environment
+     * variable. Inside the shell, this should then be removed from the environment so as to
+     * protect it from general access. Once that is done it can be passed through in the
+     * relevant sequences to make them trusted.
+     */
+    readonly shellIntegrationNonce?: string;
 }

@@ -54,7 +54,7 @@ export abstract class AbstractHostedPluginSupport<PM extends AbstractPluginManag
 
     protected container: interfaces.Container;
 
-    @inject(ILogger)
+    @inject(ILogger) @named('plugin-ext:AbstractHostedPluginSupport')
     protected readonly logger: ILogger;
 
     @inject(HostedPluginServer)
@@ -83,6 +83,14 @@ export abstract class AbstractHostedPluginSupport<PM extends AbstractPluginManag
     protected readonly contributions = new Map<PluginIdentifiers.UnversionedId, PluginContributions>();
 
     protected readonly activationEvents = new Set<string>();
+
+    protected workspaceTrusted: boolean = false;
+
+    protected readonly _disabledByTrust = new Set<string>();
+
+    get disabledByTrust(): ReadonlySet<string> {
+        return this._disabledByTrust;
+    }
 
     protected readonly onDidChangePluginsEmitter = new Emitter<void>();
     readonly onDidChangePlugins = this.onDidChangePluginsEmitter.event;
@@ -139,7 +147,11 @@ export abstract class AbstractHostedPluginSupport<PM extends AbstractPluginManag
         try {
             await this.runOperation(() => this.doLoad());
         } catch (e) {
-            console.error('Failed to load plugins:', e);
+            this.logger.error('Failed to load plugins:', e);
+            // Resolve the startup deferreds so that clients awaiting `willStart` or `didStart`,
+            // e.g. file system provider activations, do not hang forever on a failed load.
+            this.deferredWillStart.resolve();
+            this.deferredDidStart.resolve();
         }
     }), 50, { leading: true });
 
@@ -149,6 +161,8 @@ export abstract class AbstractHostedPluginSupport<PM extends AbstractPluginManag
 
     protected async doLoad(): Promise<void> {
         const toDisconnect = new DisposableCollection(Disposable.create(() => { /* mark as connected */ }));
+
+        this._disabledByTrust.clear();
 
         await this.beforeSyncPlugins(toDisconnect);
 
@@ -166,6 +180,9 @@ export abstract class AbstractHostedPluginSupport<PM extends AbstractPluginManag
             return;
         }
         const contributionsByHost = this.loadContributions(toDisconnect);
+        if (this._disabledByTrust.size > 0) {
+            this.onDidChangePluginsEmitter.fire(undefined);
+        }
 
         await this.afterLoadContributions(toDisconnect);
 
@@ -211,7 +228,6 @@ export abstract class AbstractHostedPluginSupport<PM extends AbstractPluginManag
             const [deployedPluginIds, uninstalledPluginIds, disabledPlugins] = await Promise.all(
                 [this.server.getDeployedPluginIds(), this.server.getUninstalledPluginIds(), this.server.getDisabledPluginIds()]);
 
-            const ignoredPlugins = [...disabledPlugins, ...uninstalledPluginIds];
             waitPluginsMeasurement.log('Waiting for backend deployment');
             syncPluginsMeasurement = this.measure('syncPlugins');
             for (const versionedId of deployedPluginIds) {
@@ -224,14 +240,23 @@ export abstract class AbstractHostedPluginSupport<PM extends AbstractPluginManag
             for (const pluginId of toUnload) {
                 this.contributions.get(pluginId)?.dispose();
             }
-            for (const versionedId of ignoredPlugins) {
+            for (const versionedId of uninstalledPluginIds) {
                 const plugin = this.getPlugin(PluginIdentifiers.unversionedFromVersioned(versionedId));
                 if (plugin && PluginIdentifiers.componentsToVersionedId(plugin.metadata.model) === versionedId && !plugin.metadata.outOfSync) {
                     plugin.metadata.outOfSync = didChangeInstallationStatus = true;
                 }
             }
+            for (const unversionedId of disabledPlugins) {
+                const plugin = this.getPlugin(unversionedId);
+                if (plugin && PluginIdentifiers.componentsToUnversionedId(plugin.metadata.model) === unversionedId && !plugin.metadata.outOfSync) {
+                    plugin.metadata.outOfSync = didChangeInstallationStatus = true;
+                }
+            }
             for (const contribution of this.contributions.values()) {
-                if (contribution.plugin.metadata.outOfSync && !ignoredPlugins.includes(PluginIdentifiers.componentsToVersionedId(contribution.plugin.metadata.model))) {
+                if (contribution.plugin.metadata.outOfSync && !(
+                    uninstalledPluginIds.includes(PluginIdentifiers.componentsToVersionedId(contribution.plugin.metadata.model))
+                    || disabledPlugins.includes(PluginIdentifiers.componentsToUnversionedId(contribution.plugin.metadata.model))
+                )) {
                     contribution.plugin.metadata.outOfSync = false;
                     didChangeInstallationStatus = true;
                 }
@@ -291,17 +316,21 @@ export abstract class AbstractHostedPluginSupport<PM extends AbstractPluginManag
         const loadPluginsMeasurement = this.measure('loadPlugins');
 
         const hostContributions = new Map<PluginHost, PluginContributions[]>();
-        console.log(`[${this.clientId}] Loading plugin contributions`);
+        this.logger.info(`[${this.clientId}] Loading plugin contributions`);
         for (const contributions of this.contributions.values()) {
+            if (!this.workspaceTrusted && contributions.plugin.metadata.model.untrustedWorkspacesSupport === false) {
+                this._disabledByTrust.add(PluginIdentifiers.componentsToUnversionedId(contributions.plugin.metadata.model));
+                continue;
+            }
+
             const plugin = contributions.plugin.metadata;
             const pluginId = plugin.model.id;
-
             if (contributions.state === PluginContributions.State.INITIALIZING) {
                 contributions.state = PluginContributions.State.LOADING;
-                contributions.push(Disposable.create(() => console.log(`[${pluginId}]: Unloaded plugin.`)));
+                contributions.push(Disposable.create(() => this.logger.info(`[${pluginId}]: Unloaded plugin.`)));
                 contributions.push(this.handleContributions(contributions.plugin));
                 contributions.state = PluginContributions.State.LOADED;
-                console.debug(`[${this.clientId}][${pluginId}]: Loaded contributions.`);
+                this.logger.debug(`[${this.clientId}][${pluginId}]: Loaded contributions.`);
                 loaded++;
             }
 
@@ -313,7 +342,7 @@ export abstract class AbstractHostedPluginSupport<PM extends AbstractPluginManag
                 hostContributions.set(host, dynamicContributions);
                 toDisconnect.push(Disposable.create(() => {
                     contributions!.state = PluginContributions.State.LOADED;
-                    console.debug(`[${this.clientId}][${pluginId}]: Disconnected.`);
+                    this.logger.debug(`[${this.clientId}][${pluginId}]: Disconnected.`);
                 }));
             }
         }
@@ -369,22 +398,22 @@ export abstract class AbstractHostedPluginSupport<PM extends AbstractPluginManag
                     if (toDisconnect.disposed) {
                         return;
                     }
-                    console.log(`[${this.clientId}] Starting plugins.`);
+                    this.logger.info(`[${this.clientId}] Starting plugins.`);
                     for (const contributions of hostContributions) {
                         started++;
                         const plugin = contributions.plugin;
                         const id = plugin.metadata.model.id;
                         contributions.state = PluginContributions.State.STARTED;
-                        console.debug(`[${this.clientId}][${id}]: Started plugin.`);
+                        this.logger.debug(`[${this.clientId}][${id}]: Started plugin.`);
                         toDisconnect.push(contributions.push(Disposable.create(() => {
-                            console.debug(`[${this.clientId}][${id}]: Stopped plugin.`);
+                            this.logger.debug(`[${this.clientId}][${id}]: Stopped plugin.`);
                             manager.$stop(id);
                         })));
 
                         this.handlePluginStarted(manager, plugin);
                     }
                 } catch (e) {
-                    console.error(`Failed to start plugins for '${host}' host`, e);
+                    this.logger.error(`Failed to start plugins for '${host}' host`, e);
                 }
             })());
         }

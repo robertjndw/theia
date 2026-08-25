@@ -14,10 +14,10 @@
 // SPDX-License-Identifier: EPL-2.0 OR GPL-2.0-only WITH Classpath-exception-2.0
 // *****************************************************************************
 
-import { injectable, inject } from '@theia/core/shared/inversify';
+import { injectable, inject, named } from '@theia/core/shared/inversify';
 import { StatusBar } from '@theia/core/lib/browser/status-bar/status-bar';
-import { StatusBarAlignment, StatusBarEntry, FrontendApplicationContribution, PreferenceServiceImpl, PreferenceChange, codicon } from '@theia/core/lib/browser';
-import { MessageService } from '@theia/core/lib/common';
+import { StatusBarAlignment, StatusBarEntry, FrontendApplicationContribution, OnWillStopAction, codicon } from '@theia/core/lib/browser';
+import { MessageService, PreferenceChange, PreferenceServiceImpl } from '@theia/core/lib/common';
 import { CommandRegistry } from '@theia/core/shared/@lumino/commands';
 import { Menu } from '@theia/core/shared/@lumino/widgets';
 import { FrontendApplicationStateService } from '@theia/core/lib/browser/frontend-application-state';
@@ -25,8 +25,9 @@ import { ConnectionStatusService, ConnectionStatus } from '@theia/core/lib/brows
 import { PluginDevServer } from '../common/plugin-dev-protocol';
 import { HostedPluginManagerClient, HostedInstanceState, HostedPluginCommands, HostedInstanceData } from './hosted-plugin-manager-client';
 import { HostedPluginLogViewer } from './hosted-plugin-log-viewer';
-import { HostedPluginPreferences } from './hosted-plugin-preferences';
+import { HostedPluginPreferences } from '../common/hosted-plugin-preferences';
 import { nls } from '@theia/core/lib/common/nls';
+import { ILogger } from '@theia/core';
 
 /**
  * Adds a status bar element displaying the state of secondary Theia instance with hosted plugin and
@@ -66,10 +67,30 @@ export class HostedPluginController implements FrontendApplicationContribution {
     @inject(MessageService)
     protected readonly messageService: MessageService;
 
+    @inject(ILogger) @named('plugin-dev:HostedPluginController')
+    protected readonly logger: ILogger;
+
     private pluginState: HostedInstanceState = HostedInstanceState.STOPPED;
     // used only for displaying Running instead of Watching in status bar if run of watcher fails
     private watcherSuccess: boolean;
     private entry: StatusBarEntry | undefined;
+
+    onWillStop(): OnWillStopAction | undefined {
+        if (this.pluginState === HostedInstanceState.RUNNING || this.pluginState === HostedInstanceState.STARTING) {
+            return {
+                reason: 'Hosted plugin instance is still running',
+                action: async () => {
+                    try {
+                        await this.hostedPluginManagerClient.stop(false);
+                    } catch {
+                        // Best effort — don't block shutdown if termination fails
+                    }
+                    return true;
+                }
+            };
+        }
+        return undefined;
+    }
 
     public initialize(): void {
         this.hostedPluginServer.getHostedPlugin().then(pluginMetadata => {
@@ -103,7 +124,7 @@ export class HostedPluginController implements FrontendApplicationContribution {
 
                 this.preferenceService.onPreferenceChanged(preference => this.onPreferencesChanged(preference));
             } else {
-                console.error(`Need to load plugin ${pluginMetadata.model.id}`);
+                this.logger.error(`Need to load plugin ${pluginMetadata.model.id}`);
             }
         });
     }
@@ -195,7 +216,7 @@ export class HostedPluginController implements FrontendApplicationContribution {
             if (await this.hostedPluginServer.isHostedPluginInstanceRunning()) {
                 const pluginLocation = await this.hostedPluginServer.getHostedPluginURI();
                 const isWatchCompilationRunning = await this.hostedPluginServer.isWatchCompilationRunning(pluginLocation);
-                if (preference.newValue === true) {
+                if (this.hostedPluginPreferences['hosted-plugin.watchMode']) {
                     if (!isWatchCompilationRunning) {
                         await this.runWatchCompilation(pluginLocation.toString());
                     }

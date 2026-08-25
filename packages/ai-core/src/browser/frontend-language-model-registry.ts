@@ -1,5 +1,5 @@
 // *****************************************************************************
-// Copyright (C) 2024 EclipseSource GmbH.
+// Copyright (C) 2025 EclipseSource GmbH.
 //
 // This program and the accompanying materials are made available under the
 // terms of the Eclipse Public License v. 2.0 which is available at
@@ -18,6 +18,7 @@ import {
     inject,
     injectable,
     postConstruct,
+    named,
 } from '@theia/core/shared/inversify';
 import {
     OutputChannel,
@@ -26,14 +27,16 @@ import {
 } from '@theia/output/lib/browser/output-channel';
 import {
     AISettingsService,
+    createToolCallError,
     DefaultLanguageModelRegistryImpl,
+    FrontendLanguageModelRegistry,
     isLanguageModelParsedResponse,
     isLanguageModelStreamResponse,
     isLanguageModelStreamResponseDelegate,
     isLanguageModelTextResponse,
-    isModelMatching,
     isTextResponsePart,
     LanguageModel,
+    LanguageModelAliasRegistry,
     LanguageModelDelegateClient,
     LanguageModelFrontendDelegate,
     LanguageModelMetaData,
@@ -44,11 +47,15 @@ import {
     LanguageModelSelector,
     LanguageModelStreamResponsePart,
     ToolCallResult,
+    ToolInvocationContext
 } from '../common';
 
 @injectable()
 export class LanguageModelDelegateClientImpl
     implements LanguageModelDelegateClient, LanguageModelRegistryClient {
+    onLanguageModelUpdated(id: string): void {
+        this.receiver.onLanguageModelUpdated(id);
+    }
     protected receiver: FrontendLanguageModelRegistryImpl;
 
     setReceiver(receiver: FrontendLanguageModelRegistryImpl): void {
@@ -59,8 +66,8 @@ export class LanguageModelDelegateClientImpl
         this.receiver.send(id, token);
     }
 
-    toolCall(requestId: string, toolId: string, args_string: string): Promise<ToolCallResult> {
-        return this.receiver.toolCall(requestId, toolId, args_string);
+    toolCall(requestId: string, toolId: string, args_string: string, toolCallId?: string): Promise<ToolCallResult> {
+        return this.receiver.toolCall(requestId, toolId, args_string, toolCallId);
     }
 
     error(id: string, error: Error): void {
@@ -85,7 +92,11 @@ interface StreamState {
 
 @injectable()
 export class FrontendLanguageModelRegistryImpl
-    extends DefaultLanguageModelRegistryImpl {
+    extends DefaultLanguageModelRegistryImpl
+    implements FrontendLanguageModelRegistry {
+
+    @inject(LanguageModelAliasRegistry)
+    protected aliasRegistry: LanguageModelAliasRegistry;
 
     // called by backend
     languageModelAdded(metadata: LanguageModelMetaData): void {
@@ -94,6 +105,28 @@ export class FrontendLanguageModelRegistryImpl
     // called by backend
     languageModelRemoved(id: string): void {
         this.removeLanguageModels([id]);
+    }
+
+    // called by backend when a model is updated
+    onLanguageModelUpdated(id: string): void {
+        this.updateLanguageModelFromBackend(id);
+    }
+
+    /**
+     * Fetch the updated model metadata from the backend and update the registry.
+     */
+    protected async updateLanguageModelFromBackend(id: string): Promise<void> {
+        try {
+            const backendModels = await this.registryDelegate.getLanguageModelDescriptions();
+            const updated = backendModels.find((m: { id: string }) => m.id === id);
+            if (updated) {
+                // Remove the old model and add the updated one
+                this.removeLanguageModels([id]);
+                this.addLanguageModels([updated]);
+            }
+        } catch (err) {
+            this.logger.error('Failed to update language model from backend', err);
+        }
     }
     @inject(LanguageModelRegistryFrontendDelegate)
     protected registryDelegate: LanguageModelRegistryFrontendDelegate;
@@ -104,14 +137,14 @@ export class FrontendLanguageModelRegistryImpl
     @inject(LanguageModelDelegateClientImpl)
     protected client: LanguageModelDelegateClientImpl;
 
-    @inject(ILogger)
-    protected override logger: ILogger;
-
     @inject(OutputChannelManager)
     protected outputChannelManager: OutputChannelManager;
 
     @inject(AISettingsService)
     protected settingsService: AISettingsService;
+
+    @inject(ILogger) @named('ai-core:FrontendLanguageModelRegistryImpl')
+    protected override readonly logger: ILogger;
 
     private static requestCounter: number = 0;
 
@@ -119,7 +152,7 @@ export class FrontendLanguageModelRegistryImpl
         let modelAdded = false;
         for (const model of models) {
             if (this.languageModels.find(m => m.id === model.id)) {
-                console.warn(`Tried to add an existing model ${model.id}`);
+                this.logger.warn(`Tried to add an existing model ${model.id}`);
                 continue;
             }
             if (LanguageModel.is(model)) {
@@ -237,8 +270,8 @@ export class FrontendLanguageModelRegistryImpl
         };
     }
 
-    private streams = new Map<string, StreamState>();
-    private requests = new Map<string, LanguageModelRequest>();
+    protected streams = new Map<string, StreamState>();
+    protected requests = new Map<string, LanguageModelRequest>();
 
     async *getIterable(
         state: StreamState
@@ -282,16 +315,21 @@ export class FrontendLanguageModelRegistryImpl
     }
 
     // called by backend once tool is invoked
-    toolCall(id: string, toolId: string, arg_string: string): Promise<ToolCallResult> {
+    async toolCall(id: string, toolId: string, arg_string: string, toolCallId?: string): Promise<ToolCallResult> {
         if (!this.requests.has(id)) {
-            throw new Error('Somehow we got a callback for a non existing request!');
+            return createToolCallError(`No request found for ID '${id}'. The request may have been cancelled or completed.`);
         }
         const request = this.requests.get(id)!;
         const tool = request.tools?.find(t => t.id === toolId);
         if (tool) {
-            return tool.handler(arg_string);
+            try {
+                return await tool.handler(arg_string, ToolInvocationContext.create(toolCallId));
+            } catch (error) {
+                const errorMessage = error instanceof Error ? error.message : String(error);
+                return createToolCallError(`Error executing tool '${toolId}': ${errorMessage}`);
+            }
         }
-        throw new Error(`Could not find a tool for ${toolId}!`);
+        return createToolCallError(`Tool '${toolId}' not found in the available tools for this request.`, 'tool-not-available');
     }
 
     // called by backend via the "delegate client" with the error to use for rejection
@@ -307,20 +345,34 @@ export class FrontendLanguageModelRegistryImpl
         streamState.reject?.(error);
     }
 
-    override async selectLanguageModels(request: LanguageModelSelector): Promise<LanguageModel[]> {
+    override async selectLanguageModels(request: LanguageModelSelector): Promise<LanguageModel[] | undefined> {
         await this.initialized;
         const userSettings = (await this.settingsService.getAgentSettings(request.agent))?.languageModelRequirements?.find(req => req.purpose === request.purpose);
-        if (userSettings?.identifier) {
-            const model = await this.getLanguageModel(userSettings.identifier);
+        const identifier = userSettings?.identifier ?? request.identifier;
+        if (identifier) {
+            const model = await this.getReadyLanguageModel(identifier);
             if (model) {
                 return [model];
             }
         }
-        return this.languageModels.filter(model => isModelMatching(request, model));
+        // Previously we returned the default model here, but this is not really transparent for the user so we do not select any model here.
+        return undefined;
     }
 
-    override async selectLanguageModel(request: LanguageModelSelector): Promise<LanguageModel | undefined> {
-        return (await this.selectLanguageModels(request))[0];
+    async getReadyLanguageModel(idOrAlias: string): Promise<LanguageModel | undefined> {
+        await this.aliasRegistry.ready;
+        const modelIds = this.aliasRegistry.resolveAlias(idOrAlias);
+        if (modelIds) {
+            for (const modelId of modelIds) {
+                const model = await this.getLanguageModel(modelId);
+                if (model?.status.status === 'ready') {
+                    return model;
+                }
+            }
+            return undefined;
+        }
+        const languageModel = await this.getLanguageModel(idOrAlias);
+        return languageModel?.status.status === 'ready' ? languageModel : undefined;
     }
 }
 

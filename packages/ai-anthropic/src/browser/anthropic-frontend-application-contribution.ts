@@ -14,23 +14,19 @@
 // SPDX-License-Identifier: EPL-2.0 OR GPL-2.0-only WITH Classpath-exception-2.0
 // *****************************************************************************
 
-import { FrontendApplicationContribution, PreferenceService } from '@theia/core/lib/browser';
+import { FrontendApplicationContribution } from '@theia/core/lib/browser';
 import { inject, injectable } from '@theia/core/shared/inversify';
 import { AnthropicLanguageModelsManager, AnthropicModelDescription } from '../common';
-import { API_KEY_PREF, MODELS_PREF } from './anthropic-preferences';
-import { AICorePreferences, PREFERENCE_NAME_MAX_RETRIES } from '@theia/ai-core/lib/browser/ai-core-preferences';
+import {
+    API_KEY_PREF, CUSTOM_ENDPOINTS_PREF, MODELS_PREF, SERVER_SIDE_COMPACTION_PREF, SERVER_SIDE_COMPACTION_TOKEN_THRESHOLD_PREF
+} from '../common/anthropic-preferences';
+import {
+    AICorePreferences, PREFERENCE_NAME_MAX_RETRIES, PREFERENCE_NAME_SERVER_SIDE_COMPACTION, PREFERENCE_NAME_SERVER_SIDE_COMPACTION_TOKEN_THRESHOLD
+} from '@theia/ai-core/lib/common/ai-core-preferences';
+import { PreferenceService } from '@theia/core';
+import { resolveCompactionDefault, resolveCompactionTokenThresholdDefault, ServerSideCompactionSetting } from '@theia/ai-core';
 
 const ANTHROPIC_PROVIDER_ID = 'anthropic';
-
-// Model-specific maxTokens values
-const DEFAULT_MODEL_MAX_TOKENS: Record<string, number> = {
-    'claude-3-opus-latest': 4096,
-    'claude-3-5-haiku-latest': 8192,
-    'claude-3-5-sonnet-latest': 8192,
-    'claude-3-7-sonnet-latest': 64000,
-    'claude-opus-4-20250514': 32000,
-    'claude-sonnet-4-20250514': 64000
-};
 
 @injectable()
 export class AnthropicFrontendApplicationContribution implements FrontendApplicationContribution {
@@ -45,27 +41,46 @@ export class AnthropicFrontendApplicationContribution implements FrontendApplica
     protected aiCorePreferences: AICorePreferences;
 
     protected prevModels: string[] = [];
+    protected prevCustomModels: Partial<AnthropicModelDescription>[] = [];
 
     onStart(): void {
         this.preferenceService.ready.then(() => {
             const apiKey = this.preferenceService.get<string>(API_KEY_PREF, undefined);
             this.manager.setApiKey(apiKey);
 
+            const proxyUri = this.preferenceService.get<string>('http.proxy', undefined);
+            this.manager.setProxyUrl(proxyUri);
+
             const models = this.preferenceService.get<string[]>(MODELS_PREF, []);
             this.manager.createOrUpdateLanguageModels(...models.map(modelId => this.createAnthropicModelDescription(modelId)));
             this.prevModels = [...models];
 
+            const customModels = this.preferenceService.get<Partial<AnthropicModelDescription>[]>(CUSTOM_ENDPOINTS_PREF, []);
+            this.manager.createOrUpdateLanguageModels(...this.createCustomModelDescriptionsFromPreferences(customModels));
+            this.prevCustomModels = [...customModels];
+
             this.preferenceService.onPreferenceChanged(event => {
                 if (event.preferenceName === API_KEY_PREF) {
-                    this.manager.setApiKey(event.newValue);
+                    this.manager.setApiKey(this.preferenceService.get<string>(API_KEY_PREF, undefined));
+                    this.updateAllModels();
                 } else if (event.preferenceName === MODELS_PREF) {
-                    this.handleModelChanges(event.newValue as string[]);
+                    this.handleModelChanges(this.preferenceService.get<string[]>(MODELS_PREF, []));
+                } else if (event.preferenceName === 'http.proxy') {
+                    this.manager.setProxyUrl(this.preferenceService.get<string>('http.proxy', undefined));
+                    this.updateAllModels();
+                } else if (event.preferenceName === SERVER_SIDE_COMPACTION_PREF ||
+                    event.preferenceName === PREFERENCE_NAME_SERVER_SIDE_COMPACTION ||
+                    event.preferenceName === SERVER_SIDE_COMPACTION_TOKEN_THRESHOLD_PREF ||
+                    event.preferenceName === PREFERENCE_NAME_SERVER_SIDE_COMPACTION_TOKEN_THRESHOLD) {
+                    this.updateAllModels();
+                } else if (event.preferenceName === CUSTOM_ENDPOINTS_PREF) {
+                    this.handleCustomModelChanges(this.preferenceService.get<Partial<AnthropicModelDescription>[]>(CUSTOM_ENDPOINTS_PREF, []));
                 }
             });
 
             this.aiCorePreferences.onPreferenceChanged(event => {
                 if (event.preferenceName === PREFERENCE_NAME_MAX_RETRIES) {
-                    this.updateAllModelsWithNewRetries();
+                    this.updateAllModels();
                 }
             });
         });
@@ -83,31 +98,86 @@ export class AnthropicFrontendApplicationContribution implements FrontendApplica
         this.prevModels = newModels;
     }
 
-    protected updateAllModelsWithNewRetries(): void {
-        const models = this.preferenceService.get<string[]>(MODELS_PREF, []);
-        this.manager.createOrUpdateLanguageModels(...models.map(modelId => this.createAnthropicModelDescription(modelId)));
+    protected handleCustomModelChanges(newCustomModels: Partial<AnthropicModelDescription>[]): void {
+        const oldModels = this.createCustomModelDescriptionsFromPreferences(this.prevCustomModels);
+        const newModels = this.createCustomModelDescriptionsFromPreferences(newCustomModels);
+
+        const modelsToRemove = oldModels.filter(model => !newModels.some(newModel => newModel.id === model.id));
+        const modelsToAddOrUpdate = newModels.filter(newModel =>
+            !oldModels.some(model =>
+                model.id === newModel.id &&
+                model.model === newModel.model &&
+                model.url === newModel.url &&
+                model.apiKey === newModel.apiKey &&
+                model.maxRetries === newModel.maxRetries &&
+                model.useCaching === newModel.useCaching &&
+                model.serverSideCompactionEnabledByDefault === newModel.serverSideCompactionEnabledByDefault &&
+                model.serverSideCompactionTokenThresholdByDefault === newModel.serverSideCompactionTokenThresholdByDefault &&
+                model.enableStreaming === newModel.enableStreaming));
+
+        this.manager.removeLanguageModels(...modelsToRemove.map(model => model.id));
+        this.manager.createOrUpdateLanguageModels(...modelsToAddOrUpdate);
+        this.prevCustomModels = [...newCustomModels];
     }
 
+    protected updateAllModels(): void {
+        const models = this.preferenceService.get<string[]>(MODELS_PREF, []);
+        this.manager.createOrUpdateLanguageModels(...models.map(modelId => this.createAnthropicModelDescription(modelId)));
+
+        const customModels = this.preferenceService.get<Partial<AnthropicModelDescription>[]>(CUSTOM_ENDPOINTS_PREF, []);
+        this.manager.createOrUpdateLanguageModels(...this.createCustomModelDescriptionsFromPreferences(customModels));
+    }
+
+    /** Per-model details are resolved by the backend from the Anthropic /v1/models endpoint. */
     protected createAnthropicModelDescription(modelId: string): AnthropicModelDescription {
         const id = `${ANTHROPIC_PROVIDER_ID}/${modelId}`;
-        const maxTokens = DEFAULT_MODEL_MAX_TOKENS[modelId];
         const maxRetries = this.aiCorePreferences.get(PREFERENCE_NAME_MAX_RETRIES) ?? 3;
+        const globalCompaction = this.preferenceService.get<boolean>(PREFERENCE_NAME_SERVER_SIDE_COMPACTION, true);
+        const compactionOverride = this.preferenceService.get<ServerSideCompactionSetting>(SERVER_SIDE_COMPACTION_PREF, 'default');
+        const serverSideCompactionEnabledByDefault = resolveCompactionDefault(globalCompaction, compactionOverride);
+        const globalThreshold = this.preferenceService.get<number>(PREFERENCE_NAME_SERVER_SIDE_COMPACTION_TOKEN_THRESHOLD, undefined);
+        const providerThreshold = this.preferenceService.get<number>(SERVER_SIDE_COMPACTION_TOKEN_THRESHOLD_PREF, undefined);
+        const serverSideCompactionTokenThresholdByDefault = resolveCompactionTokenThresholdDefault(globalThreshold, providerThreshold);
 
-        const description: AnthropicModelDescription = {
+        return {
             id: id,
             model: modelId,
             apiKey: true,
             enableStreaming: true,
             useCaching: true,
-            maxRetries: maxRetries
+            maxRetries: maxRetries,
+            serverSideCompactionEnabledByDefault,
+            serverSideCompactionTokenThresholdByDefault
         };
-
-        if (maxTokens !== undefined) {
-            description.maxTokens = maxTokens;
-        } else {
-            description.maxTokens = 64000;
-        }
-
-        return description;
     }
+
+    protected createCustomModelDescriptionsFromPreferences(preferences: Partial<AnthropicModelDescription>[]): AnthropicModelDescription[] {
+        const maxRetries = this.aiCorePreferences.get(PREFERENCE_NAME_MAX_RETRIES) ?? 3;
+        const globalCompaction = this.preferenceService.get<boolean>(PREFERENCE_NAME_SERVER_SIDE_COMPACTION, true);
+        const compactionOverride = this.preferenceService.get<ServerSideCompactionSetting>(SERVER_SIDE_COMPACTION_PREF, 'default');
+        const serverSideCompactionEnabledByDefault = resolveCompactionDefault(globalCompaction, compactionOverride);
+        const globalThreshold = this.preferenceService.get<number>(PREFERENCE_NAME_SERVER_SIDE_COMPACTION_TOKEN_THRESHOLD, undefined);
+        const providerThreshold = this.preferenceService.get<number>(SERVER_SIDE_COMPACTION_TOKEN_THRESHOLD_PREF, undefined);
+        const serverSideCompactionTokenThresholdByDefault = resolveCompactionTokenThresholdDefault(globalThreshold, providerThreshold);
+        return preferences.reduce((acc, pref) => {
+            if (!pref.model || !pref.url || typeof pref.model !== 'string' || typeof pref.url !== 'string') {
+                return acc;
+            }
+            return [
+                ...acc,
+                {
+                    id: pref.id && typeof pref.id === 'string' ? pref.id : pref.model,
+                    model: pref.model,
+                    url: pref.url,
+                    apiKey: typeof pref.apiKey === 'string' || pref.apiKey === true ? pref.apiKey : undefined,
+                    enableStreaming: pref.enableStreaming ?? true,
+                    useCaching: pref.useCaching ?? true,
+                    maxRetries: pref.maxRetries ?? maxRetries,
+                    serverSideCompactionEnabledByDefault,
+                    serverSideCompactionTokenThresholdByDefault
+                }
+            ];
+        }, []);
+    }
+
 }

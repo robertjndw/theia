@@ -36,9 +36,15 @@ export interface MenuNode {
      */
     readonly id: string;
     /**
+     * When expression to determine if the menu node is visible.
+     */
+    readonly when?: string;
+    /**
      * Menu nodes are sorted in ascending order based on their `sortString`.
      */
     readonly sortString: string;
+
+    readonly effectiveMenuPath?: string[]; // override the path to be passed as the effectiveMenuPath
     isVisible<T>(effectiveMenuPath: MenuPath, contextMatcher: ContextExpressionMatcher<T>, context: T | undefined, ...args: unknown[]): boolean;
     onDidChange?: Event<void>;
 }

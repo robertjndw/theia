@@ -16,13 +16,15 @@
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
-import { inject, injectable, optional } from '@theia/core/shared/inversify';
-import { MenuPath, CommandRegistry, Disposable, DisposableCollection, nls, CommandMenu, AcceleratorSource, ContextExpressionMatcher } from '@theia/core';
+import { inject, injectable, optional, named } from '@theia/core/shared/inversify';
+import { MenuPath, CommandRegistry, Disposable, DisposableCollection, nls, CommandMenu, AcceleratorSource, ContextExpressionMatcher, environment, ILogger } from '@theia/core';
 import { MenuModelRegistry } from '@theia/core/lib/common';
 import { TabBarToolbarRegistry } from '@theia/core/lib/browser/shell/tab-bar-toolbar';
 import { DeployedPlugin, IconUrl, Menu } from '../../../common';
 import { ScmWidget } from '@theia/scm/lib/browser/scm-widget';
-import { KeybindingRegistry, QuickCommandService } from '@theia/core/lib/browser';
+import { ScmRepositoriesWidget, SCM_SOURCE_CONTROL_TITLE_MENU } from '@theia/scm/lib/browser/scm-repositories-widget';
+import { ScmHistoryGraphWidget, SCM_HISTORY_TITLE_MENU } from '@theia/scm/lib/browser/scm-history-graph-widget';
+import { KeybindingRegistry, QuickCommandService, codicon } from '@theia/core/lib/browser';
 import {
     CodeEditorWidgetUtil, codeToTheiaMappings, ContributionPoint,
     PLUGIN_EDITOR_TITLE_MENU, PLUGIN_EDITOR_TITLE_RUN_MENU, PLUGIN_SCM_TITLE_MENU, PLUGIN_VIEW_TITLE_MENU
@@ -46,6 +48,9 @@ export class MenusContributionPointHandler {
     @inject(QuickCommandService) @optional()
     private readonly quickCommandService: QuickCommandService;
 
+    @inject(ILogger) @named('plugin-ext:MenusContributionPointHandler')
+    protected readonly logger: ILogger;
+
     private initialized = false;
     private initialize(): void {
         this.initialized = true;
@@ -54,13 +59,15 @@ export class MenusContributionPointHandler {
         this.tabBarToolbar.registerItem({
             id: this.tabBarToolbar.toElementId(PLUGIN_EDITOR_TITLE_RUN_MENU),
             menuPath: PLUGIN_EDITOR_TITLE_RUN_MENU,
-            icon: 'debug-alt',
+            icon: codicon('debug-alt'),
             text: nls.localizeByDefault('Run or Debug...'),
             command: '',
             group: 'navigation',
             isVisible: widget => CodeEditorWidgetUtil.is(widget)
         });
         this.tabBarToolbar.registerMenuDelegate(PLUGIN_SCM_TITLE_MENU, widget => widget instanceof ScmWidget);
+        this.tabBarToolbar.registerMenuDelegate(SCM_SOURCE_CONTROL_TITLE_MENU, widget => widget instanceof ScmRepositoriesWidget);
+        this.tabBarToolbar.registerMenuDelegate(SCM_HISTORY_TITLE_MENU, widget => widget instanceof ScmHistoryGraphWidget);
         this.tabBarToolbar.registerMenuDelegate(PLUGIN_VIEW_TITLE_MENU, widget => !CodeEditorWidgetUtil.is(widget));
     }
 
@@ -96,7 +103,7 @@ export class MenusContributionPointHandler {
                         const { group, order } = this.parseGroup(item.group);
                         const { submenu, command } = item;
                         if (submenu && command) {
-                            console.warn(
+                            this.logger.warn(
                                 `Menu item ${command} from plugin ${plugin.metadata.model.id} contributed both submenu and command. Only command will be registered.`
                             );
                         }
@@ -107,7 +114,7 @@ export class MenusContributionPointHandler {
 
                                 const cmd = this.commandRegistry.getCommand(command);
                                 if (!cmd) {
-                                    console.debug(`No label for action menu node: No command "${command}" exists.`);
+                                    this.logger.debug(`No label for action menu node: No command "${command}" exists.`);
                                     return;
                                 }
                                 const label = cmd.label || cmd.id;
@@ -115,19 +122,20 @@ export class MenusContributionPointHandler {
                                 const action: CommandMenu & AcceleratorSource = {
                                     id: command,
                                     sortString: order || '',
+                                    when: item.when,
                                     isVisible: <T>(effectiveMenuPath: MenuPath, contextMatcher: ContextExpressionMatcher<T>, context: T | undefined, ...args: any[]): boolean => {
                                         if (item.when && !contextMatcher.match(item.when, context)) {
                                             return false;
                                         }
 
-                                        return this.commandRegistry.isVisible(command, ...this.pluginMenuCommandAdapter.getArgumentAdapter(contributionPoint)(...args));
+                                        return this.commandRegistry.isVisible(command, ...this.pluginMenuCommandAdapter.getArgumentAdapter(effectiveMenuPath)(...args));
                                     },
                                     icon: icon,
                                     label: label,
                                     isEnabled: (effeciveMenuPath: MenuPath, ...args: any[]): boolean =>
-                                        this.commandRegistry.isEnabled(command, ...this.pluginMenuCommandAdapter.getArgumentAdapter(contributionPoint)(...args)),
+                                        this.commandRegistry.isEnabled(command, ...this.pluginMenuCommandAdapter.getArgumentAdapter(effeciveMenuPath)(...args)),
                                     run: (effeciveMenuPath: MenuPath, ...args: any[]): Promise<void> =>
-                                        this.commandRegistry.executeCommand(command, ...this.pluginMenuCommandAdapter.getArgumentAdapter(contributionPoint)(...args)),
+                                        this.commandRegistry.executeCommand(command, ...this.pluginMenuCommandAdapter.getArgumentAdapter(effeciveMenuPath)(...args)),
                                     isToggled: (effectiveMenuPath: MenuPath) => false,
                                     getAccelerator: (context: HTMLElement | undefined): string[] => {
                                         const bindings = this.keybindingRegistry.getKeybindingsForCommand(command);
@@ -135,7 +143,8 @@ export class MenusContributionPointHandler {
                                         if (bindings.length) {
                                             const binding = bindings.find(b => this.keybindingRegistry.isEnabledInScope(b, context));
                                             if (binding) {
-                                                return this.keybindingRegistry.acceleratorFor(binding, '+', true);
+                                                const asciiOnly = environment.electron.is();
+                                                return this.keybindingRegistry.acceleratorFor(binding, '+', asciiOnly);
                                             }
                                         }
                                         return [];
@@ -153,8 +162,8 @@ export class MenusContributionPointHandler {
                         }
                     }
                 } catch (error) {
-                    console.warn(`Failed to register a menu item for plugin ${plugin.metadata.model.id} contributed to ${contributionPoint}`, item);
-                    console.debug(error);
+                    this.logger.warn(`Failed to register a menu item for plugin ${plugin.metadata.model.id} contributed to ${contributionPoint}`, item);
+                    this.logger.debug(error);
                 }
             }
         }

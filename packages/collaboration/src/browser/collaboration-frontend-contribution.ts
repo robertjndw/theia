@@ -17,7 +17,7 @@
 import '../../src/browser/style/index.css';
 
 import {
-    CancellationToken, CancellationTokenSource, Command, CommandContribution, CommandRegistry, MessageService, nls, Progress, QuickInputService, QuickPickItem,
+    CancellationToken, CancellationTokenSource, Command, CommandContribution, CommandRegistry, MessageService, nls, PreferenceService, Progress, QuickInputService, QuickPickItem,
     URI
 } from '@theia/core';
 import { inject, injectable, optional, postConstruct } from '@theia/core/shared/inversify';
@@ -29,7 +29,6 @@ import { CollaborationWorkspaceService } from './collaboration-workspace-service
 import { StatusBar, StatusBarAlignment, StatusBarEntry } from '@theia/core/lib/browser/status-bar';
 import { codiconArray } from '@theia/core/lib/browser/widgets/widget';
 import { FrontendApplicationConfigProvider } from '@theia/core/lib/browser/frontend-application-config-provider';
-import { PreferenceService } from '@theia/core/lib/browser';
 
 initializeProtocol({
     cryptoModule: window.crypto
@@ -169,8 +168,7 @@ export class CollaborationFrontendContribution implements CommandContribution {
                 return false;
             }
         }
-
-        const endpointUrl = new URI(serverUrl).withPath(provider.endpoint);
+        const endpointUrl = new URI(serverUrl).resolve(provider.endpoint);
         const response = await fetch(endpointUrl.toString(true), {
             method: 'POST',
             body: JSON.stringify(values),
@@ -187,7 +185,7 @@ export class CollaborationFrontendContribution implements CommandContribution {
     }
 
     protected async handleWebAuth(serverUrl: string, token: string, provider: WebAuthProvider): Promise<boolean> {
-        const uri = new URI(serverUrl).withPath(provider.endpoint).withQuery('token=' + token);
+        const uri = new URI(serverUrl).resolve(provider.endpoint).withQuery('token=' + token);
         this.windowService.openNewWindow(uri.toString(true), { external: true });
         return true;
     }

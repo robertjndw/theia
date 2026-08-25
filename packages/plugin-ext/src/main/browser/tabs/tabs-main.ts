@@ -26,6 +26,8 @@ import { TerminalWidget } from '@theia/terminal/lib/browser/base/terminal-widget
 import { DisposableCollection } from '@theia/core';
 import { NotebookEditorWidget } from '@theia/notebook/lib/browser';
 import { Deferred } from '@theia/core/lib/common/promise-util';
+import { MergeEditor } from '@theia/scm/lib/browser/merge-editor/merge-editor';
+import { CustomEditorWidget } from '../custom-editors/custom-editor-widget';
 
 interface TabInfo {
     tab: TabDto;
@@ -100,8 +102,10 @@ export class TabsMainImpl implements TabsMain, Disposable {
 
         this.connectToSignal(this.toDisposeOnDestroy, this.applicationShell.mainPanel.widgetRemoved, (mainPanel, widget) => {
             if (!(widget instanceof TabBar)) {
-                const tabInfo = this.getOrRebuildModel(this.tabInfoLookup, widget.title)!;
-                this.onTabClosed(tabInfo, widget.title);
+                const tabInfo = this.getOrRebuildModel(this.tabInfoLookup, widget.title);
+                if (tabInfo) {
+                    this.onTabClosed(tabInfo, widget.title);
+                }
                 if (this.tabGroupChanged) {
                     this.tabGroupChanged = false;
                     this.createTabsModel();
@@ -178,7 +182,7 @@ export class TabsMainImpl implements TabsMain, Disposable {
         const oldDto = this.tabGroupModel.get(tabBar);
         const groupId = oldDto?.groupId ?? this.groupIdCounter++;
         const tabs = tabBar.titles.map(title => this.createTabDto(title, groupId));
-        const viewColumn = 0; // TODO: Implement correct viewColumn handling
+        const viewColumn = Math.max(0, this.applicationShell.mainAreaTabBars.indexOf(tabBar));
         return {
             groupId,
             tabs,
@@ -222,6 +226,12 @@ export class TabsMainImpl implements TabsMain, Disposable {
                     uri: toUriComponents(widget.editor.uri.toString())
                 };
             }
+        } else if (widget instanceof CustomEditorWidget) {
+            return {
+                kind: TabInputKind.CustomEditorInput,
+                viewType: widget.viewType,
+                uri: toUriComponents(widget.resource.toString())
+            };
         } else if (widget instanceof ViewContainer) {
             return {
                 kind: TabInputKind.WebviewEditorInput,
@@ -236,6 +246,14 @@ export class TabsMainImpl implements TabsMain, Disposable {
                 kind: TabInputKind.NotebookInput,
                 notebookType: widget.notebookType,
                 uri: toUriComponents(widget.model?.uri.toString() ?? '')
+            };
+        } else if (widget instanceof MergeEditor) {
+            return {
+                kind: TabInputKind.TextMergeInput,
+                base: toUriComponents(widget.baseUri.toString()),
+                input1: toUriComponents(widget.side1Uri.toString()),
+                input2: toUriComponents(widget.side1Uri.toString()),
+                result: toUriComponents(widget.resultUri.toString())
             };
         }
 
@@ -259,12 +277,12 @@ export class TabsMainImpl implements TabsMain, Disposable {
             a.id === b.id;
     }
 
-    protected getOrRebuildModel<T, R>(map: Map<T, R>, key: T): R {
+    protected getOrRebuildModel<T, R>(map: Map<T, R>, key: T): R | undefined {
         // something broke so we rebuild the model
         let item = map.get(key);
         if (!item) {
             this.createTabsModel();
-            item = map.get(key)!;
+            item = map.get(key);
         }
         return item;
     }
@@ -272,9 +290,13 @@ export class TabsMainImpl implements TabsMain, Disposable {
     // #region event listeners
     private onTabCreated(tabBar: TabBar<Widget>, args: TabBar.ITabActivateRequestedArgs<Widget>): void {
         const group = this.getOrRebuildModel(this.tabGroupModel, tabBar);
+        if (!group) {
+            return;
+        }
         this.connectToSignal(this.getTitleDisposables(args.title), args.title.changed, this.onTabTitleChanged);
         const tabDto = this.createTabDto(args.title, group.groupId, true);
         this.tabInfoLookup.set(args.title, { group, tab: tabDto, tabIndex: args.index });
+        group.tabs.forEach(tab => tab.isActive = false);
         group.tabs.splice(args.index, 0, tabDto);
         this.proxy.$acceptTabOperation({
             kind: TabModelOperationKind.TAB_OPEN,

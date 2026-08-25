@@ -14,17 +14,16 @@
 // SPDX-License-Identifier: EPL-2.0 OR GPL-2.0-only WITH Classpath-exception-2.0
 // *****************************************************************************
 
-import { MutableChatRequestModel } from '@theia/ai-chat';
-import { ToolProvider, ToolRequest } from '@theia/ai-core';
+import { ToolInvocationContext, ToolProvider, ToolRequest } from '@theia/ai-core';
 import { CancellationToken } from '@theia/core';
-import { PreferenceService } from '@theia/core/lib/browser/preferences/preference-service';
+import { PreferenceService } from '@theia/core/lib/common/preferences/preference-service';
 import { inject, injectable } from '@theia/core/shared/inversify';
 import { FileService } from '@theia/filesystem/lib/browser/file-service';
 import { SearchInWorkspaceService, SearchInWorkspaceCallbacks } from '@theia/search-in-workspace/lib/browser/search-in-workspace-service';
 import { SearchInWorkspaceResult, SearchInWorkspaceOptions } from '@theia/search-in-workspace/lib/common/search-in-workspace-interface';
 import { SEARCH_IN_WORKSPACE_FUNCTION_ID } from '../common/workspace-functions';
 import { WorkspaceFunctionScope } from './workspace-functions';
-import { SEARCH_IN_WORKSPACE_MAX_RESULTS_PREF } from './workspace-preferences';
+import { SEARCH_IN_WORKSPACE_MAX_RESULTS_PREF } from '../common/workspace-preferences';
 import { optimizeSearchResults } from '../common/workspace-search-provider-util';
 
 @injectable()
@@ -46,12 +45,16 @@ export class WorkspaceSearchProvider implements ToolProvider {
         return {
             id: SEARCH_IN_WORKSPACE_FUNCTION_ID,
             name: SEARCH_IN_WORKSPACE_FUNCTION_ID,
-            description: 'Searches the content of files within the workspace for lines matching the given search term (`query`). \
-            The search uses case-insensitive string matching or regular expressions (controlled by the `useRegExp` parameter). \
-            It returns a list of matching files, including the file path (URI), the line number, and the full text content of each matching line. \
-            Multi-word patterns must match exactly (including spaces, case-insensitively). \
-            For best results, use specific search terms and consider filtering by file extensions or limiting to specific subdirectories to avoid overwhelming results. \
-            For complex searches, prefer multiple simpler queries over one complex query or regular expression.',
+            description: 'Searches file contents within the workspace for lines matching the given search term. ' +
+            'Returns up to 30 matching results by default (configurable via preferences). If results are truncated, ' +
+            'refine your search with fileExtensions or subDirectoryPath filters. ' +
+            'The search uses case-insensitive string matching or regular expressions (controlled by the `useRegExp` parameter). ' +
+            'Returns a list of matches including: file path, line number, and the matching line content. ' +
+            'Multi-word patterns must match exactly (including spaces, case-insensitively). ' +
+            'For best results, use specific search terms and filter by file extensions or subdirectories. ' +
+            'For complex searches, prefer multiple simpler queries over one complex regex. ' +
+            'Use this for finding code patterns, function usages, or text across the codebase. ' +
+            'Do NOT use this for finding files by name - use findFilesByPattern instead.',
             parameters: {
                 type: 'object',
                 properties: {
@@ -72,25 +75,30 @@ export class WorkspaceSearchProvider implements ToolProvider {
                     },
                     subDirectoryPath: {
                         type: 'string',
-                        description: 'Optional subdirectory path to limit search scope. Use relative paths from workspace root ' +
-                            '(e.g., "packages/ai-ide/src", "packages/core/src/browser"). If not specified, searches entire workspace.'
+                        description: 'Optional directory to limit the search scope ' +
+                            '(e.g., "frontend/src", "backend/packages/core/src/browser"). ' +
+                            'May also be an absolute path or `file://` URI of a directory the AI tools may access, ' +
+                            'such as one listed in the `ai-features.workspaceFunctions.allowedExternalPaths` preference. ' +
+                            'If not specified, searches the entire workspace.'
                     }
                 },
                 required: ['query', 'useRegExp']
             },
-            handler: (argString, ctx: MutableChatRequestModel) => this.handleSearch(argString, ctx?.response?.cancellationToken)
+            handler: (argString, ctx?: ToolInvocationContext) => this.handleSearch(argString, ctx?.cancellationToken)
         };
     }
 
     private async determineSearchRoots(subDirectoryPath?: string): Promise<string[]> {
-        const workspaceRoot = await this.workspaceScope.getWorkspaceRoot();
-
-        if (!subDirectoryPath) {
-            return [workspaceRoot.toString()];
+        const rootMapping = this.workspaceScope.getRootMapping();
+        if (rootMapping.size === 0) {
+            throw new Error('No workspace has been opened yet');
         }
 
-        const subDirUri = workspaceRoot.resolve(subDirectoryPath);
-        this.workspaceScope.ensureWithinWorkspace(subDirUri, workspaceRoot);
+        if (!subDirectoryPath) {
+            return Array.from(rootMapping.values()).map(uri => uri.toString());
+        }
+
+        const subDirUri = await this.workspaceScope.resolveAccessiblePath(subDirectoryPath);
 
         try {
             const stat = await this.fileService.resolve(subDirUri);
@@ -106,12 +114,44 @@ export class WorkspaceSearchProvider implements ToolProvider {
 
     private async handleSearch(argString: string, cancellationToken?: CancellationToken): Promise<string> {
         try {
-            const args: { query: string, useRegExp: boolean, fileExtensions?: string[], subDirectoryPath?: string } = JSON.parse(argString);
+            const args: { query: string, useRegExp: boolean, fileExtensions?: string[] | string, subDirectoryPath?: string } = JSON.parse(argString);
+
+            if (cancellationToken?.isCancellationRequested) {
+                return JSON.stringify({ error: 'Operation cancelled by user' });
+            }
+
             const results: SearchInWorkspaceResult[] = [];
             let expectedSearchId: number | undefined;
             let searchCompleted = false;
 
-            const searchPromise = new Promise<SearchInWorkspaceResult[]>(async (resolve, reject) => {
+            cancellationToken?.onCancellationRequested(() => {
+                if (expectedSearchId !== undefined && !searchCompleted) {
+                    this.searchService.cancel(expectedSearchId);
+                    searchCompleted = true;
+                }
+            });
+
+            // Use one more than our actual maximum. this way we can determine if we have more results than our maximum and warn the user
+            const maxResultsForTheiaAPI = this.preferenceService.get<number>(SEARCH_IN_WORKSPACE_MAX_RESULTS_PREF, 30) + 1;
+            const options: SearchInWorkspaceOptions = {
+                useRegExp: args.useRegExp,
+                matchCase: false,
+                matchWholeWord: false,
+                maxResults: maxResultsForTheiaAPI,
+            };
+
+            // The model may supply fileExtensions as a single string instead of an array; normalize to an array so that `.map` never throws.
+            const fileExtensions = args.fileExtensions === undefined ? undefined
+                : Array.isArray(args.fileExtensions) ? args.fileExtensions
+                    : [args.fileExtensions];
+            if (fileExtensions && fileExtensions.length > 0) {
+                options.include = fileExtensions.map(ext => `**/*.${ext}`);
+            }
+
+            // Resolve the search roots before starting the search so that any error is reported through the outer try/catch.
+            const rootUris = await this.determineSearchRoots(args.subDirectoryPath);
+
+            const searchPromise = new Promise<SearchInWorkspaceResult[]>((resolve, reject) => {
                 const callbacks: SearchInWorkspaceCallbacks = {
                     onResult: (id, result) => {
                         if (expectedSearchId !== undefined && id !== expectedSearchId) {
@@ -142,38 +182,26 @@ export class WorkspaceSearchProvider implements ToolProvider {
                     }
                 };
 
-                // Use one more than our actual maximum. this way we can determine if we have more results than our maximum and warn the user
-                const maxResultsForTheiaAPI = this.preferenceService.get<number>(SEARCH_IN_WORKSPACE_MAX_RESULTS_PREF, 30) + 1;
-                const options: SearchInWorkspaceOptions = {
-                    useRegExp: args.useRegExp,
-                    matchCase: false,
-                    matchWholeWord: false,
-                    maxResults: maxResultsForTheiaAPI,
-                };
-
-                if (args.fileExtensions && args.fileExtensions.length > 0) {
-                    options.include = args.fileExtensions.map(ext => `**/*.${ext}`);
-                }
-
-                await this.determineSearchRoots(args.subDirectoryPath)
-                    .then(rootUris => this.searchService.searchWithCallback(args.query, rootUris, callbacks, options))
+                this.searchService.searchWithCallback(args.query, rootUris, callbacks, options)
                     .then(id => {
                         expectedSearchId = id;
-                        cancellationToken?.onCancellationRequested(() => {
+                        // Handle cancellation that was requested before the search id became available.
+                        if (cancellationToken?.isCancellationRequested && !searchCompleted) {
                             this.searchService.cancel(id);
-                        });
+                        }
                     })
                     .catch(err => {
                         searchCompleted = true;
                         reject(err);
                     });
-
             });
 
             const timeoutPromise = new Promise<SearchInWorkspaceResult[]>((_, reject) => {
                 setTimeout(() => {
-                    if (expectedSearchId !== undefined && !searchCompleted) {
-                        this.searchService.cancel(expectedSearchId);
+                    if (!searchCompleted) {
+                        if (expectedSearchId !== undefined) {
+                            this.searchService.cancel(expectedSearchId);
+                        }
                         searchCompleted = true;
                         reject(new Error('Search timed out after 30 seconds'));
                     }
@@ -183,8 +211,7 @@ export class WorkspaceSearchProvider implements ToolProvider {
             const finalResults = await Promise.race([searchPromise, timeoutPromise]);
             const maxResults = this.preferenceService.get<number>(SEARCH_IN_WORKSPACE_MAX_RESULTS_PREF, 30);
 
-            const workspaceRoot = await this.workspaceScope.getWorkspaceRoot();
-            const formattedResults = optimizeSearchResults(finalResults, workspaceRoot);
+            const formattedResults = optimizeSearchResults(finalResults, this.workspaceScope);
 
             let numberOfMatchesInFinalResults = 0;
             for (const result of finalResults) {
@@ -206,4 +233,3 @@ export class WorkspaceSearchProvider implements ToolProvider {
         }
     }
 }
-

@@ -34,6 +34,10 @@
     ],
     "guard-for-in": "error",
     "id-blacklist": "off",
+    "id-denylist": [
+      "error",
+      "await"
+    ],
     "id-match": "off",
     "max-len": [
       "error",
@@ -52,6 +56,7 @@
     "no-new-wrappers": "error",
     "no-null/no-null": "error",
     "no-shadow": "off",
+    "no-shadow-restricted-names": "error",
     "@typescript-eslint/no-shadow": [
       "error",
       {
@@ -137,6 +142,7 @@
     ],
     "@theia/annotation-check": "error",
     "@theia/localization-check": "error",
+    "@theia/named-logger-check": "error",
     "@theia/no-src-import": "error",
     "@theia/runtime-import-check": "error",
     "@theia/shared-dependencies": "error",
@@ -153,7 +159,7 @@
   "overrides": [
     {
       "files": [
-        "**/*.{spec,espec,slow-spec}.{js,ts}"
+        "**/*.{spec,espec,slow-spec}.{js,ts,tsx}"
       ],
       "rules": {
         "@theia/runtime-import-check": "off",
@@ -168,6 +174,14 @@
       ],
       "rules": {
         "import/no-dynamic-require": "off"
+      }
+    },
+    {
+      "files": [
+        "**/electron-main/**"
+      ],
+      "rules": {
+        "@theia/named-logger-check": "off"
       }
     }
   ]

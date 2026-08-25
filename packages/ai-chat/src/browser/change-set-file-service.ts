@@ -14,9 +14,9 @@
 // SPDX-License-Identifier: EPL-2.0 OR GPL-2.0-only WITH Classpath-exception-2.0
 // *****************************************************************************
 
-import { ILogger, URI } from '@theia/core';
+import { ILogger, nls, URI } from '@theia/core';
 import { ApplicationShell, DiffUris, LabelProvider, NavigatableWidget, OpenerService, open } from '@theia/core/lib/browser';
-import { inject, injectable } from '@theia/core/shared/inversify';
+import { inject, injectable, named } from '@theia/core/shared/inversify';
 import { EditorManager } from '@theia/editor/lib/browser';
 import { FileService } from '@theia/filesystem/lib/browser/file-service';
 import { MonacoWorkspace } from '@theia/monaco/lib/browser/monaco-workspace';
@@ -25,7 +25,7 @@ import { ChangeSetFileElement } from './change-set-file-element';
 
 @injectable()
 export class ChangeSetFileService {
-    @inject(ILogger)
+    @inject(ILogger) @named('ai-chat:ChangeSetFileService')
     protected readonly logger: ILogger;
 
     @inject(WorkspaceService)
@@ -77,9 +77,17 @@ export class ChangeSetFileService {
     getAdditionalInfo(uri: URI): string | undefined {
         const wsUri = this.wsService.getWorkspaceRootUri(uri);
         if (wsUri) {
+            const isMultiRoot = this.wsService.tryGetRoots().length > 1;
             const wsRelative = wsUri.relative(uri);
+            if (isMultiRoot) {
+                const rootName = wsUri.path.base;
+                if (wsRelative?.hasDir) {
+                    return `${rootName} · ${wsRelative.dir.toString()}`;
+                }
+                return rootName;
+            }
             if (wsRelative?.hasDir) {
-                return `${wsRelative.dir.toString()}`;
+                return wsRelative.dir.toString();
             }
             return '';
         }
@@ -104,7 +112,7 @@ export class ChangeSetFileService {
 
     protected getDiffUri(originalUri: URI, suggestedUri: URI): URI {
         return DiffUris.encode(originalUri, suggestedUri,
-            `AI Changes: ${this.labelProvider.getName(originalUri)}`,
+            nls.localize('theia/ai/chat/changeSetFileDiffUriLabel', 'AI Changes: {0}', this.labelProvider.getName(originalUri)),
         );
     }
 

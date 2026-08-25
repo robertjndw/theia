@@ -14,10 +14,11 @@
 // SPDX-License-Identifier: EPL-2.0 OR GPL-2.0-only WITH Classpath-exception-2.0
 // *****************************************************************************
 
-import { FrontendApplicationContribution, PreferenceService } from '@theia/core/lib/browser';
+import { FrontendApplicationContribution } from '@theia/core/lib/browser';
 import { inject, injectable } from '@theia/core/shared/inversify';
 import { GoogleLanguageModelsManager, GoogleModelDescription } from '../common';
-import { API_KEY_PREF, MODELS_PREF } from './google-preferences';
+import { API_KEY_PREF, MODELS_PREF, MAX_RETRIES, RETRY_DELAY_OTHER_ERRORS, RETRY_DELAY_RATE_LIMIT } from '../common/google-preferences';
+import { PreferenceService } from '@theia/core';
 
 const GOOGLE_PROVIDER_ID = 'google';
 
@@ -37,18 +38,36 @@ export class GoogleFrontendApplicationContribution implements FrontendApplicatio
             const apiKey = this.preferenceService.get<string>(API_KEY_PREF, undefined);
             this.manager.setApiKey(apiKey);
 
+            this.manager.setMaxRetriesOnErrors(this.preferenceService.get<number>(MAX_RETRIES, 3));
+            this.manager.setRetryDelayOnRateLimitError(this.preferenceService.get<number>(RETRY_DELAY_RATE_LIMIT, 60));
+            this.manager.setRetryDelayOnOtherErrors(this.preferenceService.get<number>(RETRY_DELAY_OTHER_ERRORS, -1));
+
             const models = this.preferenceService.get<string[]>(MODELS_PREF, []);
             this.manager.createOrUpdateLanguageModels(...models.map(modelId => this.createGeminiModelDescription(modelId)));
             this.prevModels = [...models];
 
             this.preferenceService.onPreferenceChanged(event => {
                 if (event.preferenceName === API_KEY_PREF) {
-                    this.manager.setApiKey(event.newValue);
+                    const newApiKey = this.preferenceService.get<string>(API_KEY_PREF, undefined);
+                    this.manager.setApiKey(newApiKey);
+                    this.handleKeyChange(newApiKey);
+                } else if (event.preferenceName === MAX_RETRIES) {
+                    this.manager.setMaxRetriesOnErrors(this.preferenceService.get<number>(MAX_RETRIES, 3));
+                } else if (event.preferenceName === RETRY_DELAY_RATE_LIMIT) {
+                    this.manager.setRetryDelayOnRateLimitError(this.preferenceService.get<number>(RETRY_DELAY_RATE_LIMIT, 60));
+                } else if (event.preferenceName === RETRY_DELAY_OTHER_ERRORS) {
+                    this.manager.setRetryDelayOnOtherErrors(this.preferenceService.get<number>(RETRY_DELAY_OTHER_ERRORS, -1));
                 } else if (event.preferenceName === MODELS_PREF) {
-                    this.handleModelChanges(event.newValue as string[]);
+                    this.handleModelChanges(this.preferenceService.get<string[]>(MODELS_PREF, []));
                 }
             });
         });
+    }
+
+    protected handleKeyChange(newApiKey: string | undefined): void {
+        if (this.prevModels && this.prevModels.length > 0) {
+            this.manager.createOrUpdateLanguageModels(...this.prevModels.map(modelId => this.createGeminiModelDescription(modelId)));
+        }
     }
 
     protected handleModelChanges(newModels: string[]): void {
@@ -63,16 +82,14 @@ export class GoogleFrontendApplicationContribution implements FrontendApplicatio
         this.prevModels = newModels;
     }
 
+    /** Reasoning capabilities are resolved by the backend from the Gemini /v1beta/models response. */
     protected createGeminiModelDescription(modelId: string): GoogleModelDescription {
         const id = `${GOOGLE_PROVIDER_ID}/${modelId}`;
-
-        const description: GoogleModelDescription = {
+        return {
             id: id,
             model: modelId,
             apiKey: true,
             enableStreaming: true
         };
-
-        return description;
     }
 }

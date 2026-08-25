@@ -15,12 +15,12 @@
 // *****************************************************************************
 
 import { ConfigurableInMemoryResources, ConfigurableMutableReferenceResource } from '@theia/ai-core';
-import { CancellationToken, DisposableCollection, Emitter, URI } from '@theia/core';
+import { CancellationToken, DisposableCollection, Emitter, nls, URI, ILogger } from '@theia/core';
 import { ConfirmDialog } from '@theia/core/lib/browser';
 import { Replacement } from '@theia/core/lib/common/content-replacer';
-import { inject, injectable, postConstruct } from '@theia/core/shared/inversify';
-import { EditorPreferences } from '@theia/editor/lib/browser';
-import { FileSystemPreferences } from '@theia/filesystem/lib/browser';
+import { inject, injectable, postConstruct, named } from '@theia/core/shared/inversify';
+import { EditorPreferences } from '@theia/editor/lib/common/editor-preferences';
+import { FileSystemPreferences } from '@theia/filesystem/lib/common';
 import { FileService } from '@theia/filesystem/lib/browser/file-service';
 import { IReference } from '@theia/monaco-editor-core/esm/vs/base/common/lifecycle';
 import { TrimTrailingWhitespaceCommand } from '@theia/monaco-editor-core/esm/vs/editor/common/commands/trimTrailingWhitespaceCommand';
@@ -32,7 +32,10 @@ import { IInstantiationService } from '@theia/monaco-editor-core/esm/vs/platform
 import { MonacoTextModelService } from '@theia/monaco/lib/browser/monaco-text-model-service';
 import { insertFinalNewline } from '@theia/monaco/lib/browser/monaco-utilities';
 import { MonacoEditorModel } from '@theia/monaco/lib/browser/monaco-editor-model';
+import { MonacoWorkspace } from '@theia/monaco/lib/browser/monaco-workspace';
 import { ChangeSetElement } from '../common';
+import { FileReadTracker } from '../common/file-read-tracker';
+import { SerializableChangeSetElement } from '../common/chat-model-serialization';
 import { createChangeSetFileUri } from './change-set-file-resource';
 import { ChangeSetFileService } from './change-set-file-service';
 import { Deferred } from '@theia/core/lib/common/promise-util';
@@ -55,6 +58,12 @@ export interface ChangeSetElementArgs extends Partial<ChangeSetElement> {
      * If `undefined`, there is no change.
      */
     targetState?: string;
+    /**
+     * The state before the change has been applied. If it is specified, we don't care
+     * about the state of the original file on disk but just use the specified `originalState`.
+     * If it isn't specified, we'll derived and observe the state from the file system.
+     */
+    originalState?: string;
     /**
      * An array of replacements used to create the new content for the targetState.
      * This is only available if the agent was able to provide replacements and we were able to apply them.
@@ -92,6 +101,14 @@ export class ChangeSetFileElement implements ChangeSetElement {
 
     @inject(MonacoCodeActionService)
     protected readonly codeActionService: MonacoCodeActionService;
+
+    @inject(ILogger) @named('ai-chat:ChangeSetFileElement')
+    protected readonly logger: ILogger;
+    @inject(MonacoWorkspace)
+    protected readonly monacoWorkspace: MonacoWorkspace;
+
+    @inject(FileReadTracker)
+    protected readonly fileReadTracker: FileReadTracker;
 
     protected readonly toDispose = new DisposableCollection();
     protected _state: ChangeSetElementState;
@@ -135,7 +152,7 @@ export class ChangeSetFileElement implements ChangeSetElement {
     }
 
     protected async obtainOriginalContent(): Promise<void> {
-        this._originalContent = await this.changeSetFileService.read(this.uri);
+        this._originalContent = this.elementProps.originalState ?? await this.changeSetFileService.read(this.uri);
         if (this._readOnlyResource) {
             this.readOnlyResource.update({ contents: this._originalContent ?? '' });
         }
@@ -146,6 +163,10 @@ export class ChangeSetFileElement implements ChangeSetElement {
     }
 
     protected listenForOriginalFileChanges(): void {
+        if (this.elementProps.originalState) {
+            // if we have an original state, we are not interested in the original file on disk but always use `originalState`
+            return;
+        }
         this.toDispose.push(this.fileService.onDidFilesChange(async event => {
             if (!event.contains(this.uri)) { return; }
             if (!this._initialized && this._initializationPromise) {
@@ -244,7 +265,7 @@ export class ChangeSetFileElement implements ChangeSetElement {
 
     get originalContent(): string | undefined {
         if (!this._initialized && this._initializationPromise) {
-            console.warn('Accessing originalContent before initialization is complete. Consider using async methods.');
+            this.logger.warn('Accessing originalContent before initialization is complete. Consider using async methods.');
         }
         return this._originalContent;
     }
@@ -286,13 +307,12 @@ export class ChangeSetFileElement implements ChangeSetElement {
         if (this.type === 'delete') {
             await this.changeSetFileService.delete(this.uri);
             this.state = 'applied';
-            this.changeSetFileService.closeDiff(this.readOnlyUri);
-            return;
+        } else {
+            await this.applyChangesWithMonaco(contents);
         }
-
-        // Load Monaco model for the base file URI and apply changes
-        await this.applyChangesWithMonaco(contents);
         this.changeSetFileService.closeDiff(this.readOnlyUri);
+        // Re-snapshot so the agent's own write is not reported back as external, reading because code actions and formatting on save alter the target state.
+        await this.fileReadTracker.recordRead(this.elementProps.chatSessionId, this.uri);
     }
 
     async writeChanges(contents?: string): Promise<void> {
@@ -302,28 +322,29 @@ export class ChangeSetFileElement implements ChangeSetElement {
 
     /**
      * Applies changes using Monaco utilities, including loading the model for the base file URI,
-     * setting the value to the intended state, and running code actions on save.
+     * applying edits, and running code actions on save.
      */
     protected async applyChangesWithMonaco(contents?: string): Promise<void> {
         let modelReference: IReference<MonacoEditorModel> | undefined;
-
         try {
             modelReference = await this.monacoTextModelService.createModelReference(this.uri);
             const model = modelReference.object;
+            model.suppressOpenEditorWhenDirty = true;
             const targetContent = contents ?? this.targetState;
-            model.textEditorModel.setValue(targetContent);
-
+            const currentContent = model.textEditorModel.getValue();
+            if (currentContent !== targetContent) {
+                const fullRange = model.textEditorModel.getFullModelRange();
+                await this.monacoWorkspace.applyBackgroundEdit(model,
+                    [{ range: fullRange, text: targetContent, forceMoveMarkers: false }]);
+            }
             const languageId = model.languageId;
             const uriStr = this.uri.toString();
-
             await this.codeActionService.applyOnSaveCodeActions(model.textEditorModel, languageId, uriStr, CancellationToken.None);
             await this.applyFormatting(model, languageId, uriStr);
-
             await model.save();
             this.state = 'applied';
-
         } catch (error) {
-            console.error('Failed to apply changes with Monaco:', error);
+            this.logger.error('Failed to apply changes with Monaco:', error);
             await this.writeChanges(contents);
         } finally {
             modelReference?.dispose();
@@ -349,8 +370,15 @@ export class ChangeSetFileElement implements ChangeSetElement {
         let tempModel: IReference<MonacoEditorModel> | undefined;
         try {
             // Create a temporary model to apply code actions
-            const tempUri = new URI(`untitled://changeset/${Date.now()}${this.uri.path.ext}`);
-            tempResource = this.inMemoryResources.add(tempUri, { contents: this.targetState });
+            const tempUri = URI.fromComponents({
+                scheme: 'untitled',
+                path: this.uri.path.toString(),
+                authority: `changeset-${this.elementProps.chatSessionId}`,
+                query: '',
+                fragment: ''
+            });
+            tempResource = this.getInMemoryUri(tempUri);
+            tempResource.update({ contents: this.targetState });
             tempModel = await this.monacoTextModelService.createModelReference(tempUri);
             tempModel.object.suppressOpenEditorWhenDirty = true;
             tempModel.object.textEditorModel.setValue(this.targetState);
@@ -368,7 +396,7 @@ export class ChangeSetFileElement implements ChangeSetElement {
                 this._changeResource?.update({ contents: this.targetState });
             }
         } catch (error) {
-            console.warn('Failed to apply code actions to target state:', error);
+            this.logger.warn('Failed to apply code actions to target state:', error);
             this._targetStateWithCodeActions = targetState;
         } finally {
             tempModel?.dispose();
@@ -406,7 +434,7 @@ export class ChangeSetFileElement implements ChangeSetElement {
                 insertFinalNewline(model);
             }
         } catch (error) {
-            console.warn('Failed to apply formatting:', error);
+            this.logger.warn('Failed to apply formatting:', error);
         }
     }
 
@@ -431,14 +459,38 @@ export class ChangeSetFileElement implements ChangeSetElement {
         }
     }
 
-    async confirm(verb: string): Promise<boolean> {
+    async confirm(verb: 'Apply' | 'Revert'): Promise<boolean> {
         if (this._state !== 'stale') { return true; }
         await this.openChange();
         const answer = await new ConfirmDialog({
-            title: `${verb} suggestion.`,
-            msg: `The file ${this.uri.path.toString()} has changed since this suggestion was created. Are you certain you wish to ${verb.toLowerCase()} the change?`
+            title: verb === 'Apply'
+                ? nls.localize('theia/ai/chat/applySuggestion', 'Apply suggestion')
+                : nls.localize('theia/ai/chat/revertSuggestion', 'Revert suggestion'),
+            msg: verb === 'Apply'
+                ? nls.localize('theia/ai/chat/confirmApplySuggestion',
+                    'The file {0} has changed since this suggestion was created. Are you certain you wish to apply the change?', this.uri.path.toString())
+                : nls.localize('theia/ai/chat/confirmRevertSuggestion',
+                    'The file {0} has changed since this suggestion was created. Are you certain you wish to revert the change?', this.uri.path.toString())
         }).open(true);
         return !!answer;
+    }
+
+    toSerializable(): SerializableChangeSetElement {
+        return {
+            kind: 'file',
+            uri: this.uri.toString(),
+            name: this.name,
+            icon: this.icon,
+            additionalInfo: this.additionalInfo,
+            state: this.state,
+            type: this.type,
+            data: {
+                ...this.data,
+                targetState: this.elementProps.targetState,
+                originalState: this._originalContent,
+                replacements: this.replacements
+            }
+        };
     }
 
     dispose(): void {

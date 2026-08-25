@@ -73,14 +73,16 @@
 .theia-TreeNodeContent {
   display: flex;
   align-items: center;
-  width: calc(100% - var(--theia-scrollbar-rail-width));
+  width: 100%;
+  padding-right: var(--theia-ui-padding);
+  box-sizing: border-box;
 }
 
 .theia-ExpansionToggle {
   display: flex;
   justify-content: center;
-  padding-left: calc(var(--theia-ui-padding) / 2);
-  padding-right: calc(var(--theia-ui-padding) / 2);
+  padding-left: calc(var(--theia-ui-padding) / 3);
+  padding-right: calc(var(--theia-ui-padding) / 3);
   min-width: var(--theia-icon-size);
   min-height: var(--theia-icon-size);
 }
@@ -115,8 +117,10 @@
   color: var(--theia-list-activeSelectionForeground) !important;
 }
 
-.theia-Tree:focus .theia-TreeNode.theia-mod-focus,
-.theia-Tree .ReactVirtualized__List:focus .theia-TreeNode.theia-mod-focus {
+.theia-Tree:focus-within .theia-TreeNode.theia-mod-focus,
+.theia-Tree
+  .ReactVirtualized__List:focus-within
+  .theia-TreeNode.theia-mod-focus {
   outline-width: 1px;
   outline-style: solid;
   outline-offset: -1px;
@@ -146,7 +150,7 @@
   align-items: center;
   flex-grow: 0;
   user-select: none;
-  white-space: nowrap;
+  white-space: pre;
 }
 
 .theia-TreeNodeSegment.flex {
@@ -157,7 +161,7 @@
   flex-grow: 1 !important;
   overflow: hidden;
   text-overflow: ellipsis;
-  white-space: nowrap;
+  white-space: pre;
 }
 
 .theia-TreeNodeTail {
@@ -167,10 +171,10 @@
 }
 
 .open-editors-node-row .theia-TreeNode .theia-TreeNodeContent .noWrapInfo > * {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    display: inline;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  display: inline;
 }
 
 .theia-TreeNodeSegment mark {

@@ -17,16 +17,16 @@
 import debounce = require('lodash.debounce');
 import { inject, injectable, named } from 'inversify';
 // eslint-disable-next-line max-len
-import { CommandRegistry, ContributionProvider, Disposable, DisposableCollection, Emitter, Event, MenuModelRegistry, MenuPath } from '../../../common';
+import { CommandRegistry, ContributionProvider, Disposable, DisposableCollection, Emitter, Event, MenuModelRegistry, MenuPath, ILogger } from '../../../common';
 import { ContextKeyService } from '../../context-key-service';
 import { FrontendApplicationContribution } from '../../frontend-application-contribution';
 import { Widget } from '../../widgets';
 import { ReactTabBarToolbarAction, RenderedToolbarAction } from './tab-bar-toolbar-types';
-import { ToolbarMenuNodeWrapper, ToolbarSubmenuWrapper } from './tab-bar-toolbar-menu-adapters';
+import { CommandMenuAsToolbarItemWrapper, SubmenuAsToolbarItemWrapper, ToolbarActionWrapper } from './tab-bar-toolbar-menu-adapters';
 import { KeybindingRegistry } from '../../keybinding';
 import { LabelParser } from '../../label-parser';
 import { ContextMenuRenderer } from '../../context-menu-renderer';
-import { CommandMenu, CompoundMenuNode, RenderedMenuNode } from '../../../common/menu';
+import { CommandMenu, CompoundMenuNode, MenuNode, RenderedMenuNode } from '../../../common/menu';
 import { ReactToolbarItemImpl, RenderedToolbarItemImpl, TabBarToolbarItem } from './tab-toolbar-item';
 
 /**
@@ -68,6 +68,9 @@ export class TabBarToolbarRegistry implements FrontendApplicationContribution {
     @inject(ContributionProvider) @named(TabBarToolbarContribution)
     protected readonly contributionProvider: ContributionProvider<TabBarToolbarContribution>;
 
+    @inject(ILogger) @named('core:TabBarToolbarRegistry')
+    protected readonly logger: ILogger;
+
     protected readonly onDidChangeEmitter = new Emitter<void>();
     readonly onDidChange: Event<void> = this.onDidChangeEmitter.event;
     // debounce in order to avoid to fire more than once in the same tick
@@ -90,7 +93,7 @@ export class TabBarToolbarRegistry implements FrontendApplicationContribution {
             return this.doRegisterItem(new ReactToolbarItemImpl(this.commandRegistry, this.contextKeyService, item));
         } else {
             if (item.menuPath) {
-                return this.doRegisterItem(new ToolbarSubmenuWrapper(item.menuPath,
+                return this.doRegisterItem(new ToolbarActionWrapper(item.menuPath,
                     this.commandRegistry, this.menuRegistry, this.contextKeyService, this.contextMenuRenderer, item));
             } else {
                 const wrapper = new RenderedToolbarItemImpl(this.commandRegistry, this.contextKeyService, this.keybindingRegistry, this.labelParser, item);
@@ -141,18 +144,24 @@ export class TabBarToolbarRegistry implements FrontendApplicationContribution {
                 const menu = this.menuRegistry.getMenu(delegate.menuPath);
                 if (menu) {
                     for (const child of menu.children) {
-                        if (child.isVisible([...delegate.menuPath, child.id], this.contextKeyService, widget.node)) {
+                        if (child.isVisible([...delegate.menuPath, child.id], this.contextKeyService, widget.node, widget)) {
                             if (CompoundMenuNode.is(child)) {
                                 for (const grandchild of child.children) {
                                     if (grandchild.isVisible([...delegate.menuPath, child.id, grandchild.id],
-                                        this.contextKeyService, widget.node) && RenderedMenuNode.is(grandchild)) {
-                                        result.push(new ToolbarMenuNodeWrapper([...delegate.menuPath, child.id, grandchild.id], this.commandRegistry, this.menuRegistry,
-                                            this.contextKeyService, this.contextMenuRenderer, grandchild, child.id, delegate.menuPath));
+                                        this.contextKeyService, widget.node, widget) && RenderedMenuNode.is(grandchild)) {
+                                        if (CommandMenu.is(grandchild)) {
+                                            result.push(new CommandMenuAsToolbarItemWrapper([...delegate.menuPath, child.id, grandchild.id], this.commandRegistry,
+                                                this.menuRegistry, this.contextKeyService, this.contextMenuRenderer, grandchild, child.id));
+                                        } else if (CompoundMenuNode.is(grandchild)) {
+                                            result.push(new SubmenuAsToolbarItemWrapper([...delegate.menuPath, child.id, grandchild.id], this.commandRegistry, this.menuRegistry,
+                                                this.contextKeyService, this.contextMenuRenderer, grandchild, child.id));
+                                        }
+
                                     }
                                 }
                             } else if (CommandMenu.is(child)) {
-                                result.push(new ToolbarMenuNodeWrapper([...delegate.menuPath, child.id], this.commandRegistry, this.menuRegistry,
-                                    this.contextKeyService, this.contextMenuRenderer, child, undefined, delegate.menuPath));
+                                result.push(new CommandMenuAsToolbarItemWrapper([...delegate.menuPath, child.id], this.commandRegistry, this.menuRegistry,
+                                    this.contextKeyService, this.contextMenuRenderer, child, undefined));
                             }
                         }
                     }
@@ -160,6 +169,45 @@ export class TabBarToolbarRegistry implements FrontendApplicationContribution {
             }
         }
         return result;
+    }
+
+    /**
+     * Collects all context keys referenced by toolbar items and delegated menu nodes
+     * that may participate in rendering for the given widget.
+     */
+    collectContextKeys(widget: Widget): Set<string> {
+        const contextKeys = new Set<string>();
+        if (widget.isDisposed) {
+            return contextKeys;
+        }
+
+        for (const item of this.items.values()) {
+            if (item.when) {
+                this.contextKeyService.parseKeys(item.when)?.forEach(key => contextKeys.add(key));
+            }
+        }
+
+        for (const delegate of this.menuDelegates.values()) {
+            if (!delegate.isVisible(widget)) {
+                continue;
+            }
+            const menu = this.menuRegistry.getMenu(delegate.menuPath);
+            if (menu) {
+                this.collectMenuContextKeys(menu, contextKeys);
+            }
+        }
+        return contextKeys;
+    }
+
+    protected collectMenuContextKeys(menuNode: MenuNode, contextKeys: Set<string>): void {
+        if (menuNode.when) {
+            this.contextKeyService.parseKeys(menuNode.when)?.forEach(key => contextKeys.add(key));
+        }
+        if (CompoundMenuNode.is(menuNode)) {
+            for (const child of menuNode.children) {
+                this.collectMenuContextKeys(child, contextKeys);
+            }
+        }
     }
 
     unregisterItem(id: string): void {
@@ -178,7 +226,7 @@ export class TabBarToolbarRegistry implements FrontendApplicationContribution {
             this.fireOnDidChange();
             return { dispose: () => this.unregisterMenuDelegate(menuPath) };
         }
-        console.warn('Unable to register menu delegate. Delegate has already been registered', menuPath);
+        this.logger.warn('Unable to register menu delegate. Delegate has already been registered', menuPath);
         return Disposable.NULL;
     }
 

@@ -19,7 +19,7 @@ import {
     PreferenceServiceImpl,
     PreferenceScope,
     PreferenceProviderProvider
-} from '@theia/core/lib/browser/preferences';
+} from '@theia/core/lib/common/preferences';
 import { interfaces } from '@theia/core/shared/inversify';
 import {
     MAIN_RPC_CONTEXT,
@@ -36,17 +36,27 @@ import { Disposable, DisposableCollection } from '@theia/core/lib/common/disposa
 
 export function getPreferences(preferenceProviderProvider: PreferenceProviderProvider, rootFolders: FileStat[]): PreferenceData {
     const folders = rootFolders.map(root => root.resource.toString());
+    // Session-scoped values are process-lifetime CLI overrides (see PreferenceScope.Session).
+    // The plugin-side `parse()` in `preference-registry.ts` only reads up to Folder, so
+    // shipping session data across would leak potentially security-sensitive overrides
+    // (e.g. AI tool auto-approval) into the plugin host without any consumer on the other
+    // side. Exclude the scope explicitly until plugins can opt in to session values.
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     return PreferenceScope.getScopes().reduce((result: { [key: number]: any }, scope: PreferenceScope) => {
+        if (scope === PreferenceScope.Session) {
+            return result;
+        }
         result[scope] = {};
         const provider = preferenceProviderProvider(scope);
-        if (scope === PreferenceScope.Folder) {
-            for (const f of folders) {
-                const folderPrefs = provider.getPreferences(f);
-                result[scope][f] = folderPrefs;
+        if (provider) {
+            if (scope === PreferenceScope.Folder) {
+                for (const f of folders) {
+                    const folderPrefs = provider.getPreferences(f);
+                    result[scope][f] = folderPrefs;
+                }
+            } else {
+                result[scope] = provider.getPreferences();
             }
-        } else {
-            result[scope] = provider.getPreferences();
         }
         return result;
     }, {} as PreferenceData);
@@ -70,8 +80,9 @@ export class PreferenceRegistryMainImpl implements PreferenceRegistryMain, Dispo
 
             const roots = workspaceService.tryGetRoots();
             const data = getPreferences(preferenceProviderProvider, roots);
-            const eventData = Object.values(changes).map<PreferenceChangeExt>(({ scope, newValue, domain, preferenceName }) => {
+            const eventData = Object.values(changes).map<PreferenceChangeExt>(({ scope, domain, preferenceName }) => {
                 const extScope = scope === PreferenceScope.User ? undefined : domain?.[0];
+                const newValue = this.preferenceService.get(preferenceName);
                 return { preferenceName, newValue, scope: extScope };
             });
             this.proxy.$acceptConfigurationChanged(data, eventData);

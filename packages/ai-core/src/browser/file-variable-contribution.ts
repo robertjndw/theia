@@ -14,7 +14,7 @@
 // SPDX-License-Identifier: EPL-2.0 OR GPL-2.0-only WITH Classpath-exception-2.0
 // *****************************************************************************
 
-import { Path, URI } from '@theia/core';
+import { nls, Path, URI } from '@theia/core';
 import { OpenerService, codiconArray, open } from '@theia/core/lib/browser';
 import { inject, injectable } from '@theia/core/shared/inversify';
 import { FileService } from '@theia/filesystem/lib/browser/file-service';
@@ -36,12 +36,12 @@ export namespace FileVariableArgs {
 
 export const FILE_VARIABLE: AIVariable = {
     id: 'file-provider',
-    description: 'Resolves the contents of a file',
+    description: nls.localize('theia/ai/core/fileVariable/description', 'Resolves the contents of a file'),
     name: 'file',
-    label: 'File',
+    label: nls.localizeByDefault('File'),
     iconClasses: codiconArray('file'),
     isContextVariable: true,
-    args: [{ name: FileVariableArgs.uri, description: 'The URI of the requested file.' }]
+    args: [{ name: FileVariableArgs.uri, description: nls.localize('theia/ai/core/fileVariable/uri/description', 'The URI of the requested file.') }]
 };
 
 @injectable()
@@ -71,9 +71,10 @@ export class FileVariableContribution implements AIVariableContribution, AIVaria
 
         try {
             const content = await this.fileService.readFile(uri);
+            const relativePath = this.wsService.getRootPrefixedPath(uri);
             return {
                 variable: request.variable,
-                value: await this.wsService.getWorkspaceRelativePath(uri),
+                value: relativePath,
                 contextValue: content.value.toString(),
             };
         } catch (error) {
@@ -103,9 +104,26 @@ export class FileVariableContribution implements AIVariableContribution, AIVaria
     }
 
     protected async makeAbsolute(pathStr: string): Promise<URI | undefined> {
-        const path = new Path(Path.normalizePathSeparator(pathStr));
+        const normalizedPath = Path.normalizePathSeparator(pathStr);
+        const path = new Path(normalizedPath);
+
         if (!path.isAbsolute) {
             const workspaceRoots = this.wsService.tryGetRoots();
+
+            const segments = normalizedPath.split('/');
+            if (segments.length > 0) {
+                const potentialRootName = segments[0];
+                for (const root of workspaceRoots) {
+                    if (root.resource.path.base === potentialRootName) {
+                        const restOfPath = segments.slice(1).join('/');
+                        const uri = restOfPath ? root.resource.resolve(restOfPath) : root.resource;
+                        if (await this.fileService.exists(uri)) {
+                            return uri;
+                        }
+                    }
+                }
+            }
+
             const wsUris = workspaceRoots.map(root => root.resource.resolve(path));
             for (const uri of wsUris) {
                 if (await this.fileService.exists(uri)) {
@@ -113,6 +131,7 @@ export class FileVariableContribution implements AIVariableContribution, AIVaria
                 }
             }
         }
+
         const argUri = new URI(pathStr);
         if (await this.fileService.exists(argUri)) {
             return argUri;

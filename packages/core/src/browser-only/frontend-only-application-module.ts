@@ -52,8 +52,32 @@ export const frontendOnlyApplicationModule = new ContainerModule((bind, unbind, 
         bind(QuickPickService).to(QuickPickServiceImpl).inSingletonScope();
     }
 
+    let extensionsCache: Promise<ExtensionInfo[]> | undefined;
+
     const mockedApplicationServer: ApplicationServer = {
-        getExtensionsInfos: async (): Promise<ExtensionInfo[]> => [],
+        getExtensionsInfos: async (): Promise<ExtensionInfo[]> => {
+            if (extensionsCache === undefined) {
+                extensionsCache = (async () => {
+                    try {
+                        const res = await fetch('./extensions.json');
+                        if (!res.ok) {
+                            extensionsCache = undefined;
+                            return [];
+                        }
+                        const raw = await res.json();
+                        if (!Array.isArray(raw)) {
+                            extensionsCache = undefined;
+                            return [];
+                        }
+                        return raw as ExtensionInfo[];
+                    } catch {
+                        extensionsCache = undefined;
+                        return [];
+                    }
+                })();
+            }
+            return extensionsCache;
+        },
         getApplicationInfo: async (): Promise<ApplicationInfo | undefined> => undefined,
         getApplicationRoot: async (): Promise<string> => '',
         getApplicationPlatform: () => Promise.resolve('web'),
@@ -84,7 +108,8 @@ export const frontendOnlyApplicationModule = new ContainerModule((bind, unbind, 
         findCredentials: () => Promise.resolve([]),
         findPassword: () => Promise.resolve(undefined),
         setPassword: () => Promise.resolve(),
-        getPassword: () => Promise.resolve(undefined)
+        getPassword: () => Promise.resolve(undefined),
+        keys: () => Promise.resolve([]),
     };
     if (isBound(KeyStoreService)) {
         rebind<KeyStoreService>(KeyStoreService).toConstantValue(keyStoreService);

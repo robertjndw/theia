@@ -14,7 +14,7 @@
 // SPDX-License-Identifier: EPL-2.0 OR GPL-2.0-only WITH Classpath-exception-2.0
 // *****************************************************************************
 
-import { bindContributionProvider, CommandContribution } from '@theia/core';
+import { bindRootContributionProvider, CommandContribution } from '@theia/core';
 import { ContainerModule } from '@theia/core/shared/inversify';
 import { bindViewContribution, FrontendApplicationContribution, isRemote, WidgetFactory } from '@theia/core/lib/browser';
 import { RemoteSSHContribution } from './remote-ssh-contribution';
@@ -25,7 +25,7 @@ import { RemoteService } from './remote-service';
 import { RemoteStatusService, RemoteStatusServicePath } from '../electron-common/remote-status-service';
 import { ElectronFileDialogService } from '@theia/filesystem/lib/electron-browser/file-dialog/electron-file-dialog-service';
 import { RemoteElectronFileDialogService } from './remote-electron-file-dialog-service';
-import { bindRemotePreferences } from './remote-preferences';
+import { bindRemotePreferences } from '../electron-common/remote-preferences';
 import { PortForwardingWidget, PORT_FORWARDING_WIDGET_ID } from './port-forwarding/port-forwarding-widget';
 import { PortForwardingContribution } from './port-forwarding/port-forwading-contribution';
 import { PortForwardingService } from './port-forwarding/port-forwarding-service';
@@ -34,16 +34,19 @@ import { ServiceConnectionProvider } from '@theia/core/lib/browser/messaging/ser
 import '../../src/electron-browser/style/port-forwarding-widget.css';
 import { UserStorageContribution } from '@theia/userstorage/lib/browser/user-storage-contribution';
 import { RemoteUserStorageContribution } from './remote-user-storage-provider';
-import { remoteFileSystemPath, RemoteFileSystemProxyFactory, RemoteFileSystemServer } from '@theia/filesystem/lib/common/remote-file-system-provider';
-import { LocalEnvVariablesServer, LocalRemoteFileSystemProvider, LocalRemoteFileSytemServer } from './local-backend-services';
+import { RemoteFileSystemProvider, remoteFileSystemPath, RemoteFileSystemProxyFactory, RemoteFileSystemServer } from '@theia/filesystem/lib/common/remote-file-system-provider';
+import { LocalEnvVariablesServer, LocalRemoteFileSystemContribution, LocalRemoteFileSystemProvider, LocalRemoteFileSytemServer } from './local-backend-services';
 import { envVariablesPath, EnvVariablesServer } from '@theia/core/lib/common/env-variables';
+import { WorkspaceHandlingContribution, WorkspaceOpenHandlerContribution } from '@theia/workspace/lib/browser';
+import { RemoteLocalWorkspaceContribution } from './remote-local-workspace-contribution';
+import { FileServiceContribution } from '@theia/filesystem/lib/browser/file-service';
 
 export default new ContainerModule((bind, _, __, rebind) => {
     bind(RemoteFrontendContribution).toSelf().inSingletonScope();
     bind(FrontendApplicationContribution).toService(RemoteFrontendContribution);
     bind(CommandContribution).toService(RemoteFrontendContribution);
 
-    bindContributionProvider(bind, RemoteRegistryContribution);
+    bindRootContributionProvider(bind, RemoteRegistryContribution);
     bind(RemoteSSHContribution).toSelf().inSingletonScope();
     bind(RemoteRegistryContribution).toService(RemoteSSHContribution);
 
@@ -70,16 +73,25 @@ export default new ContainerModule((bind, _, __, rebind) => {
     bind(RemotePortForwardingProvider).toDynamicValue(ctx =>
         ServiceConnectionProvider.createLocalProxy<RemotePortForwardingProvider>(ctx.container, RemoteRemotePortForwardingProviderPath)).inSingletonScope();
 
-    bind(LocalRemoteFileSytemServer).toDynamicValue(ctx =>
-        isRemote ?
-            ServiceConnectionProvider.createLocalProxy(ctx.container, remoteFileSystemPath, new RemoteFileSystemProxyFactory()) :
-            ctx.container.get(RemoteFileSystemServer));
-    bind(LocalEnvVariablesServer).toDynamicValue(ctx =>
-        isRemote ?
-            ServiceConnectionProvider.createLocalProxy<EnvVariablesServer>(ctx.container, envVariablesPath) :
-            ctx.container.get(EnvVariablesServer));
-    bind(LocalRemoteFileSystemProvider).toSelf().inSingletonScope();
+    if (isRemote) {
+        bind(LocalRemoteFileSytemServer).toDynamicValue(ctx =>
+            ServiceConnectionProvider.createLocalProxy(ctx.container, remoteFileSystemPath, new RemoteFileSystemProxyFactory()));
+        bind(LocalEnvVariablesServer).toDynamicValue(ctx =>
+            ServiceConnectionProvider.createLocalProxy<EnvVariablesServer>(ctx.container, envVariablesPath));
+        bind(LocalRemoteFileSystemProvider).toSelf().inSingletonScope();
+    } else {
+        bind(LocalRemoteFileSytemServer).toService(RemoteFileSystemServer);
+        bind(LocalEnvVariablesServer).toService(EnvVariablesServer);
+        bind(LocalRemoteFileSystemProvider).toService(RemoteFileSystemProvider);
+    }
     rebind(UserStorageContribution).to(RemoteUserStorageContribution);
 
-});
+    if (isRemote) {
+        bind(RemoteLocalWorkspaceContribution).toSelf().inSingletonScope();
+        bind(WorkspaceOpenHandlerContribution).toService(RemoteLocalWorkspaceContribution);
+        bind(WorkspaceHandlingContribution).toService(RemoteLocalWorkspaceContribution);
+        bind(LocalRemoteFileSystemContribution).toSelf().inSingletonScope();
+        bind(FileServiceContribution).toService(LocalRemoteFileSystemContribution);
+    }
 
+});

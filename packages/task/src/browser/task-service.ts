@@ -16,7 +16,7 @@
 
 import { ApplicationShell, FrontendApplication, QuickPickValue, WidgetManager, WidgetOpenMode } from '@theia/core/lib/browser';
 import { open, OpenerService } from '@theia/core/lib/browser/opener-service';
-import { CommandService, ILogger } from '@theia/core/lib/common';
+import { CommandService, ILogger, nls } from '@theia/core/lib/common';
 import { MessageService } from '@theia/core/lib/common/message-service';
 import { Deferred } from '@theia/core/lib/common/promise-util';
 import { QuickPickItemOrSeparator, QuickPickService } from '@theia/core/lib/common/quick-pick-service';
@@ -26,9 +26,10 @@ import { EditorManager } from '@theia/editor/lib/browser';
 import { ProblemManager } from '@theia/markers/lib/browser/problem/problem-manager';
 import { TerminalService } from '@theia/terminal/lib/browser/base/terminal-service';
 import { TerminalWidget } from '@theia/terminal/lib/browser/base/terminal-widget';
-import { TerminalWidgetFactoryOptions } from '@theia/terminal/lib/browser/terminal-widget-impl';
+import { TerminalWidgetFactoryOptions, nextTerminalCreationToken } from '@theia/terminal/lib/browser/terminal-widget-impl';
 import { VariableResolverService } from '@theia/variable-resolver/lib/browser';
 import { WorkspaceService } from '@theia/workspace/lib/browser/workspace-service';
+import { WorkspaceTrustService } from '@theia/workspace/lib/browser';
 import { inject, injectable, named, postConstruct } from '@theia/core/shared/inversify';
 import { DiagnosticSeverity, Range } from '@theia/core/shared/vscode-languageserver-protocol';
 import {
@@ -68,6 +69,7 @@ import { TaskTerminalWidgetManager } from './task-terminal-widget-manager';
 import { ShellTerminalServerProxy } from '@theia/terminal/lib/common/shell-terminal-protocol';
 import { Mutex } from 'async-mutex';
 import { TaskContextKeyService } from './task-context-key-service';
+import { TerminalPreferences } from '@theia/terminal/lib/common/terminal-preferences';
 
 export interface QuickPickProblemMatcherItem {
     problemMatchers: NamedProblemMatcher[] | undefined;
@@ -119,7 +121,7 @@ export class TaskService implements TaskConfigurationClient {
     @inject(TaskServer)
     protected readonly taskServer: TaskServer;
 
-    @inject(ILogger) @named('task')
+    @inject(ILogger) @named('task:TaskService')
     protected readonly logger: ILogger;
 
     @inject(WidgetManager)
@@ -196,6 +198,11 @@ export class TaskService implements TaskConfigurationClient {
 
     @inject(TaskContextKeyService)
     protected readonly taskContextKeyService: TaskContextKeyService;
+
+    @inject(WorkspaceTrustService)
+    protected readonly workspaceTrustService: WorkspaceTrustService;
+    @inject(TerminalPreferences)
+    protected readonly terminalPreferences: TerminalPreferences;
 
     @postConstruct()
     protected init(): void {
@@ -326,12 +333,12 @@ export class TaskService implements TaskConfigurationClient {
                             }
                         }
                     }
-                    this.messageService.error(`Task '${taskIdentifier}' has exited with code ${event.code}.`);
+                    this.messageService.error(nls.localize('theia/task/taskExitedWithCode', "Task '{0}' has exited with code {1}.", taskIdentifier, event.code));
                 }
             } else if (event.signal !== undefined) {
-                this.messageService.info(`Task '${taskIdentifier}' was terminated by signal ${event.signal}.`);
+                this.messageService.info(nls.localize('theia/task/taskTerminatedBySignal', "Task '{0}' was terminated by signal {1}.", taskIdentifier, event.signal));
             } else {
-                console.error('Invalid TaskExitedEvent received, neither code nor signal is set.');
+                this.logger.error('Invalid TaskExitedEvent received, neither code nor signal is set.');
             }
         });
     }
@@ -386,9 +393,9 @@ export class TaskService implements TaskConfigurationClient {
                     isInvalidTaskConfigFileOpen = true;
                 }
             }
-            const warningMessage = 'Invalid task configurations are found. Open tasks.json and find details in the Problems view.';
+            const warningMessage = nls.localize('theia/task/invalidTaskConfigs', 'Invalid task configurations are found. Open tasks.json and find details in the Problems view.');
             if (!isProblemsWidgetVisible || !isInvalidTaskConfigFileOpen) {
-                this.messageService.warn(warningMessage, 'Open').then(actionOpen => {
+                this.messageService.warn(warningMessage, nls.localizeByDefault('Open')).then(actionOpen => {
                     if (actionOpen) {
                         if (invalidTaskConfig && invalidTaskConfig._scope) {
                             this.taskConfigurationManager.openConfiguration(invalidTaskConfig._scope);
@@ -528,6 +535,9 @@ export class TaskService implements TaskConfigurationClient {
      * @param scope  The scope where to look for tasks
      */
     async run(token: number, source: string, taskLabel: string, scope: TaskConfigurationScope): Promise<TaskInfo | undefined> {
+        if (!(await this.requestWorkspaceTrust())) {
+            return;
+        }
         let task: TaskConfiguration | undefined;
         task = this.taskConfigurations.getTask(scope, taskLabel);
         if (!task) { // if a configured task cannot be found, search from detected tasks
@@ -546,7 +556,7 @@ export class TaskService implements TaskConfigurationClient {
             // ask the user what s/he wants to use to parse the task output
             const items = this.getCustomizeProblemMatcherItems();
             const selected = await this.quickPickService.show(items, {
-                placeholder: 'Select for which kind of errors and warnings to scan the task output'
+                placeholder: nls.localizeByDefault('Select for which kind of errors and warnings to scan the task output')
             });
             if (selected && ('value' in selected)) {
                 if (selected.value?.problemMatchers) {
@@ -578,7 +588,7 @@ export class TaskService implements TaskConfigurationClient {
             return this.runCompoundTask(token, task, runTaskOption);
         } else {
             return this.runTask(task, runTaskOption).catch(error => {
-                console.error('Error at launching task', error);
+                this.logger.error('Error at launching task', error);
                 return undefined;
             });
         }
@@ -596,12 +606,12 @@ export class TaskService implements TaskConfigurationClient {
             const rootNode = new TaskNode(task, [], []);
             this.detectDirectedAcyclicGraph(task, rootNode, tasks);
         } catch (error) {
-            console.error(`Error at launching task '${task.label}'`, error);
+            this.logger.error(`Error at launching task '${task.label}'`, error);
             this.messageService.error(error.message);
             return undefined;
         }
         return this.runTasksGraph(task, tasks, option).catch(error => {
-            console.error(`Error at launching task '${task.label}'`, error);
+            this.logger.error(`Error at launching task '${task.label}'`, error);
             return undefined;
         });
     }
@@ -697,7 +707,7 @@ export class TaskService implements TaskConfigurationClient {
             taskNode.parentsID.filter(t => this.taskDefinitionRegistry.compareTasks(childTaskConfiguration, t)).length > 0) {
             const fromNode = task.label;
             const toNode = childTaskConfiguration.label;
-            throw new Error('Circular reference detected: ' + fromNode + ' -->  ' + toNode);
+            throw new Error(nls.localize('theia/task/circularReferenceDetected', 'Circular reference detected: {0} --> {1}', fromNode, toNode));
         }
         const childNode = new TaskNode(childTaskConfiguration, [], Object.assign([], taskNode.parentsID));
         childNode.addParentDependency(taskNode.taskId);
@@ -713,7 +723,7 @@ export class TaskService implements TaskConfigurationClient {
      * @returns the correct TaskConfiguration object which matches the taskIdentifier
      */
     getDependentTask(taskIdentifier: string | TaskIdentifier, tasks: TaskConfiguration[]): TaskConfiguration {
-        const notEnoughDataError = 'The information provided in the "dependsOn" is not enough for matching the correct task !';
+        const notEnoughDataError = nls.localize('theia/task/notEnoughDataInDependsOn', 'The information provided in the "dependsOn" is not enough for matching the correct task!');
         let currentTaskChildConfiguration: TaskConfiguration;
         if (typeof (taskIdentifier) !== 'string') {
             // TaskIdentifier object does not support tasks of type 'shell' (The same behavior as in VS Code).
@@ -746,9 +756,12 @@ export class TaskService implements TaskConfigurationClient {
     }
 
     async runTask(task: TaskConfiguration, option?: RunTaskOption): Promise<TaskInfo | undefined> {
-        console.debug('entering runTask');
+        if (!(await this.requestWorkspaceTrust())) {
+            return;
+        }
+        this.logger.debug('entering runTask');
         const releaseLock = await this.taskStartingLock.acquire();
-        console.debug('got lock');
+        this.logger.debug('got lock');
 
         try {
             // resolve problemMatchers
@@ -766,11 +779,11 @@ export class TaskService implements TaskConfigurationClient {
                 const taskConfig = taskInfo.config;
                 return this.taskDefinitionRegistry.compareTasks(taskConfig, task);
             });
-            console.debug(`running task ${JSON.stringify(task)}, already running = ${!!matchedRunningTaskInfo}`);
+            this.logger.debug(`running task ${JSON.stringify(task)}, already running = ${!!matchedRunningTaskInfo}`);
 
             if (matchedRunningTaskInfo) { // the task is active
                 releaseLock();
-                console.debug('released lock');
+                this.logger.debug('released lock');
                 const taskName = this.taskNameResolver.resolve(task);
                 const terminalId = matchedRunningTaskInfo.terminalId;
                 if (terminalId) {
@@ -783,17 +796,19 @@ export class TaskService implements TaskConfigurationClient {
                         }
                     }
                 }
-                const selectedAction = await this.messageService.info(`The task '${taskName}' is already active`, 'Terminate Task', 'Restart Task');
-                if (selectedAction === 'Terminate Task') {
+                const terminateTaskAction = nls.localizeByDefault('Terminate Task');
+                const restartTaskAction = nls.localizeByDefault('Restart Running Task');
+                const selectedAction = await this.messageService.info(nls.localizeByDefault('Task `{0}` is already running.', taskName), terminateTaskAction, restartTaskAction);
+                if (selectedAction === terminateTaskAction) {
                     await this.terminateTask(matchedRunningTaskInfo);
-                } else if (selectedAction === 'Restart Task') {
+                } else if (selectedAction === restartTaskAction) {
                     return this.restartTask(matchedRunningTaskInfo, option);
                 }
             } else { // run task as the task is not active
-                console.debug('task about to start');
+                this.logger.debug('task about to start');
                 const taskInfo = await this.doRunTask(task, option);
                 releaseLock();
-                console.debug('release lock 2');
+                this.logger.debug('release lock 2');
                 return taskInfo;
             }
         } catch (e) {
@@ -896,7 +911,7 @@ export class TaskService implements TaskConfigurationClient {
         return this.runTasksGraph(task, tasks, {
             customization: { ...taskCustomization, ...{ problemMatcher: resolvedMatchers } }
         }).catch(error => {
-            console.log(error.message);
+            this.logger.info(error.message);
             return undefined;
         });
     }
@@ -997,7 +1012,11 @@ export class TaskService implements TaskConfigurationClient {
         const taskLabel = resolvedTask.label;
         let taskInfo: TaskInfo | undefined;
         try {
-            taskInfo = await this.taskServer.run(resolvedTask, this.getContext(), option);
+            const taskToRun: TaskConfiguration = {
+                ...resolvedTask,
+                enableCommandHistory: this.terminalPreferences['terminal.integrated.enableCommandHistory'] ?? false
+            };
+            taskInfo = await this.taskServer.run(taskToRun, this.getContext(), option);
             this.lastTask = { resolvedTask, option };
             this.logger.debug(`Task created. Task id: ${taskInfo.taskId}`);
 
@@ -1012,9 +1031,8 @@ export class TaskService implements TaskConfigurationClient {
             }
             return taskInfo;
         } catch (error) {
-            const errorStr = `Error launching task '${taskLabel}': ${error.message}`;
-            this.logger.error(errorStr);
-            this.messageService.error(errorStr);
+            this.logger.error(`Error launching task '${taskLabel}': ${error.message}`);
+            this.messageService.error(nls.localize('theia/task/errorLaunchingTask', "Error launching task '{0}': {1}", taskLabel, error.message));
             if (taskInfo && typeof taskInfo.terminalId === 'number') {
                 this.shellTerminalServer.onAttachAttempted(taskInfo.terminalId);
             }
@@ -1024,15 +1042,15 @@ export class TaskService implements TaskConfigurationClient {
     protected getCustomizeProblemMatcherItems(): Array<QuickPickValue<QuickPickProblemMatcherItem> | QuickPickItemOrSeparator> {
         const items: Array<QuickPickValue<QuickPickProblemMatcherItem> | QuickPickItemOrSeparator> = [];
         items.push({
-            label: 'Continue without scanning the task output',
+            label: nls.localizeByDefault('Continue without scanning the task output'),
             value: { problemMatchers: undefined }
         });
         items.push({
-            label: 'Never scan the task output',
+            label: nls.localize('theia/task/neverScanTaskOutput', 'Never scan the task output'),
             value: { problemMatchers: [] }
         });
         items.push({
-            label: 'Learn more about scanning the task output',
+            label: nls.localizeByDefault('Learn more about scanning the task output'),
             value: { problemMatchers: undefined, learnMore: true }
         });
         items.push({ type: 'separator', label: 'registered parsers' });
@@ -1065,7 +1083,7 @@ export class TaskService implements TaskConfigurationClient {
         const selectedText: string = this.editorManager.currentEditor.editor.document.getText(selectedRange).trimRight() + '\n';
         let terminal = this.terminalService.lastUsedTerminal;
         if (!terminal || terminal.kind !== 'user' || (await terminal.hasChildProcesses())) {
-            terminal = <TerminalWidget>await this.terminalService.newTerminal(<TerminalWidgetFactoryOptions>{ created: new Date().toString() });
+            terminal = <TerminalWidget>await this.terminalService.newTerminal(<TerminalWidgetFactoryOptions>{ created: nextTerminalCreationToken() });
             await terminal.start();
             this.terminalService.open(terminal);
         }
@@ -1077,7 +1095,7 @@ export class TaskService implements TaskConfigurationClient {
         if (taskInfo) {
             const terminalWidget = this.terminalService.getByTerminalId(terminalId);
             if (terminalWidget) {
-                this.messageService.error('Task is already running in terminal');
+                this.messageService.error(nls.localize('theia/task/taskAlreadyRunningInTerminal', 'Task is already running in terminal'));
                 return this.terminalService.open(terminalWidget, { mode: 'activate' });
             }
             if (TaskOutputPresentation.shouldAlwaysRevealTerminal(taskInfo.config)) {
@@ -1091,11 +1109,9 @@ export class TaskService implements TaskConfigurationClient {
         const { taskId } = taskInfo;
         // Create / find a terminal widget to display an execution output of a task that was launched as a command inside a shell.
         const widget = await this.taskTerminalWidgetManager.open({
-            created: new Date().toString(),
+            created: nextTerminalCreationToken(),
             id: this.getTerminalWidgetId(terminalId),
-            title: taskInfo
-                ? `Task: ${taskInfo.config.label}`
-                : `Task: #${taskId}`,
+            title: nls.localizeByDefault('Task: {0}', taskInfo.config.label || nls.localize('theia/task/taskIdLabel', '#{0}', taskId)),
             destroyTermOnClose: true,
             useServerTitle: false
         }, {
@@ -1145,7 +1161,7 @@ export class TaskService implements TaskConfigurationClient {
             await this.taskServer.kill(id);
         } catch (error) {
             this.logger.error(`Error killing task '${id}': ${error}`);
-            this.messageService.error(`Error killing task '${id}': ${error}`);
+            this.messageService.error(nls.localize('theia/task/errorKillingTask', "Error killing task '{0}': {1}", id, error));
             return;
         }
         this.logger.debug(`Task killed. Task id: ${id}`);
@@ -1161,8 +1177,32 @@ export class TaskService implements TaskConfigurationClient {
         return completedTask && completedTask.exitCode.promise;
     }
 
-    async getTerminateSignal(id: number): Promise<string | undefined> {
-        const completedTask = this.runningTasks.get(id);
-        return completedTask && completedTask.terminateSignal.promise;
+    async getTerminateSignal(taskId: number): Promise<string | undefined> {
+        const completedTask = this.runningTasks.get(taskId);
+        return completedTask?.terminateSignal.promise;
+    }
+
+    /**
+     * Checks if a task is currently running.
+     * A task is considered running if it exists in the runningTasks map AND has not yet exited.
+     * @param taskId The task ID to check
+     * @returns true if the task is still running, false otherwise
+     */
+    isTaskRunning(taskId: number): boolean {
+        const taskEntry = this.runningTasks.get(taskId);
+        if (!taskEntry) {
+            return false;
+        }
+        // Task is running if the terminateSignal deferred is still unresolved
+        return taskEntry.terminateSignal.state === 'unresolved';
+    }
+
+    /**
+     * Request workspace trust from the user. Returns true if the workspace is trusted,
+     * false if the user declined to trust the workspace.
+     */
+    protected async requestWorkspaceTrust(): Promise<boolean> {
+        const trusted = await this.workspaceTrustService.requestWorkspaceTrust();
+        return trusted === true;
     }
 }

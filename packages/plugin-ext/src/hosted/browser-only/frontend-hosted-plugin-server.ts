@@ -14,51 +14,105 @@
 // SPDX-License-Identifier: EPL-2.0 OR GPL-2.0-only WITH Classpath-exception-2.0
 // ****************************************************************************
 
-import { injectable, inject } from '@theia/core/shared/inversify';
+import { injectable, inject, optional } from '@theia/core/shared/inversify';
+import { LIST_JSON, PLUGINS_BASE_PATH } from '@theia/plugin-utils/lib/common/constants';
 import { DeployedPlugin, ExtPluginApi, HostedPluginClient, HostedPluginServer, PluginIdentifiers } from '../../common';
 import { Event, RpcConnectionEventEmitter } from '@theia/core';
 
 export const PluginLocalOptions = Symbol('PluginLocalOptions');
+/**
+ * Optional override for the statically deployed plugins of a browser-only application.
+ *
+ * By default the plugins prepared at build time are used, i.e. the ones listed in
+ * `lib/frontend/hostedPlugin/list.json`. Bind this to supply the metadata by hand instead,
+ * e.g. when the plugins are hosted somewhere the build cannot see.
+ */
 export interface PluginLocalOptions {
     pluginMetadata: DeployedPlugin[];
 }
 
+/**
+ * Serves the plugins that were statically deployed into the frontend bundle. There is no
+ * backend in a browser-only application, so nothing can be deployed or undeployed at runtime.
+ */
 @injectable()
 export class FrontendHostedPluginServer implements HostedPluginServer, RpcConnectionEventEmitter {
     readonly onDidOpenConnection: Event<void> = Event.None;
     readonly onDidCloseConnection: Event<void> = Event.None;
 
-    @inject(PluginLocalOptions)
-    protected readonly options: PluginLocalOptions;
+    @inject(PluginLocalOptions) @optional()
+    protected readonly options?: PluginLocalOptions;
+
+    protected client: HostedPluginClient | undefined;
+
+    protected deployedPlugins: Promise<DeployedPlugin[]> | undefined;
+
+    /**
+     * The statically deployed plugins, from {@link PluginLocalOptions} if bound,
+     * otherwise from the list written by the build.
+     */
+    protected getPlugins(): Promise<DeployedPlugin[]> {
+        if (!this.deployedPlugins) {
+            this.deployedPlugins = this.options
+                ? Promise.resolve(this.options.pluginMetadata)
+                : this.fetchDeployedPlugins();
+        }
+        return this.deployedPlugins;
+    }
+
+    protected async fetchDeployedPlugins(): Promise<DeployedPlugin[]> {
+        const url = `./${PLUGINS_BASE_PATH}/${LIST_JSON}`;
+        const response = await fetch(url);
+        if (!response.ok) {
+            throw new Error(`Failed to load the deployed plugins from '${url}': ${response.status} ${response.statusText}`);
+        }
+        const plugins = await response.json();
+        if (!Array.isArray(plugins)) {
+            throw new Error(`Failed to load the deployed plugins from '${url}': expected an array but got ${typeof plugins}.`);
+        }
+        return plugins;
+    }
 
     async getDeployedPluginIds(): Promise<PluginIdentifiers.VersionedId[]> {
-        // Use the plugin metadata to build the correct plugin id
-        return this.options.pluginMetadata.map(p => PluginIdentifiers.componentsToVersionedId(p.metadata.model));
+        const plugins = await this.getPlugins();
+        return plugins.map(p => PluginIdentifiers.componentsToVersionedId(p.metadata.model));
     }
+
+    getInstalledPluginIds(): Promise<PluginIdentifiers.VersionedId[]> {
+        // Statically deployed plugins are the only ones that can be installed.
+        return this.getDeployedPluginIds();
+    }
+
     async getUninstalledPluginIds(): Promise<readonly PluginIdentifiers.VersionedId[]> {
         return [];
     }
-    getDisabledPluginIds(): Promise<readonly PluginIdentifiers.VersionedId[]> {
-        return Promise.resolve([]);
+
+    async getDisabledPluginIds(): Promise<readonly PluginIdentifiers.UnversionedId[]> {
+        return [];
     }
+
     async getDeployedPlugins(ids: PluginIdentifiers.VersionedId[]): Promise<DeployedPlugin[]> {
-        return this.options.pluginMetadata.filter(p => ids.includes(PluginIdentifiers.componentsToVersionedId(p.metadata.model)));
+        const plugins = await this.getPlugins();
+        return plugins.filter(p => ids.includes(PluginIdentifiers.componentsToVersionedId(p.metadata.model)));
     }
 
     async getExtPluginAPI(): Promise<ExtPluginApi[]> {
         return [];
     }
-    onMessage(targetHost: string, message: Uint8Array): Promise<void> {
-        return Promise.resolve();
-        // throw new Error('Method not implemented.');
+
+    async onMessage(targetHost: string, message: Uint8Array): Promise<void> {
+        // Messages to the plugin host are delivered by the frontend directly.
     }
-    dispose(): void {
-        throw new Error('Method not implemented.');
-    }
+
     setClient(client: HostedPluginClient | undefined): void {
-        throw new Error('Method not implemented.');
+        this.client = client;
     }
-    getClient?(): HostedPluginClient | undefined {
-        throw new Error('Method not implemented.');
+
+    getClient(): HostedPluginClient | undefined {
+        return this.client;
+    }
+
+    dispose(): void {
+        this.client = undefined;
     }
 }

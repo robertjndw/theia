@@ -14,14 +14,19 @@
 // SPDX-License-Identifier: EPL-2.0 OR GPL-2.0-only WITH Classpath-exception-2.0
 // *****************************************************************************
 
+// Parses the log config the loggers are built from, so no ILogger exists yet.
+/* eslint-disable @theia/named-logger-check */
+
 import * as yargs from 'yargs';
 import { injectable } from 'inversify';
 import { LogLevel } from '../common/logger';
 import { CliContribution } from './cli';
 import * as fs from 'fs-extra';
-import { subscribe } from '@parcel/watcher';
+import { AsyncSubscription, subscribe } from '@parcel/watcher';
 import { Event, Emitter } from '../common/event';
 import * as path from 'path';
+import { Disposable, DisposableCollection } from '../common';
+import { escapeRegExpCharacters } from '../common/strings';
 
 /** Maps logger names to log levels.  */
 export interface LogLevels {
@@ -34,9 +39,12 @@ export interface LogLevels {
  * what the log level per logger should be.
  */
 @injectable()
-export class LogLevelCliContribution implements CliContribution {
+export class LogLevelCliContribution implements CliContribution, Disposable {
 
     protected _logLevels: LogLevels = {};
+    protected wildcardRegexCache = new Map<string, RegExp>();
+    protected asyncSubscriptions: AsyncSubscription[] = [];
+    protected toDispose = new DisposableCollection();
 
     /**
      * Log level to use for loggers not specified in `logLevels`.
@@ -57,6 +65,10 @@ export class LogLevelCliContribution implements CliContribution {
 
     get logFile(): string | undefined {
         return this._logFile;
+    }
+
+    constructor() {
+        this.toDispose.push(this.logConfigChangedEvent);
     }
 
     configure(conf: yargs.Argv): void {
@@ -129,7 +141,7 @@ export class LogLevelCliContribution implements CliContribution {
 
     protected async watchLogConfigFile(filename: string): Promise<void> {
         const dir = path.dirname(filename);
-        await subscribe(dir, async (err, events) => {
+        const subscription = await subscribe(dir, async (err, events) => {
             if (err) {
                 console.log(`Error during log file watching ${filename}: ${err}`);
                 return;
@@ -150,6 +162,14 @@ export class LogLevelCliContribution implements CliContribution {
                 console.error(`Error reading log config file ${filename}: ${e}`);
             }
         });
+        this.asyncSubscriptions.push(subscription);
+    }
+
+    async dispose(): Promise<void> {
+        for (const sub of this.asyncSubscriptions) {
+            sub.unsubscribe();
+        }
+        this.toDispose.dispose();
     }
 
     protected async slurpLogConfigFile(filename: string): Promise<void> {
@@ -175,6 +195,7 @@ export class LogLevelCliContribution implements CliContribution {
 
             this._defaultLogLevel = newDefaultLogLevel;
             this._logLevels = newLogLevels;
+            this.wildcardRegexCache.clear();
 
             console.log(`Successfully read new log config from ${filename}.`);
         } catch (e) {
@@ -187,13 +208,23 @@ export class LogLevelCliContribution implements CliContribution {
     }
 
     logLevelFor(loggerName: string): LogLevel {
-        const level = this._logLevels[loggerName];
-
-        if (level !== undefined) {
-            return level;
-        } else {
-            return this.defaultLogLevel;
+        if (loggerName in this._logLevels) {
+            return this._logLevels[loggerName];
         }
+
+        const keys = Object.keys(this._logLevels);
+        for (let i = keys.length - 1; i >= 0; i--) {
+            const pattern = keys[i];
+
+            if (pattern.includes('*')) {
+                const regex = this.getWildcardRegex(pattern);
+                if (regex.test(loggerName)) {
+                    return this._logLevels[pattern];
+                }
+            }
+        }
+
+        return this.defaultLogLevel;
     }
 
     /**
@@ -207,5 +238,19 @@ export class LogLevelCliContribution implements CliContribution {
         }
 
         return level;
+    }
+
+    /**
+     * Converts a wildcard string into a strict regular expression and caches it.
+     * Example: "ai-core*" -> /^ai-core.*$/
+     */
+    protected getWildcardRegex(pattern: string): RegExp {
+        let regex = this.wildcardRegexCache.get(pattern);
+        if (!regex) {
+            const escapedPattern = pattern.split('*').map(escapeRegExpCharacters).join('.*');
+            regex = new RegExp(`^${escapedPattern}$`);
+            this.wildcardRegexCache.set(pattern, regex);
+        }
+        return regex;
     }
 }

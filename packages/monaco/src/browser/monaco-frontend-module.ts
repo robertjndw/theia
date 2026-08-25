@@ -16,15 +16,15 @@
 
 import '../../src/browser/style/index.css';
 import { ContainerModule, interfaces } from '@theia/core/shared/inversify';
-import { MenuContribution, CommandContribution, quickInputServicePath } from '@theia/core/lib/common';
 import {
-    FrontendApplicationContribution, KeybindingContribution,
-    PreferenceService, PreferenceSchemaProvider, createPreferenceProxy,
-    PreferenceScope, PreferenceChange, OVERRIDE_PROPERTY_PATTERN, QuickInputService, StylingParticipant, WebSocketConnectionProvider,
-    UndoRedoHandler,
-    WidgetStatusBarContribution
+    MenuContribution, CommandContribution, quickInputServicePath, createPreferenceProxy,
+    OVERRIDE_PROPERTY_PATTERN, PreferenceChange, PreferenceScope, PreferenceService,
+    PreferenceSchemaService
+} from '@theia/core/lib/common';
+import {
+    FrontendApplicationContribution, KeybindingContribution, QuickInputService, StylingParticipant, WebSocketConnectionProvider, UndoRedoHandler, WidgetStatusBarContribution
 } from '@theia/core/lib/browser';
-import { TextEditorProvider, DiffNavigatorProvider, TextEditor } from '@theia/editor/lib/browser';
+import { TextEditorProvider, DiffNavigatorProvider, TextEditor, FormatterService } from '@theia/editor/lib/browser';
 import { MonacoEditorProvider, MonacoEditorFactory, SaveParticipant } from './monaco-editor-provider';
 import { MonacoEditorMenuContribution } from './monaco-menu';
 import { MonacoEditorCommandHandlers } from './monaco-command';
@@ -32,6 +32,7 @@ import { MonacoKeybindingContribution } from './monaco-keybinding';
 import { MonacoLanguages } from './monaco-languages';
 import { MonacoWorkspace } from './monaco-workspace';
 import { ActiveMonacoEditorContribution, MonacoEditorService, MonacoEditorServiceFactory, VSCodeContextKeyService, VSCodeThemeService } from './monaco-editor-service';
+import { ICodeEditorService } from '@theia/monaco-editor-core/esm/vs/editor/browser/services/codeEditorService';
 import { MonacoTextModelService, MonacoEditorModelFactory, MonacoEditorModelFilter } from './monaco-text-model-service';
 import { MonacoContextMenuService } from './monaco-context-menu';
 import { MonacoOutlineContribution } from './monaco-outline-contribution';
@@ -55,12 +56,13 @@ import { ColorRegistry } from '@theia/core/lib/browser/color-registry';
 import { MonacoIconRegistry } from './monaco-icon-registry';
 import { IconRegistry } from '@theia/core/lib/browser/icon-registry';
 import { MonacoThemingService } from './monaco-theming-service';
-import { bindContributionProvider } from '@theia/core';
+import { bindRootContributionProvider } from '@theia/core';
 import { WorkspaceSymbolCommand } from './workspace-symbol-command';
 import { LanguageService } from '@theia/core/lib/browser/language-service';
 import { MonacoToProtocolConverter } from './monaco-to-protocol-converter';
 import { ProtocolToMonacoConverter } from './protocol-to-monaco-converter';
 import { MonacoFormattingConflictsContribution } from './monaco-formatting-conflicts';
+import { MonacoFormatterService } from './monaco-formatter-service';
 import { MonacoQuickInputImplementation, MonacoQuickInputService } from './monaco-quick-input-service';
 import { GotoLineQuickAccessContribution } from './monaco-gotoline-quick-access';
 import { GotoSymbolQuickAccessContribution } from './monaco-gotosymbol-quick-access';
@@ -81,6 +83,9 @@ import { DefaultContentHoverWidgetPatcher } from './default-content-hover-widget
 import { MonacoWorkspaceContextService } from './monaco-workspace-context-service';
 import { MonacoCodeActionSaveParticipant } from './monaco-code-action-save-participant';
 import { MonacoCodeActionService, MonacoCodeActionServiceImpl } from './monaco-code-action-service';
+import { MonacoDiffComputer } from './monaco-diff-computer';
+import { DiffComputer } from '@theia/core/lib/common/diff';
+import { MonacoEditorContentMenuContribution } from './monaco-editor-content-menu';
 
 export default new ContainerModule((bind, unbind, isBound, rebind) => {
     bind(MonacoThemingService).toSelf().inSingletonScope();
@@ -114,7 +119,7 @@ export default new ContainerModule((bind, unbind, isBound, rebind) => {
     bind(MonacoConfigurationService).toDynamicValue(({ container }) => createMonacoConfigurationService(container)).inSingletonScope();
 
     bind(MonacoBulkEditService).toSelf().inSingletonScope();
-    bindContributionProvider(bind, ActiveMonacoEditorContribution);
+    bindRootContributionProvider(bind, ActiveMonacoEditorContribution);
     bind(MonacoEditorServiceFactory).toFactory((context: interfaces.Context) => (contextKeyService: IContextKeyService, themeService: IThemeService) => {
         const child = context.container.createChild();
         child.bind(VSCodeContextKeyService).toConstantValue(contextKeyService);
@@ -122,14 +127,15 @@ export default new ContainerModule((bind, unbind, isBound, rebind) => {
         child.bind(MonacoEditorService).toSelf().inSingletonScope();
         return child.get(MonacoEditorService);
     });
+    bind(MonacoEditorService).toDynamicValue(() => StandaloneServices.get(ICodeEditorService) as MonacoEditorService).inSingletonScope();
     bind(MonacoTextModelService).toSelf().inSingletonScope();
     bind(MonacoContextMenuService).toSelf().inSingletonScope();
     bind(MonacoEditorServices).toSelf().inSingletonScope();
     bind(MonacoEditorProvider).toSelf().inSingletonScope();
-    bindContributionProvider(bind, MonacoEditorFactory);
-    bindContributionProvider(bind, MonacoEditorModelFactory);
-    bindContributionProvider(bind, MonacoEditorModelFilter);
-    bindContributionProvider(bind, SaveParticipant);
+    bindRootContributionProvider(bind, MonacoEditorFactory);
+    bindRootContributionProvider(bind, MonacoEditorModelFactory);
+    bindRootContributionProvider(bind, MonacoEditorModelFilter);
+    bindRootContributionProvider(bind, SaveParticipant);
     bind(MonacoCommandService).toSelf().inTransientScope();
 
     bind(TextEditorProvider).toProvider(context =>
@@ -148,6 +154,9 @@ export default new ContainerModule((bind, unbind, isBound, rebind) => {
 
     bind(MonacoFormattingConflictsContribution).toSelf().inSingletonScope();
     bind(FrontendApplicationContribution).toService(MonacoFormattingConflictsContribution);
+
+    bind(MonacoFormatterService).toSelf().inSingletonScope();
+    bind(FormatterService).toService(MonacoFormatterService);
 
     bind(MonacoStatusBarContribution).toSelf().inSingletonScope();
     bind(WidgetStatusBarContribution).toService(MonacoStatusBarContribution);
@@ -200,12 +209,18 @@ export default new ContainerModule((bind, unbind, isBound, rebind) => {
 
     bind(DefaultContentHoverWidgetPatcher).toSelf().inSingletonScope();
     bind(FrontendApplicationContribution).toService(DefaultContentHoverWidgetPatcher);
+
+    bind(MonacoDiffComputer).toSelf().inSingletonScope();
+    bind(DiffComputer).toService(MonacoDiffComputer);
+
+    bind(MonacoEditorContentMenuContribution).toSelf().inSingletonScope();
+    bind(FrontendApplicationContribution).to(MonacoEditorContentMenuContribution);
 });
 
 export const MonacoConfigurationService = Symbol('MonacoConfigurationService');
 export function createMonacoConfigurationService(container: interfaces.Container): IConfigurationService {
     const preferences = container.get<PreferenceService>(PreferenceService);
-    const preferenceSchemaProvider = container.get<PreferenceSchemaProvider>(PreferenceSchemaProvider);
+    const preferenceSchemaService = container.get<PreferenceSchemaService>(PreferenceSchemaService);
     const service = new StandaloneConfigurationService(StandaloneServices.get(ILogService));
     const _configuration: Configuration = service['_configuration'];
 
@@ -215,7 +230,7 @@ export function createMonacoConfigurationService(container: interfaces.Container
             : undefined;
         const resourceUri: string | undefined = (overrides && 'resource' in overrides && !!overrides['resource']) ? overrides['resource'].toString() : undefined;
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const proxy = createPreferenceProxy<{ [key: string]: any }>(preferences, preferenceSchemaProvider.getCombinedSchema(), {
+        const proxy = createPreferenceProxy<{ [key: string]: any }>(preferences, preferenceSchemaService.getJSONSchema(PreferenceScope.Folder), {
             resourceUri, overrideIdentifier, style: 'both'
         });
         if (section) {
@@ -244,6 +259,7 @@ export function createMonacoConfigurationService(container: interfaces.Container
             case PreferenceScope.User: return ConfigurationTarget.USER;
             case PreferenceScope.Workspace: return ConfigurationTarget.WORKSPACE;
             case PreferenceScope.Folder: return ConfigurationTarget.WORKSPACE_FOLDER;
+            case PreferenceScope.Session: return ConfigurationTarget.MEMORY;
         }
     };
 

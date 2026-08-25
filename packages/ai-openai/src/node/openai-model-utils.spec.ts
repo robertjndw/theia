@@ -13,31 +13,35 @@
 //
 // SPDX-License-Identifier: EPL-2.0 OR GPL-2.0-only WITH Classpath-exception-2.0
 // *****************************************************************************
-const { expect } = require('chai');
-const { OpenAiModelUtils } = require('./openai-language-model');
+import { expect } from 'chai';
+import { OpenAiModelUtils } from './openai-language-model';
+import { LanguageModelMessage } from '@theia/ai-core';
+import { OpenAiResponseApiUtils } from './openai-response-api-utils';
+
 const utils = new OpenAiModelUtils();
+const responseUtils = new OpenAiResponseApiUtils();
 
 describe('OpenAiModelUtils - processMessages', () => {
     describe("when developerMessageSettings is 'skip'", () => {
         it('should remove all system messages', () => {
-            const messages = [
+            const messages: LanguageModelMessage[] = [
                 { actor: 'system', type: 'text', text: 'system message' },
                 { actor: 'user', type: 'text', text: 'user message' },
                 { actor: 'system', type: 'text', text: 'another system message' },
             ];
-            const result = utils.processMessages(messages, 'skip');
+            const result = utils.processMessages(messages, 'skip', 'gpt-4');
             expect(result).to.deep.equal([
                 { role: 'user', content: 'user message' }
             ]);
         });
 
         it('should do nothing if there is no system message', () => {
-            const messages = [
+            const messages: LanguageModelMessage[] = [
                 { actor: 'user', type: 'text', text: 'user message' },
                 { actor: 'user', type: 'text', text: 'another user message' },
                 { actor: 'ai', type: 'text', text: 'ai message' }
             ];
-            const result = utils.processMessages(messages, 'skip');
+            const result = utils.processMessages(messages, 'skip', 'gpt-4');
             expect(result).to.deep.equal([
                 { role: 'user', content: 'user message' },
                 { role: 'user', content: 'another user message' },
@@ -48,12 +52,12 @@ describe('OpenAiModelUtils - processMessages', () => {
 
     describe("when developerMessageSettings is 'mergeWithFollowingUserMessage'", () => {
         it('should merge the system message with the next user message, assign role user, and remove the system message', () => {
-            const messages = [
+            const messages: LanguageModelMessage[] = [
                 { actor: 'system', type: 'text', text: 'system msg' },
                 { actor: 'user', type: 'text', text: 'user msg' },
                 { actor: 'ai', type: 'text', text: 'ai message' }
             ];
-            const result = utils.processMessages(messages, 'mergeWithFollowingUserMessage');
+            const result = utils.processMessages(messages, 'mergeWithFollowingUserMessage', 'gpt-4');
             expect(result).to.deep.equal([
                 { role: 'user', content: 'system msg\nuser msg' },
                 { role: 'assistant', content: 'ai message' }
@@ -61,11 +65,11 @@ describe('OpenAiModelUtils - processMessages', () => {
         });
 
         it('should create a new user message if no user message exists, and remove the system message', () => {
-            const messages = [
+            const messages: LanguageModelMessage[] = [
                 { actor: 'system', type: 'text', text: 'system only msg' },
                 { actor: 'ai', type: 'text', text: 'ai message' }
             ];
-            const result = utils.processMessages(messages, 'mergeWithFollowingUserMessage');
+            const result = utils.processMessages(messages, 'mergeWithFollowingUserMessage', 'gpt-4');
             expect(result).to.deep.equal([
                 { role: 'user', content: 'system only msg' },
                 { role: 'assistant', content: 'ai message' }
@@ -73,14 +77,14 @@ describe('OpenAiModelUtils - processMessages', () => {
         });
 
         it('should create a merge multiple system message with the next user message', () => {
-            const messages = [
+            const messages: LanguageModelMessage[] = [
                 { actor: 'user', type: 'text', text: 'user message' },
                 { actor: 'system', type: 'text', text: 'system message' },
                 { actor: 'system', type: 'text', text: 'system message2' },
                 { actor: 'user', type: 'text', text: 'user message2' },
                 { actor: 'ai', type: 'text', text: 'ai message' }
             ];
-            const result = utils.processMessages(messages, 'mergeWithFollowingUserMessage');
+            const result = utils.processMessages(messages, 'mergeWithFollowingUserMessage', 'gpt-4');
             expect(result).to.deep.equal([
                 { role: 'user', content: 'user message' },
                 { role: 'user', content: 'system message\nsystem message2\nuser message2' },
@@ -89,13 +93,13 @@ describe('OpenAiModelUtils - processMessages', () => {
         });
 
         it('should create a new user message from several system messages if the next message is not a user message', () => {
-            const messages = [
+            const messages: LanguageModelMessage[] = [
                 { actor: 'user', type: 'text', text: 'user message' },
                 { actor: 'system', type: 'text', text: 'system message' },
                 { actor: 'system', type: 'text', text: 'system message2' },
                 { actor: 'ai', type: 'text', text: 'ai message' }
             ];
-            const result = utils.processMessages(messages, 'mergeWithFollowingUserMessage');
+            const result = utils.processMessages(messages, 'mergeWithFollowingUserMessage', 'gpt-4');
             expect(result).to.deep.equal([
                 { role: 'user', content: 'user message' },
                 { role: 'user', content: 'system message\nsystem message2' },
@@ -106,13 +110,13 @@ describe('OpenAiModelUtils - processMessages', () => {
 
     describe('when no special merging or skipping is needed', () => {
         it('should leave messages unchanged in ordering and assign roles based on developerMessageSettings', () => {
-            const messages = [
+            const messages: LanguageModelMessage[] = [
                 { actor: 'user', type: 'text', text: 'user message' },
                 { actor: 'system', type: 'text', text: 'system message' },
                 { actor: 'ai', type: 'text', text: 'ai message' }
             ];
             // Using a developerMessageSettings that is not merge/skip, e.g., 'developer'
-            const result = utils.processMessages(messages, 'developer');
+            const result = utils.processMessages(messages, 'developer', 'gpt-4');
             expect(result).to.deep.equal([
                 { role: 'user', content: 'user message' },
                 { role: 'developer', content: 'system message' },
@@ -121,14 +125,111 @@ describe('OpenAiModelUtils - processMessages', () => {
         });
     });
 
+    describe('merging of consecutive assistant messages', () => {
+        it('should merge an assistant text message followed by an assistant tool_use into a single message', () => {
+            const messages: LanguageModelMessage[] = [
+                { actor: 'user', type: 'text', text: 'do something' },
+                { actor: 'ai', type: 'text', text: 'let me call a tool' },
+                { actor: 'ai', type: 'tool_use', id: 'call_1', name: 'foo', input: { x: 1 } }
+            ];
+            const result = utils.processMessages(messages, 'developer', 'gpt-4');
+            expect(result).to.deep.equal([
+                { role: 'user', content: 'do something' },
+                {
+                    role: 'assistant',
+                    content: 'let me call a tool',
+                    tool_calls: [{ id: 'call_1', function: { name: 'foo', arguments: JSON.stringify({ x: 1 }) }, type: 'function' }]
+                }
+            ]);
+        });
+
+        it('should merge multiple parallel assistant tool_use messages into a single message with multiple tool_calls', () => {
+            const messages: LanguageModelMessage[] = [
+                { actor: 'user', type: 'text', text: 'do parallel work' },
+                { actor: 'ai', type: 'tool_use', id: 'call_1', name: 'foo', input: { x: 1 } },
+                { actor: 'ai', type: 'tool_use', id: 'call_2', name: 'bar', input: { y: 2 } }
+            ];
+            const result = utils.processMessages(messages, 'developer', 'gpt-4');
+            expect(result).to.deep.equal([
+                { role: 'user', content: 'do parallel work' },
+                {
+                    role: 'assistant',
+                    tool_calls: [
+                        { id: 'call_1', function: { name: 'foo', arguments: JSON.stringify({ x: 1 }) }, type: 'function' },
+                        { id: 'call_2', function: { name: 'bar', arguments: JSON.stringify({ y: 2 }) }, type: 'function' }
+                    ]
+                }
+            ]);
+        });
+
+        it('should handle the bug scenario from issue #17104 (text+tool_use after a tool_result round-trip)', () => {
+            // Reproduces the role-alternation violation rejected by strict Jinja-template providers (e.g. llama.cpp serving Devstral).
+            const messages: LanguageModelMessage[] = [
+                { actor: 'user', type: 'text', text: 'first request' },
+                { actor: 'ai', type: 'tool_use', id: 'call_1', name: 'foo', input: {} },
+                { actor: 'user', type: 'tool_result', tool_use_id: 'call_1', name: 'foo', content: 'result_1' },
+                { actor: 'ai', type: 'text', text: 'follow-up reasoning' },
+                { actor: 'ai', type: 'tool_use', id: 'call_2', name: 'bar', input: {} }
+            ];
+            const result = utils.processMessages(messages, 'developer', 'gpt-4');
+            expect(result).to.deep.equal([
+                { role: 'user', content: 'first request' },
+                {
+                    role: 'assistant',
+                    tool_calls: [{ id: 'call_1', function: { name: 'foo', arguments: '{}' }, type: 'function' }]
+                },
+                { role: 'tool', tool_call_id: 'call_1', content: 'result_1' },
+                {
+                    role: 'assistant',
+                    content: 'follow-up reasoning',
+                    tool_calls: [{ id: 'call_2', function: { name: 'bar', arguments: '{}' }, type: 'function' }]
+                }
+            ]);
+            // Sanity check: no two consecutive assistant messages remain in the output.
+            for (let i = 1; i < result.length; i++) {
+                expect(result[i - 1].role === 'assistant' && result[i].role === 'assistant').to.equal(false);
+            }
+        });
+
+        it('should not merge non-adjacent assistant messages separated by a tool result', () => {
+            const messages: LanguageModelMessage[] = [
+                { actor: 'ai', type: 'tool_use', id: 'call_1', name: 'foo', input: {} },
+                { actor: 'user', type: 'tool_result', tool_use_id: 'call_1', name: 'foo', content: 'r' },
+                { actor: 'ai', type: 'text', text: 'final answer' }
+            ];
+            const result = utils.processMessages(messages, 'developer', 'gpt-4');
+            expect(result).to.deep.equal([
+                {
+                    role: 'assistant',
+                    tool_calls: [{ id: 'call_1', function: { name: 'foo', arguments: '{}' }, type: 'function' }]
+                },
+                { role: 'tool', tool_call_id: 'call_1', content: 'r' },
+                { role: 'assistant', content: 'final answer' }
+            ]);
+        });
+
+        it('should join multiple consecutive assistant text messages with a newline', () => {
+            const messages: LanguageModelMessage[] = [
+                { actor: 'user', type: 'text', text: 'q' },
+                { actor: 'ai', type: 'text', text: 'part one' },
+                { actor: 'ai', type: 'text', text: 'part two' }
+            ];
+            const result = utils.processMessages(messages, 'developer', 'gpt-4');
+            expect(result).to.deep.equal([
+                { role: 'user', content: 'q' },
+                { role: 'assistant', content: 'part one\npart two' }
+            ]);
+        });
+    });
+
     describe('role assignment for system messages when developerMessageSettings is one of the role strings', () => {
         it('should assign role as specified for a system message when developerMessageSettings is "user"', () => {
-            const messages = [
+            const messages: LanguageModelMessage[] = [
                 { actor: 'system', type: 'text', text: 'system msg' },
                 { actor: 'ai', type: 'text', text: 'ai msg' }
             ];
             // Since the first message is system and developerMessageSettings is not merge/skip, ordering is not adjusted
-            const result = utils.processMessages(messages, 'user');
+            const result = utils.processMessages(messages, 'user', 'gpt-4');
             expect(result).to.deep.equal([
                 { role: 'user', content: 'system msg' },
                 { role: 'assistant', content: 'ai msg' }
@@ -136,11 +237,11 @@ describe('OpenAiModelUtils - processMessages', () => {
         });
 
         it('should assign role as specified for a system message when developerMessageSettings is "system"', () => {
-            const messages = [
+            const messages: LanguageModelMessage[] = [
                 { actor: 'system', type: 'text', text: 'system msg' },
                 { actor: 'ai', type: 'text', text: 'ai msg' }
             ];
-            const result = utils.processMessages(messages, 'system');
+            const result = utils.processMessages(messages, 'system', 'gpt-4');
             expect(result).to.deep.equal([
                 { role: 'system', content: 'system msg' },
                 { role: 'assistant', content: 'ai msg' }
@@ -148,12 +249,12 @@ describe('OpenAiModelUtils - processMessages', () => {
         });
 
         it('should assign role as specified for a system message when developerMessageSettings is "developer"', () => {
-            const messages = [
+            const messages: LanguageModelMessage[] = [
                 { actor: 'system', type: 'text', text: 'system msg' },
                 { actor: 'user', type: 'text', text: 'user msg' },
                 { actor: 'ai', type: 'text', text: 'ai msg' }
             ];
-            const result = utils.processMessages(messages, 'developer');
+            const result = utils.processMessages(messages, 'developer', 'gpt-4');
             expect(result).to.deep.equal([
                 { role: 'developer', content: 'system msg' },
                 { role: 'user', content: 'user msg' },
@@ -161,4 +262,236 @@ describe('OpenAiModelUtils - processMessages', () => {
             ]);
         });
     });
+});
+
+describe('OpenAiModelUtils - processMessagesForResponseApi', () => {
+    describe("when developerMessageSettings is 'skip'", () => {
+        it('should remove all system messages and return no instructions', () => {
+            const messages: LanguageModelMessage[] = [
+                { actor: 'system', type: 'text', text: 'system message' },
+                { actor: 'user', type: 'text', text: 'user message' },
+                { actor: 'system', type: 'text', text: 'another system message' },
+            ];
+            const result = responseUtils.processMessages(messages, 'skip', 'gpt-4');
+            expect(result.instructions).to.be.undefined;
+            expect(result.input).to.deep.equal([
+                {
+                    type: 'message',
+                    role: 'user',
+                    content: [{ type: 'input_text', text: 'user message' }]
+                }
+            ]);
+        });
+    });
+
+    describe("when developerMessageSettings is 'mergeWithFollowingUserMessage'", () => {
+        it('should merge system message with user message and return no instructions', () => {
+            const messages: LanguageModelMessage[] = [
+                { actor: 'system', type: 'text', text: 'system msg' },
+                { actor: 'user', type: 'text', text: 'user msg' },
+                { actor: 'ai', type: 'text', text: 'ai message' }
+            ];
+            const result = responseUtils.processMessages(messages, 'mergeWithFollowingUserMessage', 'gpt-4');
+            expect(result.instructions).to.be.undefined;
+            expect(result.input).to.have.lengthOf(2);
+            expect(result.input[0]).to.deep.equal({
+                type: 'message',
+                role: 'user',
+                content: [{ type: 'input_text', text: 'system msg\nuser msg' }]
+            });
+            const assistantMessage = result.input[1];
+            expect(assistantMessage).to.deep.include({
+                type: 'message',
+                role: 'assistant',
+                status: 'completed',
+                content: [{ type: 'output_text', text: 'ai message', annotations: [] }]
+            });
+            if (assistantMessage.type === 'message' && 'id' in assistantMessage) {
+                expect(assistantMessage.id).to.be.a('string').and.to.match(/^msg_/);
+            } else {
+                throw new Error('Expected assistant message to have an id');
+            }
+        });
+    });
+
+    describe('when system messages should be converted to instructions', () => {
+        it('should extract system messages as instructions and convert other messages to input items', () => {
+            const messages: LanguageModelMessage[] = [
+                { actor: 'system', type: 'text', text: 'You are a helpful assistant' },
+                { actor: 'user', type: 'text', text: 'Hello!' },
+                { actor: 'ai', type: 'text', text: 'Hi there!' }
+            ];
+            const result = responseUtils.processMessages(messages, 'developer', 'gpt-4');
+            expect(result.instructions).to.equal('You are a helpful assistant');
+            expect(result.input).to.have.lengthOf(2);
+            expect(result.input[0]).to.deep.equal({
+                type: 'message',
+                role: 'user',
+                content: [{ type: 'input_text', text: 'Hello!' }]
+            });
+            const assistantMessage = result.input[1];
+            expect(assistantMessage).to.deep.include({
+                type: 'message',
+                role: 'assistant',
+                status: 'completed',
+                content: [{ type: 'output_text', text: 'Hi there!', annotations: [] }]
+            });
+            if (assistantMessage.type === 'message' && 'id' in assistantMessage) {
+                expect(assistantMessage.id).to.be.a('string').and.to.match(/^msg_/);
+            } else {
+                throw new Error('Expected assistant message to have an id');
+            }
+        });
+
+        it('should combine multiple system messages into instructions', () => {
+            const messages: LanguageModelMessage[] = [
+                { actor: 'system', type: 'text', text: 'You are helpful' },
+                { actor: 'system', type: 'text', text: 'Be concise' },
+                { actor: 'user', type: 'text', text: 'What is 2+2?' }
+            ];
+            const result = responseUtils.processMessages(messages, 'developer', 'gpt-4');
+            expect(result.instructions).to.equal('You are helpful\nBe concise');
+            expect(result.input).to.deep.equal([
+                {
+                    type: 'message',
+                    role: 'user',
+                    content: [{ type: 'input_text', text: 'What is 2+2?' }]
+                }
+            ]);
+        });
+    });
+
+    describe('tool use and tool result messages', () => {
+        it('should convert tool use messages to function calls', () => {
+            const messages: LanguageModelMessage[] = [
+                { actor: 'user', type: 'text', text: 'Calculate 2+2' },
+                {
+                    actor: 'ai',
+                    type: 'tool_use',
+                    id: 'call_123',
+                    name: 'calculator',
+                    input: { expression: '2+2' }
+                }
+            ];
+            const result = responseUtils.processMessages(messages, 'developer', 'gpt-4');
+            expect(result.input).to.deep.equal([
+                {
+                    type: 'message',
+                    role: 'user',
+                    content: [{ type: 'input_text', text: 'Calculate 2+2' }]
+                },
+                {
+                    type: 'function_call',
+                    call_id: 'call_123',
+                    name: 'calculator',
+                    arguments: '{"expression":"2+2"}'
+                }
+            ]);
+        });
+
+        it('should convert tool result messages to function call outputs', () => {
+            const messages: LanguageModelMessage[] = [
+                {
+                    actor: 'user',
+                    type: 'tool_result',
+                    name: 'calculator',
+                    tool_use_id: 'call_123',
+                    content: '4'
+                }
+            ];
+            const result = responseUtils.processMessages(messages, 'developer', 'gpt-4');
+            expect(result.input).to.deep.equal([
+                {
+                    type: 'function_call_output',
+                    call_id: 'call_123',
+                    output: '4'
+                }
+            ]);
+        });
+
+        it('should stringify non-string tool result content', () => {
+            const messages: LanguageModelMessage[] = [
+                {
+                    actor: 'user',
+                    type: 'tool_result',
+                    name: 'data_processor',
+                    tool_use_id: 'call_456',
+                    content: { result: 'success', data: [1, 2, 3] }
+                }
+            ];
+            const result = responseUtils.processMessages(messages, 'developer', 'gpt-4');
+            expect(result.input).to.deep.equal([
+                {
+                    type: 'function_call_output',
+                    call_id: 'call_456',
+                    output: '{"result":"success","data":[1,2,3]}'
+                }
+            ]);
+        });
+    });
+
+    describe('image messages', () => {
+        it('should convert base64 image messages to input image items', () => {
+            const messages: LanguageModelMessage[] = [
+                {
+                    actor: 'user',
+                    type: 'image',
+                    image: {
+                        mimeType: 'image/png',
+                        base64data: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=='
+                    }
+                }
+            ];
+            const result = responseUtils.processMessages(messages, 'developer', 'gpt-4');
+            expect(result.input).to.deep.equal([
+                {
+                    type: 'message',
+                    role: 'user',
+                    content: [{
+                        type: 'input_image',
+                        detail: 'auto',
+                        image_url: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=='
+                    }]
+                }
+            ]);
+        });
+
+        it('should convert URL image messages to input image items', () => {
+            const messages: LanguageModelMessage[] = [
+                {
+                    actor: 'user',
+                    type: 'image',
+                    image: {
+                        url: 'https://example.com/image.png'
+                    }
+                }
+            ];
+            const result = responseUtils.processMessages(messages, 'developer', 'gpt-4');
+            expect(result.input).to.deep.equal([
+                {
+                    type: 'message',
+                    role: 'user',
+                    content: [{
+                        type: 'input_image',
+                        detail: 'auto',
+                        image_url: 'https://example.com/image.png'
+                    }]
+                }
+            ]);
+        });
+    });
+
+    describe('error handling', () => {
+        it('should throw error for unknown message types', () => {
+            const invalidMessage = {
+                actor: 'user',
+                type: 'unknown_type',
+                someProperty: 'value'
+            };
+            const messages = [invalidMessage] as unknown as LanguageModelMessage[];
+            expect(() => responseUtils.processMessages(messages, 'developer', 'gpt-4'))
+                .to.throw('unhandled case');
+        });
+    });
+
 });

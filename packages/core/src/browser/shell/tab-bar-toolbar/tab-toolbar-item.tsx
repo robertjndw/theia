@@ -23,13 +23,15 @@ import { KeybindingRegistry } from '../../keybinding';
 import { ACTION_ITEM } from '../../widgets';
 import { TabBarToolbar } from './tab-bar-toolbar';
 import * as React from 'react';
+import { buttonKeyboardProps, isActivationKey } from '../../keyboard/keyboard-utils';
 import { ActionMenuNode, GroupImpl, MenuNode } from '../../../common/menu';
 
 export interface TabBarToolbarItem {
     id: string;
+    when?: string;
     isVisible(widget: Widget): boolean;
-    isEnabled(widget?: Widget): boolean;
-    isToggled(): boolean;
+    isEnabled(widget: Widget): boolean;
+    isToggled(widget: Widget): boolean;
     render(widget?: Widget): React.ReactNode;
     onDidChange?: Event<void>;
     group?: string;
@@ -52,6 +54,9 @@ class AbstractToolbarItemImpl<T extends TabBarToolbarActionBase> {
     get id(): string {
         return this.action.id;
     }
+    get when(): string | undefined {
+        return this.action.when;
+    }
     get group(): string | undefined {
         return this.action.group;
     }
@@ -73,11 +78,11 @@ class AbstractToolbarItemImpl<T extends TabBarToolbarActionBase> {
         return actionVisible && contextMatches;
     }
 
-    isEnabled(widget?: Widget): boolean {
+    isEnabled(widget: Widget): boolean {
         return this.action.command ? this.commandRegistry.isEnabled(this.action.command, widget) : !!this.action.menuPath;
     }
-    isToggled(): boolean {
-        return this.action.command ? this.commandRegistry.isToggled(this.action.command) : true;
+    isToggled(widget: Widget): boolean {
+        return this.action.command ? this.commandRegistry.isToggled(this.action.command, widget) : false;
     }
 }
 
@@ -95,6 +100,10 @@ export class RenderedToolbarItemImpl extends AbstractToolbarItemImpl<RenderedToo
         if (action.onDidChange) {
             this.disposables.push(action.onDidChange(() => this.onDidChangeEmitter.fire()));
         }
+
+        this.disposables.push(Disposable.create(() =>
+            this.contextKeyListener?.dispose()
+        ));
     }
 
     dispose(): void {
@@ -102,6 +111,10 @@ export class RenderedToolbarItemImpl extends AbstractToolbarItemImpl<RenderedToo
     }
 
     updateContextKeyListener(when: string): void {
+        if (this.contextKeyListener) {
+            this.contextKeyListener.dispose();
+            this.contextKeyListener = undefined;
+        }
         const contextKeys = new Set<string>();
         this.contextKeyService.parseKeys(when)?.forEach(key => contextKeys.add(key));
         if (contextKeys.size > 0) {
@@ -113,22 +126,22 @@ export class RenderedToolbarItemImpl extends AbstractToolbarItemImpl<RenderedToo
         }
     }
 
-    render(widget?: Widget | undefined): React.ReactNode {
+    render(widget: Widget): React.ReactNode {
         return this.renderItem(widget);
     }
 
-    protected getToolbarItemClassNames(widget?: Widget): string[] {
+    protected getToolbarItemClassNames(widget: Widget): string[] {
         const classNames = [TabBarToolbar.Styles.TAB_BAR_TOOLBAR_ITEM];
         if (this.isEnabled(widget)) {
             classNames.push('enabled');
         }
-        if (this.isToggled()) {
+        if (this.isToggled(widget)) {
             classNames.push('toggled');
         }
         return classNames;
     }
 
-    protected resolveKeybindingForCommand(widget: Widget | undefined, command: string | undefined): string {
+    protected resolveKeybindingForCommand(widget: Widget, command: string | undefined): string {
         let result = '';
         if (this.action.command) {
             const bindings = this.keybindingRegistry.getKeybindingsForCommand(this.action.command);
@@ -182,20 +195,28 @@ export class RenderedToolbarItemImpl extends AbstractToolbarItemImpl<RenderedToo
         e.currentTarget.classList.remove('active');
     };
 
-    protected executeCommand(e: React.MouseEvent<HTMLElement>, widget?: Widget): void {
+    protected executeCommand(e: React.MouseEvent<HTMLElement>, widget: Widget): void {
+        this.doExecuteCommand(e, widget);
+    };
+
+    protected doExecuteCommand(e: React.SyntheticEvent<HTMLElement>, widget: Widget): void {
         e.preventDefault();
         e.stopPropagation();
-
         if (!this.isEnabled(widget)) {
             return;
         }
-
         if (this.action.command) {
             this.commandRegistry.executeCommand(this.action.command, widget);
         }
+    }
+
+    protected onKeyDownEvent = (e: React.KeyboardEvent<HTMLElement>, widget: Widget) => {
+        if (isActivationKey(e)) {
+            this.doExecuteCommand(e, widget);
+        }
     };
 
-    protected renderItem(widget?: Widget): React.ReactNode {
+    protected renderItem(widget: Widget): React.ReactNode {
         let innerText = '';
         const classNames = [];
         const command = this.action.command ? this.commandRegistry.getCommand(this.action.command) : undefined;
@@ -237,7 +258,9 @@ export class RenderedToolbarItemImpl extends AbstractToolbarItemImpl<RenderedToo
             onMouseUp={this.onMouseUpEvent}
             onMouseOut={this.onMouseUpEvent} >
             <div id={this.action.id} className={classNames.join(' ')}
+                {...buttonKeyboardProps(tooltip)}
                 onClick={e => this.executeCommand(e, widget)}
+                onKeyDown={e => this.onKeyDownEvent(e, widget)}
                 title={tooltip} > {innerText}
             </div>
         </div>;

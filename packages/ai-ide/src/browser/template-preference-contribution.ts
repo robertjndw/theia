@@ -14,16 +14,19 @@
 // SPDX-License-Identifier: EPL-2.0 OR GPL-2.0-only WITH Classpath-exception-2.0
 // *****************************************************************************
 
-import { FrontendApplicationContribution, PreferenceService } from '@theia/core/lib/browser';
+import { FrontendApplicationContribution } from '@theia/core/lib/browser';
 import { inject, injectable } from '@theia/core/shared/inversify';
-import { DefaultPromptFragmentCustomizationService, PromptFragmentCustomizationProperties } from '@theia/ai-core/lib/browser/frontend-prompt-customization-service';
+import {
+    CUSTOM_AGENT_WORKSPACE_DIRECTORIES, DefaultPromptFragmentCustomizationService, PromptFragmentCustomizationProperties
+} from '@theia/ai-core/lib/browser/frontend-prompt-customization-service';
 import {
     PROMPT_TEMPLATE_WORKSPACE_DIRECTORIES_PREF,
     PROMPT_TEMPLATE_ADDITIONAL_EXTENSIONS_PREF,
     PROMPT_TEMPLATE_WORKSPACE_FILES_PREF
-} from './workspace-preferences';
+} from '../common/workspace-preferences';
 import { WorkspaceService } from '@theia/workspace/lib/browser';
-import { Path } from '@theia/core';
+import { Path, PreferenceService } from '@theia/core';
+import { WorkspaceTrustService } from '@theia/workspace/lib/browser/workspace-trust-service';
 
 @injectable()
 export class TemplatePreferenceContribution implements FrontendApplicationContribution {
@@ -37,8 +40,15 @@ export class TemplatePreferenceContribution implements FrontendApplicationContri
     @inject(WorkspaceService)
     protected readonly workspaceService: WorkspaceService;
 
+    @inject(WorkspaceTrustService)
+    protected readonly workspaceTrustService: WorkspaceTrustService;
+
     onStart(): void {
-        Promise.all([this.preferenceService.ready, this.workspaceService.ready]).then(() => {
+        Promise.all([
+            this.preferenceService.ready,
+            this.workspaceService.ready,
+            this.workspaceTrustService.getWorkspaceTrust()
+        ]).then(() => {
             // Set initial template configuration from preferences
             this.updateConfiguration();
 
@@ -55,6 +65,11 @@ export class TemplatePreferenceContribution implements FrontendApplicationContri
             this.workspaceService.onWorkspaceLocationChanged(() => {
                 this.updateConfiguration();
             });
+
+            // Listen for trust changes to reload/unload workspace templates
+            this.workspaceTrustService.onDidChangeWorkspaceTrust(() => {
+                this.updateConfiguration();
+            });
         });
     }
 
@@ -64,34 +79,62 @@ export class TemplatePreferenceContribution implements FrontendApplicationContri
      * @param changedPreference Optional name of the preference that changed
      */
     protected async updateConfiguration(changedPreference?: string): Promise<void> {
-        const workspaceRoot = this.workspaceService.tryGetRoots()[0];
-        if (!workspaceRoot) {
+        const workspaceRoots = this.workspaceService.tryGetRoots();
+        if (workspaceRoots.length === 0) {
             return;
         }
 
-        const workspaceRootUri = workspaceRoot.resource;
+        const trusted = await this.workspaceTrustService.getWorkspaceTrust();
         const configProperties: PromptFragmentCustomizationProperties = {};
 
         if (!changedPreference || changedPreference === PROMPT_TEMPLATE_WORKSPACE_DIRECTORIES_PREF) {
-            const relativeDirectories = this.preferenceService.get<string[]>(PROMPT_TEMPLATE_WORKSPACE_DIRECTORIES_PREF, []);
-            configProperties.directoryPaths = relativeDirectories.map(dir => {
-                const path = new Path(dir);
-                const uri = workspaceRootUri.resolve(path.toString());
-                return uri.path.toString();
-            });
+            if (trusted) {
+                const relativeDirectories = this.preferenceService.get<string[]>(PROMPT_TEMPLATE_WORKSPACE_DIRECTORIES_PREF, []);
+                configProperties.directoryPaths = workspaceRoots.flatMap(root =>
+                    relativeDirectories.map(dir => {
+                        const path = new Path(dir);
+                        const uri = root.resource.resolve(path.toString());
+                        return uri.path.toString();
+                    })
+                );
+            } else {
+                configProperties.directoryPaths = [];
+            }
         }
 
         if (!changedPreference || changedPreference === PROMPT_TEMPLATE_ADDITIONAL_EXTENSIONS_PREF) {
-            configProperties.extensions = this.preferenceService.get<string[]>(PROMPT_TEMPLATE_ADDITIONAL_EXTENSIONS_PREF, []);
+            if (trusted) {
+                configProperties.extensions = this.preferenceService.get<string[]>(PROMPT_TEMPLATE_ADDITIONAL_EXTENSIONS_PREF, []);
+            } else {
+                configProperties.extensions = [];
+            }
         }
 
         if (!changedPreference || changedPreference === PROMPT_TEMPLATE_WORKSPACE_FILES_PREF) {
-            const relativeFilePaths = this.preferenceService.get<string[]>(PROMPT_TEMPLATE_WORKSPACE_FILES_PREF, []);
-            configProperties.filePaths = relativeFilePaths.map(filePath => {
-                const path = new Path(filePath);
-                const uri = workspaceRootUri.resolve(path.toString());
-                return uri.path.toString();
-            });
+            if (trusted) {
+                const relativeFilePaths = this.preferenceService.get<string[]>(PROMPT_TEMPLATE_WORKSPACE_FILES_PREF, []);
+                configProperties.filePaths = workspaceRoots.flatMap(root =>
+                    relativeFilePaths.map(filePath => {
+                        const path = new Path(filePath);
+                        const uri = root.resource.resolve(path.toString());
+                        return uri.path.toString();
+                    })
+                );
+            } else {
+                configProperties.filePaths = [];
+            }
+        }
+
+        // The built-in custom-agent directories (`.agents`/`.prompts`) depend only on the workspace
+        // roots and trust state, not on any preference, so they are recomputed on every full update.
+        if (!changedPreference) {
+            if (trusted) {
+                configProperties.agentDirectoryPaths = workspaceRoots.flatMap(root =>
+                    CUSTOM_AGENT_WORKSPACE_DIRECTORIES.map(dir => root.resource.resolve(dir).path.toString())
+                );
+            } else {
+                configProperties.agentDirectoryPaths = [];
+            }
         }
 
         await this.customizationService.updateConfiguration(configProperties);

@@ -15,8 +15,8 @@
 // *****************************************************************************
 
 import { inject, injectable, named } from 'inversify';
-import { Event, Emitter } from '../../common';
-import { CorePreferences } from '../core-preferences';
+import { Event, Emitter, ILogger } from '../../common';
+import { CorePreferences } from '../../common/core-preferences';
 import { ContributionProvider } from '../../common/contribution-provider';
 import { FrontendApplicationContribution, OnWillStopAction } from '../frontend-application-contribution';
 import { WindowService } from './window-service';
@@ -30,6 +30,7 @@ export class DefaultWindowService implements WindowService, FrontendApplicationC
 
     protected frontendApplication: FrontendApplication;
     protected allowVetoes = true;
+    protected unloaded = false;
 
     protected onUnloadEmitter = new Emitter<void>();
     get onUnload(): Event<void> {
@@ -43,6 +44,9 @@ export class DefaultWindowService implements WindowService, FrontendApplicationC
     @named(FrontendApplicationContribution)
     protected readonly contributions: ContributionProvider<FrontendApplicationContribution>;
 
+    @inject(ILogger) @named('core:DefaultWindowService')
+    protected readonly logger: ILogger;
+
     onStart(app: FrontendApplication): void {
         this.frontendApplication = app;
         this.registerUnloadListeners();
@@ -53,8 +57,13 @@ export class DefaultWindowService implements WindowService, FrontendApplicationC
         return undefined;
     }
 
-    openNewDefaultWindow(): void {
+    async openNewDefaultWindow(): Promise<number> {
         this.openNewWindow(`#${DEFAULT_WINDOW_HASH}`);
+        return -1;
+    }
+
+    closeWindow(windowId: number): void {
+        // No-op in browser-only mode
     }
 
     focus(): void {
@@ -95,12 +104,43 @@ export class DefaultWindowService implements WindowService, FrontendApplicationC
      * Implement the mechanism to detect unloading of the page.
      */
     protected registerUnloadListeners(): void {
+        // If `beforeunload` is cancelled and the user stays, the page is not unloaded, so `pagehide` is not fired.
         window.addEventListener('beforeunload', event => this.handleBeforeUnloadEvent(event));
-        // In a browser, `unload` is correctly fired when the page unloads, unlike Electron.
-        // If `beforeunload` is cancelled, the user will be prompted to leave or stay.
-        // If the user stays, the page won't be unloaded, so `unload` is not fired.
-        // If the user leaves, the page will be unloaded, so `unload` is fired.
-        window.addEventListener('unload', () => this.onUnloadEmitter.fire());
+        this.registerPageHideListener();
+        window.addEventListener('pageshow', event => this.handlePageShow(event));
+    }
+
+    /**
+     * `pagehide` is used instead of the deprecated `unload` event, which Chrome may block
+     * via permissions policy (https://developer.chrome.com/docs/web-platform/deprecating-unload),
+     * silently skipping the handler and thus e.g. losing the layout.
+     */
+    protected registerPageHideListener(): void {
+        window.addEventListener('pagehide', () => this.handlePageHide());
+    }
+
+    /**
+     * `pagehide` also fires when the page enters the back/forward cache, in which case the frontend
+     * has already shut down (state saved, connections closed). Reload to get a working application
+     * again if the page is restored from the cache. That shutdown already happened, so the reload
+     * must not be vetoed by the contributions.
+     */
+    protected handlePageShow(event: PageTransitionEvent): void {
+        if (event.persisted) {
+            this.setSafeToShutDown();
+            this.reload();
+        }
+    }
+
+    /**
+     * Fires {@link onUnload} at most once per document: `pagehide` fires again for the reload that
+     * recovers a page restored from the back/forward cache, but the application is already stopped.
+     */
+    protected handlePageHide(): void {
+        if (!this.unloaded) {
+            this.unloaded = true;
+            this.onUnloadEmitter.fire();
+        }
     }
 
     async isSafeToShutDown(stopReason: StopReason): Promise<boolean> {
@@ -109,7 +149,7 @@ export class DefaultWindowService implements WindowService, FrontendApplicationC
             return true;
         }
         const preparedValues = await Promise.all(vetoes.map(e => e.prepare?.(stopReason)));
-        console.debug('Shutdown prevented by', vetoes.map(({ reason }) => reason).join(', '));
+        this.logger.debug('Shutdown prevented by', vetoes.map(({ reason }) => reason).join(', '));
         for (let i = 0; i < vetoes.length; i++) {
             try {
                 const result = await vetoes[i].action(preparedValues[i], stopReason);
@@ -117,10 +157,10 @@ export class DefaultWindowService implements WindowService, FrontendApplicationC
                     return false;
                 }
             } catch (e) {
-                console.error(e);
+                this.logger.error(e);
             }
         }
-        console.debug('OnWillStop actions resolved; allowing shutdown');
+        this.logger.debug('OnWillStop actions resolved; allowing shutdown');
         this.allowVetoes = false;
         return true;
     }
@@ -140,10 +180,10 @@ export class DefaultWindowService implements WindowService, FrontendApplicationC
         const vetoes = this.collectContributionUnloadVetoes();
         if (vetoes.length) {
             // In the browser, we don't call the functions because this has to finish in a single tick, so we treat any desired action as a veto.
-            console.debug('Shutdown prevented by', vetoes.map(({ reason }) => reason).join(', '));
+            this.logger.debug('Shutdown prevented by', vetoes.map(({ reason }) => reason).join(', '));
             return this.preventUnload(event);
         }
-        console.debug('Shutdown will proceed.');
+        this.logger.debug('Shutdown will proceed.');
     }
 
     /**

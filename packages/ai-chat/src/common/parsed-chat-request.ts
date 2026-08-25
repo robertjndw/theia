@@ -22,6 +22,13 @@
 
 import { ResolvedAIVariable, ToolRequest, toolRequestToPromptText } from '@theia/ai-core';
 import { ChatRequest } from './chat-model';
+import {
+    SerializableTextPart,
+    SerializableVariablePart,
+    SerializableFunctionPart,
+    SerializableAgentPart,
+    SerializableParsedRequest,
+} from './chat-model-serialization';
 
 export const chatVariableLeader = '#';
 export const chatAgentLeader = '@';
@@ -29,7 +36,7 @@ export const chatFunctionLeader = '~';
 export const chatSubcommandLeader = '/';
 
 /**********************
- * INTERFACES AND TYPE GUARDS
+ * CLASSES, INTERFACES AND TYPE GUARDS
  **********************/
 
 export interface OffsetRange {
@@ -41,6 +48,14 @@ export interface ParsedChatRequest {
     readonly request: ChatRequest;
     readonly parts: ParsedChatRequestPart[];
     readonly toolRequests: Map<string, ToolRequest>;
+    /**
+     * Ids of tools referenced in the request that were marked as deferred,
+     * e.g. `~?toolId` (chat format) or `~{?toolId}` (prompt format).
+     * Deferred tools are not loaded into the model's context upfront and
+     * may instead be discovered on-demand via the model provider's built-in
+     * tool search mechanism (Anthropic, OpenAI) when supported.
+     */
+    readonly deferredToolIds?: Set<string>;
     readonly variables: ResolvedAIVariable[];
 }
 
@@ -59,17 +74,25 @@ export interface ParsedChatRequestPart {
 }
 
 export class ParsedChatRequestTextPart implements ParsedChatRequestPart {
-    readonly kind: 'text';
+    readonly kind = 'text';
 
     constructor(readonly range: OffsetRange, readonly text: string) { }
 
     get promptText(): string {
         return this.text;
     }
+
+    toSerializable(): SerializableTextPart {
+        return {
+            kind: 'text',
+            range: this.range,
+            text: this.text
+        };
+    }
 }
 
 export class ParsedChatRequestVariablePart implements ParsedChatRequestPart {
-    readonly kind: 'var';
+    readonly kind = 'var';
 
     public resolution: ResolvedAIVariable;
 
@@ -83,23 +106,45 @@ export class ParsedChatRequestVariablePart implements ParsedChatRequestPart {
     get promptText(): string {
         return this.resolution?.value ?? this.text;
     }
+
+    toSerializable(): SerializableVariablePart {
+        return {
+            kind: 'var',
+            range: this.range,
+            variableId: this.resolution?.variable.id ?? 'unresolved variable',
+            variableName: this.variableName,
+            variableArg: this.variableArg,
+            variableValue: this.resolution?.value,
+            variableDescription: this.resolution?.variable.description ?? 'unresolved variable'
+        };
+    }
 }
 
 export class ParsedChatRequestFunctionPart implements ParsedChatRequestPart {
-    readonly kind: 'function';
-    constructor(readonly range: OffsetRange, readonly toolRequest: ToolRequest) { }
+    readonly kind = 'function';
+    constructor(readonly range: OffsetRange, readonly toolRequest: ToolRequest, readonly deferred: boolean = false) { }
 
     get text(): string {
-        return `${chatFunctionLeader}${this.toolRequest.id}`;
+        const marker = this.deferred ? '?' : '';
+        return `${chatFunctionLeader}${marker}${this.toolRequest.id}`;
     }
 
     get promptText(): string {
         return toolRequestToPromptText(this.toolRequest);
     }
+
+    toSerializable(): SerializableFunctionPart {
+        return {
+            kind: 'function',
+            range: this.range,
+            toolRequestId: this.toolRequest.id,
+            deferred: this.deferred ? true : undefined
+        };
+    }
 }
 
 export class ParsedChatRequestAgentPart implements ParsedChatRequestPart {
-    readonly kind: 'agent';
+    readonly kind = 'agent';
     constructor(readonly range: OffsetRange, readonly agentId: string, readonly agentName: string) { }
 
     get text(): string {
@@ -108,5 +153,41 @@ export class ParsedChatRequestAgentPart implements ParsedChatRequestPart {
 
     get promptText(): string {
         return '';
+    }
+
+    toSerializable(): SerializableAgentPart {
+        return {
+            kind: 'agent',
+            range: this.range,
+            agentId: this.agentId,
+            agentName: this.agentName
+        };
+    }
+}
+
+export namespace ParsedChatRequest {
+    export function toSerializable(parsed: ParsedChatRequest): SerializableParsedRequest {
+        return {
+            parts: parsed.parts.map(part => {
+                if (part instanceof ParsedChatRequestTextPart ||
+                    part instanceof ParsedChatRequestVariablePart ||
+                    part instanceof ParsedChatRequestFunctionPart ||
+                    part instanceof ParsedChatRequestAgentPart) {
+                    return part.toSerializable();
+                }
+                throw new Error(`Unknown part type: ${part.kind}`);
+            }),
+            toolRequests: Array.from(parsed.toolRequests.keys()).map(toolId => ({
+                id: toolId,
+                deferred: parsed.deferredToolIds?.has(toolId) ? true : undefined
+            })),
+            variables: parsed.variables.map(variable => ({
+                variableId: variable.variable.id,
+                variableName: variable.variable.name,
+                variableDescription: variable.variable.description,
+                arg: variable.arg,
+                value: variable.value
+            }))
+        };
     }
 }

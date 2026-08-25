@@ -14,16 +14,16 @@
 // SPDX-License-Identifier: EPL-2.0 OR GPL-2.0-only WITH Classpath-exception-2.0
 // *****************************************************************************
 
-import { Disposable, SelectionService, Event, UNTITLED_SCHEME, DisposableCollection } from '@theia/core/lib/common';
-import { Widget, BaseWidget, Message, Saveable, SaveableSource, Navigatable, StatefulWidget, lock, TabBar, DockPanel, unlock, ExtractableWidget } from '@theia/core/lib/browser';
+import { Disposable, SelectionService, Event, UNTITLED_SCHEME } from '@theia/core/lib/common';
+import {
+    Widget, BaseWidget, Message, Saveable, SaveableSource, Navigatable, StatefulWidget, lock, TabBar, TabBarTracker, unlock, ExtractableWidget
+} from '@theia/core/lib/browser';
 import URI from '@theia/core/lib/common/uri';
-import { find } from '@theia/core/shared/@lumino/algorithm';
 import { TextEditor } from './editor';
 
 export class EditorWidget extends BaseWidget implements SaveableSource, Navigatable, StatefulWidget, ExtractableWidget {
 
-    protected toDisposeOnTabbarChange = new DisposableCollection();
-    protected currentTabbar: TabBar<Widget> | undefined;
+    protected readonly tabBarTracker = new TabBarTracker(this, (oldTabBar, newTabBar) => this.handleTabBarChange(oldTabBar, newTabBar));
 
     constructor(
         readonly editor: TextEditor,
@@ -35,7 +35,6 @@ export class EditorWidget extends BaseWidget implements SaveableSource, Navigata
             lock(this.title);
         }
         this.toDispose.push(this.editor);
-        this.toDispose.push(this.toDisposeOnTabbarChange);
         this.toDispose.push(this.editor.onSelectionChanged(() => this.setSelection()));
         this.toDispose.push(this.editor.onFocusChanged(() => this.setSelection()));
         this.toDispose.push(this.editor.onDidChangeReadOnly(isReadonly => {
@@ -45,6 +44,7 @@ export class EditorWidget extends BaseWidget implements SaveableSource, Navigata
                 unlock(this.title);
             }
         }));
+        this.toDispose.push(this.tabBarTracker);
         this.toDispose.push(Disposable.create(() => {
             if (this.selectionService.selection === this.editor) {
                 this.selectionService.selection = undefined;
@@ -53,6 +53,8 @@ export class EditorWidget extends BaseWidget implements SaveableSource, Navigata
     }
     isExtractable: boolean = true;
     secondaryWindow: Window | undefined;
+
+    navigationHistorySupport: boolean = true;
 
     setSelection(): void {
         if (this.editor.isFocused() && this.selectionService.selection !== this.editor) {
@@ -76,6 +78,14 @@ export class EditorWidget extends BaseWidget implements SaveableSource, Navigata
         return this.editor.createMoveToUri(resourceUri);
     }
 
+    override getPreviewNode(): Node | undefined {
+        if (!this.isVisible && this.editor.stageForPreview) {
+            this.editor.stageForPreview();
+            queueMicrotask(() => this.editor.unstagePreview?.());
+        }
+        return this.node;
+    }
+
     protected override onActivateRequest(msg: Message): void {
         super.onActivateRequest(msg);
         this.editor.focus();
@@ -87,23 +97,7 @@ export class EditorWidget extends BaseWidget implements SaveableSource, Navigata
         if (this.isVisible) {
             this.editor.refresh();
         }
-        this.checkForTabbarChange();
-    }
-
-    protected checkForTabbarChange(): void {
-        const { parent } = this;
-        if (parent instanceof DockPanel) {
-            const newTabbar = find(parent.tabBars(), tabbar => !!tabbar.titles.find(title => title === this.title));
-            if (this.currentTabbar !== newTabbar) {
-                this.toDisposeOnTabbarChange.dispose();
-                const listener = () => this.checkForTabbarChange();
-                parent.layoutModified.connect(listener);
-                this.toDisposeOnTabbarChange.push(Disposable.create(() => parent.layoutModified.disconnect(listener)));
-                const last = this.currentTabbar;
-                this.currentTabbar = newTabbar;
-                this.handleTabBarChange(last, newTabbar);
-            }
-        }
+        this.tabBarTracker.check();
     }
 
     protected handleTabBarChange(oldTabBar?: TabBar<Widget>, newTabBar?: TabBar<Widget>): void {

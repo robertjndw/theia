@@ -45,7 +45,7 @@ export class TerminalFrontendOnlyContribution implements TerminalService {
         throw new Error('Method not implemented.');
     }
 
-    open(terminal: TerminalWidget, options?: WidgetOpenerOptions): void { }
+    async open(terminal: TerminalWidget, options?: WidgetOpenerOptions): Promise<void> { }
 
     get all(): TerminalWidget[] {
         return [];

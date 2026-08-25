@@ -17,18 +17,19 @@
 import * as path from 'path';
 import * as express from '@theia/core/shared/express';
 import * as escape_html from 'escape-html';
-import { realpath } from 'fs/promises';
+import { realpath, stat } from 'fs/promises';
 import { ILogger } from '@theia/core';
-import { inject, injectable, optional, multiInject } from '@theia/core/shared/inversify';
+import { inject, injectable, optional, multiInject, named } from '@theia/core/shared/inversify';
 import { BackendApplicationContribution } from '@theia/core/lib/node/backend-application';
 import { PluginMetadata, getPluginId, MetadataProcessor, PluginPackage, PluginContribution } from '../../common/plugin-protocol';
 import { MetadataScanner } from './metadata-scanner';
-import { loadManifest } from './plugin-manifest-loader';
+import { loadManifest } from '@theia/plugin-utils/lib/node/plugin-manifest';
+import { PLUGINS_BASE_PATH } from '@theia/plugin-utils/lib/common/constants';
 
 @injectable()
 export class HostedPluginReader implements BackendApplicationContribution {
 
-    @inject(ILogger)
+    @inject(ILogger) @named('plugin-ext:HostedPluginReader')
     protected readonly logger: ILogger;
 
     @inject(MetadataScanner)
@@ -43,18 +44,23 @@ export class HostedPluginReader implements BackendApplicationContribution {
     protected pluginsIdsFiles: Map<string, string> = new Map();
 
     configure(app: express.Application): void {
-        app.get('/hostedPlugin/:pluginId/:path(*)', async (req, res) => {
+        app.get(`/${PLUGINS_BASE_PATH}/:pluginId/:path(*)`, async (req, res) => {
             const pluginId = req.params.pluginId;
             const filePath = req.params.path;
 
             const localPath = this.pluginsIdsFiles.get(pluginId);
             if (localPath) {
-                res.sendFile(filePath, { root: localPath }, e => {
+                const resolvedFile = await this.resolveFile(localPath, filePath);
+                if (!resolvedFile) {
+                    res.status(404).send(`No such file found in '${escape_html(pluginId)}' plugin.`);
+                    return;
+                }
+                res.sendFile(resolvedFile, e => {
                     if (!e) {
                         // the file was found and successfully transferred
                         return;
                     }
-                    console.error(`Could not transfer '${filePath}' file from '${pluginId}'`, e);
+                    this.logger.error(`Could not transfer '${filePath}' file from '${pluginId}'`, e);
                     if (res.headersSent) {
                         // the request was already closed
                         return;
@@ -70,6 +76,47 @@ export class HostedPluginReader implements BackendApplicationContribution {
                 await this.handleMissingResource(req, res);
             }
         });
+    }
+
+    /**
+     * Resolves `filePath` under `localPath`, with fallback to `.js`, `.cjs` and `.mjs`
+     * extensions. Returns `undefined` if the resolved path is not under `localPath`
+     * or if no candidate exists on disk.
+     *
+     * The extension fallback handles cases where plugins reference modules without
+     * extensions, which is common in Node.js/CommonJS environments.
+     */
+    protected async resolveFile(localPath: string, filePath: string): Promise<string | undefined> {
+        const absolutePath = path.resolve(localPath, filePath);
+
+        // `path.relative` yields a path starting with '..' (or an absolute path on
+        // Windows when the drive differs) when `absolutePath` is not under `localPath`.
+        const relativePath = path.relative(localPath, absolutePath);
+        if (relativePath.startsWith('..') || path.isAbsolute(relativePath)) {
+            return undefined;
+        }
+
+        const candidates = [absolutePath];
+        const pathExtension = path.extname(absolutePath).toLowerCase();
+
+        if (!pathExtension) {
+            candidates.push(absolutePath + '.js');
+            candidates.push(absolutePath + '.cjs');
+            candidates.push(absolutePath + '.mjs');
+        }
+
+        for (const candidate of candidates) {
+            try {
+                const stats = await stat(candidate);
+                if (stats.isFile()) {
+                    return candidate;
+                }
+            } catch {
+                // File doesn't exist or is inaccessible - try next candidate
+                // Actual 404 errors are handled by the caller
+            }
+        }
+        return undefined;
     }
 
     protected async handleMissingResource(req: express.Request, res: express.Response): Promise<void> {
@@ -95,7 +142,7 @@ export class HostedPluginReader implements BackendApplicationContribution {
             return undefined;
         }
         const resolvedPluginPath = await realpath(pluginPath);
-        const manifest = await loadManifest(resolvedPluginPath);
+        const manifest = await loadManifest<PluginPackage>(resolvedPluginPath);
         if (!manifest) {
             return undefined;
         }

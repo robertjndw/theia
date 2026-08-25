@@ -13,29 +13,57 @@
 //
 // SPDX-License-Identifier: EPL-2.0 OR GPL-2.0-only WITH Classpath-exception-2.0
 // *****************************************************************************
-import { webcrypto as crypto } from 'node:crypto';
 import {
+    createToolCallError,
+    ImageContent,
     LanguageModel,
-    LanguageModelRequest,
     LanguageModelMessage,
+    LanguageModelRequest,
     LanguageModelResponse,
+    LanguageModelStatus,
     LanguageModelStreamResponse,
     LanguageModelStreamResponsePart,
     LanguageModelTextResponse,
-    TokenUsageService,
-    UserRequest,
-    ImageContent,
-    ToolCallResult
+    ReasoningApi,
+    ReasoningSupport,
+    ServerToolCall,
+    ServerToolDescriptor,
+    ToolCallResult,
+    ToolInvocationContext,
+    UserRequest
 } from '@theia/ai-core';
 import { CancellationToken } from '@theia/core';
-import { GoogleGenAI, FunctionCallingConfigMode, FunctionDeclaration, Content, Schema, Part, Modality, FunctionResponse } from '@google/genai';
+import {
+    GoogleGenAI, FunctionCallingConfigMode, FunctionDeclaration, Content, Schema, Part, Modality, FunctionResponse, ToolConfig, Tool, UrlContextMetadata, GroundingMetadata
+} from '@google/genai';
+import { wait } from '@theia/core/lib/common/promise-util';
+import { GoogleLanguageModelRetrySettings } from './google-language-models-manager-impl';
+import { googleReasoningFor } from './google-reasoning';
+import { GOOGLE_GOOGLE_SEARCH, GOOGLE_URL_CONTEXT } from './google-server-tools';
+import { UUID } from '@theia/core/shared/@lumino/coreutils';
 
 interface ToolCallback {
     readonly name: string;
     readonly id: string;
-    readonly index: number;
     args: string;
 }
+/**
+ * Converts a tool call result to the Gemini FunctionResponse format.
+ * Gemini requires response to be an object, not an array or primitive.
+ */
+function toFunctionResponse(content: ToolCallResult): FunctionResponse['response'] {
+    if (content === undefined) {
+        return {};
+    }
+    if (Array.isArray(content)) {
+        return { result: content };
+    }
+    if (typeof content === 'object') {
+        return content as FunctionResponse['response'];
+    }
+    return { result: content };
+}
+
 const convertMessageToPart = (message: LanguageModelMessage): Part[] | undefined => {
     if (LanguageModelMessage.isTextMessage(message) && message.text.length > 0) {
         return [{ text: message.text }];
@@ -43,13 +71,17 @@ const convertMessageToPart = (message: LanguageModelMessage): Part[] | undefined
         return [{
             functionCall: {
                 id: message.id, name: message.name, args: message.input as Record<string, unknown>
-            }
+            },
+            thoughtSignature: message.data?.thoughtSignature,
         }];
     } else if (LanguageModelMessage.isToolResultMessage(message)) {
-        return [{ functionResponse: { id: message.tool_use_id, name: message.name, response: { output: message.content } } }];
-
+        return [{ functionResponse: { name: message.name, response: toFunctionResponse(message.content) } }];
+    } else if (LanguageModelMessage.isServerToolUseMessage(message)) {
+        // Gemini grounding / url-context is informational and re-derived by the provider on each turn,
+        // so server tool invocations are not replayed into the conversation history.
+        return undefined;
     } else if (LanguageModelMessage.isThinkingMessage(message)) {
-        return [{ thought: true }, { text: message.thinking }];
+        return [{ thought: true, text: message.thinking }];
     } else if (LanguageModelMessage.isImageMessage(message) && ImageContent.isBase64(message.image)) {
         return [{ inlineData: { data: message.image.base64data, mimeType: message.image.mimeType } }];
     }
@@ -115,20 +147,32 @@ function toGoogleRole(message: LanguageModelMessage): 'user' | 'model' {
 }
 
 /**
- * Implements the Gemini language model integration for Theia
+ * Implements the Gemini language model integration for Theia. Reasoning-level
+ * translation lives in {@link googleReasoningFor}.
  */
 export class GoogleModel implements LanguageModel {
+
+    /** Provider identifier, used to key per-provider settings (e.g. server tool selections) and the capabilities UI. */
+    readonly vendor = 'google';
 
     constructor(
         public readonly id: string,
         public model: string,
+        public status: LanguageModelStatus,
         public enableStreaming: boolean,
         public apiKey: () => string | undefined,
-        protected readonly tokenUsageService?: TokenUsageService
+        public retrySettings: () => GoogleLanguageModelRetrySettings,
+        public reasoningSupport?: ReasoningSupport,
+        public reasoningApi?: ReasoningApi,
+        public maxInputTokens?: number,
+        public serverTools?: ServerToolDescriptor[]
     ) { }
 
     protected getSettings(request: LanguageModelRequest): Readonly<Record<string, unknown>> {
-        return request.settings ?? {};
+        return {
+            ...request.settings,
+            ...googleReasoningFor(request.reasoning?.level, this.reasoningApi)
+        };
     }
 
     async request(request: UserRequest, cancellationToken?: CancellationToken): Promise<LanguageModelResponse> {
@@ -157,121 +201,183 @@ export class GoogleModel implements LanguageModel {
         const settings = this.getSettings(request);
         const { contents: parts, systemMessage } = transformToGeminiMessages(request.messages);
         const functionDeclarations = this.createFunctionDeclarations(request);
+        const tools = this.createTools(request, functionDeclarations);
 
-        const stream = await genAI.models.generateContentStream({
-            model: this.model,
-            config: {
-                systemInstruction: systemMessage,
-                toolConfig: {
-                    functionCallingConfig: {
-                        mode: FunctionCallingConfigMode.AUTO,
-                    }
+        const toolConfig: ToolConfig = {};
+
+        if (functionDeclarations.length > 0) {
+            toolConfig.functionCallingConfig = {
+                mode: FunctionCallingConfigMode.AUTO,
+            };
+        }
+        // Required by Gemini when combining server tools (urlContext / googleSearch) with function
+        // declarations; without it the API rejects the request with INVALID_ARGUMENT.
+        if ((request.serverTools?.length ?? 0) > 0) {
+            toolConfig.includeServerSideToolInvocations = true;
+        }
+
+        // Wrap the API call in the retry mechanism
+        const stream = await this.withRetry(async () =>
+            genAI.models.generateContentStream({
+                model: this.model,
+                config: {
+                    systemInstruction: systemMessage,
+                    toolConfig,
+                    responseModalities: [Modality.TEXT],
+                    ...(tools.length > 0 && { tools }),
+                    temperature: 1,
+                    ...settings
                 },
-                responseModalities: [Modality.TEXT],
-                tools: [{
-                    functionDeclarations
-                }],
-                temperature: 1,
-                ...settings
-            },
-            contents: [...parts, ...(toolMessages ?? [])]
-        });
+                contents: [...parts, ...(toolMessages ?? [])]
+            }));
 
         const that = this;
 
         const asyncIterator = {
             async *[Symbol.asyncIterator](): AsyncIterator<LanguageModelStreamResponsePart> {
                 const toolCallMap: { [key: string]: ToolCallback } = {};
-                let currentContent: Content | undefined = undefined;
+                const collectedParts: Part[] = [];
+                // Server tool (url_context / google_search) metadata is reported on the candidate, usually in the final chunk.
+                let latestUrlContextMetadata: UrlContextMetadata | undefined;
+                let latestGroundingMetadata: GroundingMetadata | undefined;
                 try {
                     for await (const chunk of stream) {
                         if (cancellationToken?.isCancellationRequested) {
                             break;
                         }
-                        if (chunk.candidates?.[0].finishReason) {
-                            currentContent = chunk.candidates?.[0].content;
+                        const candidate = chunk.candidates?.[0];
+                        if (candidate?.urlContextMetadata) {
+                            latestUrlContextMetadata = candidate.urlContextMetadata;
                         }
-                        // Handle text content
-                        if (chunk.text) {
+                        if (candidate?.groundingMetadata) {
+                            latestGroundingMetadata = candidate.groundingMetadata;
+                        }
+                        const finishReason = candidate?.finishReason;
+                        if (finishReason) {
+                            switch (finishReason) {
+                                // 'STOP' is the only valid (non-error) finishReason
+                                // "Natural stop point of the model or provided stop sequence."
+                                case 'STOP':
+                                    break;
+                                // MALFORMED_FUNCTION_CALL: The model produced a malformed function call.
+                                // Log warning but continue - there might still be usable text content.
+                                case 'MALFORMED_FUNCTION_CALL':
+                                    console.warn('Gemini returned MALFORMED_FUNCTION_CALL finish reason.', {
+                                        finishReason,
+                                        candidate: chunk.candidates?.[0],
+                                        content: chunk.candidates?.[0]?.content,
+                                        parts: chunk.candidates?.[0]?.content?.parts,
+                                        text: chunk.text,
+                                        usageMetadata: chunk.usageMetadata
+                                    });
+                                    break;
+                                // All other reasons are error-cases. Throw an Error.
+                                // e.g. SAFETY, MAX_TOKENS, RECITATION, LANGUAGE, ...
+                                // https://ai.google.dev/api/generate-content#FinishReason
+                                default:
+                                    console.error('Gemini streaming ended with unexpected finish reason:', {
+                                        finishReason,
+                                        candidate: chunk.candidates?.[0],
+                                        content: chunk.candidates?.[0]?.content,
+                                        parts: chunk.candidates?.[0]?.content?.parts,
+                                        safetyRatings: chunk.candidates?.[0]?.safetyRatings,
+                                        text: chunk.text,
+                                        usageMetadata: chunk.usageMetadata
+                                    });
+                                    throw new Error(`Unexpected finish reason: ${finishReason}`);
+                            }
+                        }
+                        // Handle thinking, text content, and function calls from parts
+                        if (chunk.candidates?.[0]?.content?.parts) {
+                            for (const part of chunk.candidates[0].content.parts) {
+                                collectedParts.push(part);
+                                if (part.text) {
+                                    if (part.thought) {
+                                        yield { thought: part.text, signature: part.thoughtSignature ?? '' };
+                                    } else {
+                                        yield { content: part.text };
+                                    }
+                                } else if (part.functionCall) {
+                                    const functionCall = part.functionCall;
+                                    // Gemini does not always provide a function call ID (unlike Anthropic/OpenAI).
+                                    // We need a stable ID to track calls in toolCallMap and correlate results.
+                                    const callId = functionCall.id ?? UUID.uuid4().replace(/-/g, '');
+                                    let toolCall = toolCallMap[callId];
+                                    if (toolCall === undefined) {
+                                        toolCall = {
+                                            name: functionCall.name ?? '',
+                                            args: functionCall.args ? JSON.stringify(functionCall.args) : '{}',
+                                            id: callId,
+                                        };
+                                        toolCallMap[callId] = toolCall;
+
+                                        yield {
+                                            tool_calls: [{
+                                                finished: false,
+                                                id: toolCall.id,
+                                                function: {
+                                                    name: toolCall.name,
+                                                    arguments: toolCall.args
+                                                },
+                                                data: part.thoughtSignature ? { thoughtSignature: part.thoughtSignature } : undefined
+                                            }]
+                                        };
+                                    } else {
+                                        // Update to existing tool call
+                                        toolCall.args = functionCall.args ? JSON.stringify(functionCall.args) : '{}';
+                                        yield {
+                                            tool_calls: [{
+                                                function: {
+                                                    arguments: toolCall.args
+                                                },
+                                                data: part.thoughtSignature ? { thoughtSignature: part.thoughtSignature } : undefined
+                                            }]
+                                        };
+                                    }
+                                }
+                            }
+                        } else if (chunk.text) {
                             yield { content: chunk.text };
                         }
 
-                        // Handle function calls from Gemini
-                        if (chunk.functionCalls && chunk.functionCalls.length > 0) {
-                            let functionIndex = 0;
-                            for (const functionCall of chunk.functionCalls) {
-                                const callId = functionCall.id ?? crypto.randomUUID().replace(/-/g, '');
-                                let toolCall = toolCallMap[callId];
-                                if (toolCall === undefined) {
-                                    toolCall = {
-                                        name: functionCall.name ?? '',
-                                        args: functionCall.args ? JSON.stringify(functionCall.args) : '{}',
-                                        id: callId,
-                                        index: functionIndex++
-                                    };
-                                    toolCallMap[callId] = toolCall;
-
-                                    yield {
-                                        tool_calls: [{
-                                            finished: false,
-                                            id: toolCall.id,
-                                            function: {
-                                                name: toolCall.name,
-                                                arguments: toolCall.args
-                                            }
-                                        }]
-                                    };
-                                } else {
-                                    // Update to existing tool call
-                                    toolCall.args = functionCall.args ? JSON.stringify(functionCall.args) : '{}';
-                                    yield {
-                                        tool_calls: [{
-                                            function: {
-                                                arguments: toolCall.args
-                                            }
-                                        }]
-                                    };
-                                }
-                            }
-                        }
-
                         // Report token usage if available
-                        if (chunk.usageMetadata && that.tokenUsageService && that.id) {
+                        if (chunk.usageMetadata) {
                             const promptTokens = chunk.usageMetadata.promptTokenCount;
                             const completionTokens = chunk.usageMetadata.candidatesTokenCount;
-                            if (promptTokens && completionTokens) {
-                                that.tokenUsageService.recordTokenUsage(that.id, {
-                                    inputTokens: promptTokens,
-                                    outputTokens: completionTokens,
-                                    requestId: request.requestId
-                                }).catch(error => console.error('Error recording token usage:', error));
+                            if (promptTokens !== undefined && completionTokens !== undefined) {
+                                yield { input_tokens: promptTokens, output_tokens: completionTokens };
                             }
                         }
                     }
 
-                    // Mark tool call as finished if it exists
-                    const toolCalls = Object.values(toolCallMap);
-                    for (const toolCall of toolCalls) {
-                        yield { tool_calls: [{ finished: true, id: toolCall.id }] };
+                    // Surface any server tools (url_context / google_search) that the provider executed.
+                    const serverToolCalls = that.buildServerToolCalls(latestUrlContextMetadata, latestGroundingMetadata);
+                    if (serverToolCalls.length > 0) {
+                        yield { server_tool_calls: serverToolCalls };
                     }
 
                     // Process tool calls if any exist
+                    const toolCalls = Object.values(toolCallMap);
                     if (toolCalls.length > 0) {
                         // Collect tool results
                         const toolResult = await Promise.all(toolCalls.map(async tc => {
                             const tool = request.tools?.find(t => t.name === tc.name);
                             let result;
-                            try {
-                                result = await tool?.handler(tc.args);
-                            } catch (e) {
-                                console.error(`Error executing tool ${tc.name}:`, e);
-                                result = { error: e.message || 'Tool execution failed' };
+                            if (!tool) {
+                                result = createToolCallError(`Tool '${tc.name}' not found in the available tools for this request.`, 'tool-not-available');
+                            } else {
+                                try {
+                                    result = await tool.handler(tc.args, ToolInvocationContext.create(tc.id));
+                                } catch (e) {
+                                    console.error(`Error executing tool ${tc.name}:`, e);
+                                    result = createToolCallError(e.message || 'Tool execution failed');
+                                }
                             }
                             return {
                                 name: tc.name,
                                 result: result,
                                 id: tc.id,
-                                arguments: tc.args
+                                arguments: tc.args,
                             };
                         }));
 
@@ -280,25 +386,27 @@ export class GoogleModel implements LanguageModel {
                             finished: true,
                             id: tr.id,
                             result: tr.result,
-                            function: { name: tr.name, arguments: tr.arguments }
+                            function: { name: tr.name, arguments: tr.arguments },
                         }));
                         yield { tool_calls: calls };
 
                         // Format tool responses for Gemini
+                        // According to Gemini docs, functionResponse needs name and response
                         const toolResponses: Part[] = toolResult.map(call => ({
                             functionResponse: {
-                                id: call.id,
                                 name: call.name,
-                                response: that.formatToolCallResult(call.result)
+                                response: toFunctionResponse(call.result)
                             }
                         }));
                         const responseMessage: Content = { role: 'user', parts: toolResponses };
 
-                        const messages = [...(toolMessages ?? [])];
-                        if (currentContent) {
-                            messages.push(currentContent);
-                        }
-                        messages.push(responseMessage);
+                        // Build the model's response content from collected parts
+                        // Exclude thinking parts as they should not be included in the conversation history sent back to the model
+                        const modelResponseParts = collectedParts.filter(p => !p.thought);
+                        const modelContent: Content = { role: 'model', parts: modelResponseParts };
+
+                        const messages = [...(toolMessages ?? []), modelContent, responseMessage];
+
                         // Continue the conversation with tool results
                         const continuedResponse = await that.handleStreamingRequest(
                             genAI,
@@ -322,13 +430,6 @@ export class GoogleModel implements LanguageModel {
         return { stream: asyncIterator };
     }
 
-    protected formatToolCallResult(result: ToolCallResult): FunctionResponse['response'] {
-        // If "output" and "error" keys are not specified, then whole "response" is treated as function output.
-        // There is no particular support for different types of output such as images so we use the structure provided by the tool call.
-        // Using the format that is used for image messages does not seem to yield any different results.
-        return { output: result };
-    }
-
     private createFunctionDeclarations(request: LanguageModelRequest): FunctionDeclaration[] {
         if (!request.tools || request.tools.length === 0) {
             return [];
@@ -341,6 +442,69 @@ export class GoogleModel implements LanguageModel {
         }));
     }
 
+    /**
+     * Builds the Gemini `tools` array, combining client function declarations with the enabled native server tools.
+     *
+     * Note: combining native tools (`googleSearch` / `urlContext`) with `functionDeclarations` in a single
+     * request requires a Gemini 2.0+ model. Older models (e.g. Gemini 1.5) reject the combination with a 400
+     * error. Since adopters configure both the model and which server tools to offer, this is left to the
+     * provider rather than silently dropping either set of tools.
+     */
+    protected createTools(request: LanguageModelRequest, functionDeclarations: FunctionDeclaration[]): Tool[] {
+        const tools: Tool[] = [];
+        if (functionDeclarations.length > 0) {
+            tools.push({ functionDeclarations });
+        }
+        const serverTools = request.serverTools ?? [];
+        if (serverTools.includes(GOOGLE_URL_CONTEXT)) {
+            tools.push({ urlContext: {} });
+        }
+        if (serverTools.includes(GOOGLE_GOOGLE_SEARCH)) {
+            tools.push({ googleSearch: {} });
+        }
+        return tools;
+    }
+
+    /**
+     * Summarizes the provider-executed server tools (url_context / google_search) into finished
+     * {@link ServerToolCall}s for display. Gemini does not provide tool ids, so a fresh id is generated;
+     * these calls are informational and are not replayed into the conversation history.
+     */
+    protected buildServerToolCalls(urlContextMetadata?: UrlContextMetadata, groundingMetadata?: GroundingMetadata): ServerToolCall[] {
+        const calls: ServerToolCall[] = [];
+        const urlMetadata = urlContextMetadata?.urlMetadata?.filter(entry => entry.retrievedUrl);
+        if (urlMetadata && urlMetadata.length > 0) {
+            const summary = urlMetadata.map(entry => `${entry.retrievedUrl} (${entry.urlRetrievalStatus ?? 'unknown'})`).join('\n');
+            calls.push({
+                id: UUID.uuid4().replace(/-/g, ''),
+                name: GOOGLE_URL_CONTEXT,
+                arguments: JSON.stringify({ urls: urlMetadata.map(entry => entry.retrievedUrl) }),
+                finished: true,
+                result: { content: [{ type: 'text', text: summary }] }
+            });
+        }
+        const webSearchQueries = groundingMetadata?.webSearchQueries;
+        if (webSearchQueries && webSearchQueries.length > 0) {
+            const sources = (groundingMetadata?.groundingChunks ?? [])
+                .map(chunk => chunk.web)
+                .filter((web): web is NonNullable<typeof web> => !!web)
+                .map(web => web.uri ? `${web.title ?? web.uri} (${web.uri})` : `${web.title ?? ''}`)
+                .filter(entry => entry.length > 0);
+            const summaryParts = [`Queries: ${webSearchQueries.join(', ')}`];
+            if (sources.length > 0) {
+                summaryParts.push(`Sources:\n${sources.join('\n')}`);
+            }
+            calls.push({
+                id: UUID.uuid4().replace(/-/g, ''),
+                name: GOOGLE_GOOGLE_SEARCH,
+                arguments: JSON.stringify({ queries: webSearchQueries }),
+                finished: true,
+                result: { content: [{ type: 'text', text: summaryParts.join('\n\n') }] }
+            });
+        }
+        return calls;
+    }
+
     protected async handleNonStreamingRequest(
         genAI: GoogleGenAI,
         request: UserRequest
@@ -349,7 +513,8 @@ export class GoogleModel implements LanguageModel {
         const { contents: parts, systemMessage } = transformToGeminiMessages(request.messages);
         const functionDeclarations = this.createFunctionDeclarations(request);
 
-        const model = await genAI.models.generateContent({
+        // Wrap the API call in the retry mechanism
+        const model = await this.withRetry(async () => genAI.models.generateContent({
             model: this.model,
             config: {
                 systemInstruction: systemMessage,
@@ -358,29 +523,36 @@ export class GoogleModel implements LanguageModel {
                         mode: FunctionCallingConfigMode.AUTO,
                     }
                 },
-                tools: [{ functionDeclarations }],
+                ...(functionDeclarations.length > 0 && {
+                    tools: [{ functionDeclarations }]
+                }),
                 ...settings
             },
             contents: parts
-        });
+        }));
 
         try {
-            const responseText = model.text;
-
-            // Record token usage if available
-            if (model.usageMetadata && this.tokenUsageService) {
-                const promptTokens = model.usageMetadata.promptTokenCount;
-                const completionTokens = model.usageMetadata.candidatesTokenCount;
-                if (promptTokens && completionTokens) {
-                    await this.tokenUsageService.recordTokenUsage(this.id, {
-                        inputTokens: promptTokens,
-                        outputTokens: completionTokens,
-                        requestId: request.requestId
-                    });
+            let responseText = '';
+            // For non streaming requests we are always only interested in text parts
+            if (model.candidates?.[0]?.content?.parts) {
+                for (const part of model.candidates[0].content.parts) {
+                    if (part.text) {
+                        responseText += part.text;
+                    }
                 }
+            } else {
+                responseText = model.text ?? '';
             }
 
-            return { text: responseText ?? '' };
+            const result: LanguageModelTextResponse = { text: responseText };
+            if (model.usageMetadata) {
+                const promptTokens = model.usageMetadata.promptTokenCount;
+                const completionTokens = model.usageMetadata.candidatesTokenCount;
+                if (promptTokens !== undefined && completionTokens !== undefined) {
+                    result.usage = { input_tokens: promptTokens, output_tokens: completionTokens };
+                }
+            }
+            return result;
         } catch (error) {
             throw new Error(`Failed to get response from Gemini API: ${error instanceof Error ? error.message : 'Unknown error'}`);
         }
@@ -394,5 +566,49 @@ export class GoogleModel implements LanguageModel {
 
         // TODO test vertexai
         return new GoogleGenAI({ apiKey, vertexai: false });
+    }
+
+    /**
+     * Implements a retry mechanism for the handle(non)Streaming request functions.
+     * @param fn the wrapped function to which the retry logic should be applied.
+     * @param retrySettings the configuration settings for the retry mechanism.
+     * @returns the result of the wrapped function.
+     */
+    private async withRetry<T>(fn: () => Promise<T>): Promise<T> {
+        const { maxRetriesOnErrors, retryDelayOnRateLimitError, retryDelayOnOtherErrors } = this.retrySettings();
+
+        for (let i = 0; i <= maxRetriesOnErrors; i++) {
+            try {
+                return await fn();
+            } catch (error) {
+                if (i === maxRetriesOnErrors) {
+                    // no retries left - throw the original error
+                    throw error;
+                }
+
+                const message = (error as Error).message;
+                // Check for rate limit exhaustion (usually, there is a rate limit per minute, so we can retry after a delay...)
+                if (message && message.includes('429 Too Many Requests')) {
+                    if (retryDelayOnRateLimitError < 0) {
+                        // rate limit error should not retried because of the setting
+                        throw error;
+                    }
+
+                    const delayMs = retryDelayOnRateLimitError * 1000;
+                    console.warn(`Received 429 (Too Many Requests). Retrying in ${retryDelayOnRateLimitError}s. Attempt ${i + 1} of ${maxRetriesOnErrors}.`);
+                    await wait(delayMs);
+                } else if (retryDelayOnOtherErrors < 0) {
+                    // Other errors should not retried because of the setting
+                    throw error;
+                } else {
+                    const delayMs = retryDelayOnOtherErrors * 1000;
+                    console.warn(`Request failed: ${message}. Retrying in ${retryDelayOnOtherErrors}s. Attempt ${i + 1} of ${maxRetriesOnErrors}.`);
+                    await wait(delayMs);
+                }
+                // -> reiterate the loop for the next attempt
+            }
+        }
+        // This should not be reached
+        throw new Error('Retry mechanism failed unexpectedly.');
     }
 }

@@ -21,14 +21,11 @@ import {
     CompositeTreeNode,
     TopDownTreeIterator,
     TreeNode,
-    PreferenceSchemaProvider,
-    PreferenceDataProperty,
     NodeProps,
     ExpandableTreeNode,
     SelectableTreeNode,
-    PreferenceService,
 } from '@theia/core/lib/browser';
-import { Emitter } from '@theia/core';
+import { Emitter, PreferenceDataProperty, PreferenceSchemaService, PreferenceService } from '@theia/core';
 import { PreferencesSearchbarWidget } from './views/preference-searchbar-widget';
 import { PreferenceTreeGenerator } from './util/preference-tree-generator';
 import * as fuzzy from '@theia/core/shared/fuzzy';
@@ -57,7 +54,7 @@ export interface PreferenceFilterChangeEvent {
 @injectable()
 export class PreferenceTreeModel extends TreeModelImpl {
 
-    @inject(PreferenceSchemaProvider) protected readonly schemaProvider: PreferenceSchemaProvider;
+    @inject(PreferenceSchemaService) protected readonly schemaProvider: PreferenceSchemaService;
     @inject(PreferencesSearchbarWidget) protected readonly filterInput: PreferencesSearchbarWidget;
     @inject(PreferenceTreeGenerator) protected readonly treeGenerator: PreferenceTreeGenerator;
     @inject(PreferencesScopeTabBar) protected readonly scopeTracker: PreferencesScopeTabBar;
@@ -73,6 +70,7 @@ export class PreferenceTreeModel extends TreeModelImpl {
     protected _isFiltered: boolean = false;
     protected _currentRows: Map<string, PreferenceTreeNodeRow> = new Map();
     protected _totalVisibleLeaves = 0;
+    private _suppressSelection = false;
 
     get currentRows(): Readonly<Map<string, PreferenceTreeNodeRow>> {
         return this._currentRows;
@@ -86,8 +84,8 @@ export class PreferenceTreeModel extends TreeModelImpl {
         return this._isFiltered;
     }
 
-    get propertyList(): { [key: string]: PreferenceDataProperty; } {
-        return this.schemaProvider.getCombinedSchema().properties;
+    get propertyList(): ReadonlyMap<string, PreferenceDataProperty> {
+        return this.schemaProvider.getSchemaProperties();
     }
 
     get currentScope(): Preference.SelectedScopeDetails {
@@ -120,7 +118,9 @@ export class PreferenceTreeModel extends TreeModelImpl {
                 if (this.isFiltered) {
                     this.expandAll();
                 } else if (CompositeTreeNode.is(this.root)) {
-                    this.collapseAll(this.root);
+                    const root = this.root;
+                    // Avoid intermediate selection events while collapsing.
+                    this.withSuppressedSelection(() => this.collapseAll(root));
                 }
                 this.updateFilteredRows(PreferenceFilterChangeSource.Search);
             }),
@@ -176,6 +176,10 @@ export class PreferenceTreeModel extends TreeModelImpl {
 
     protected passesCurrentFilters(node: Preference.LeafNode, prefID: string): boolean {
         if (!this.schemaProvider.isValidInScope(prefID, this._currentScope)) {
+            return false;
+        }
+        // Hidden preferences (e.g. AI preferences moved to the AI Configuration view) must not surface in search.
+        if (node.preference.data.hidden) {
             return false;
         }
         if (!this._isFiltered) {
@@ -241,6 +245,21 @@ export class PreferenceTreeModel extends TreeModelImpl {
         }
     }
 
+    override selectNode(node: Readonly<SelectableTreeNode>): void {
+        if (!this._suppressSelection) {
+            super.selectNode(node);
+        }
+    }
+
+    protected withSuppressedSelection(fn: () => void): void {
+        this._suppressSelection = true;
+        try {
+            fn();
+        } finally {
+            this._suppressSelection = false;
+        }
+    }
+
     getNodeFromPreferenceId(id: string): Preference.TreeNode | undefined {
         const node = this.getNode(this.treeGenerator.getNodeId(id));
         return node && Preference.TreeNode.is(node) ? node : undefined;
@@ -251,7 +270,8 @@ export class PreferenceTreeModel extends TreeModelImpl {
      */
     selectIfNotSelected(node: SelectableTreeNode): boolean {
         const currentlySelected = this.selectedNodes[0];
-        if (node !== currentlySelected) {
+        if (!node.selected || node !== currentlySelected) {
+            node.selected = true;
             this.selectNode(node);
             return true;
         }

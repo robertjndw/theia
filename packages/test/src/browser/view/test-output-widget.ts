@@ -19,7 +19,7 @@ import { FitAddon } from 'xterm-addon-fit';
 import { BaseWidget, Message, Widget, codicon, isFirefox } from '@theia/core/lib/browser';
 import { inject, injectable, postConstruct } from '@theia/core/shared/inversify';
 import { Disposable, DisposableCollection } from '@theia/core';
-import { TerminalPreferences } from '@theia/terminal/lib/browser/terminal-preferences';
+import { TerminalPreferences } from '@theia/terminal/lib/common/terminal-preferences';
 import { TerminalThemeService } from '@theia/terminal/lib/browser/terminal-theme-service';
 import { TestOutputSource, TestOutputUIModel } from './test-output-ui-model';
 import debounce = require('p-debounce');
@@ -78,7 +78,11 @@ export class TestOutputWidget extends BaseWidget {
         this.disposeOnSetInput = new DisposableCollection();
         this.term.clear();
         if (selectedOutputSource) {
-            selectedOutputSource.output.forEach(item => this.term.writeln(item.output));
+            if (selectedOutputSource.output.length === 0 && selectedOutputSource.noOutputMessage) {
+                this.term.writeln(selectedOutputSource.noOutputMessage);
+            } else {
+                selectedOutputSource.output.forEach(item => this.term.writeln(item.output));
+            }
             this.disposeOnSetInput.push(selectedOutputSource.onDidAddTestOutput(items => {
                 items.forEach(item => this.term.writeln(item.output));
             }));
