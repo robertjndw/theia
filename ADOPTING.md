@@ -13,7 +13,7 @@ When it comes to extension support, there are some restrictions to consider:
 There are two ways to retrieve extensions:
 1. VSIX packages: Copy the `.vsix` files to the directory specified in the `package.json` file by the `theiaPluginsDir` property (e.g. `"theiaPluginsDir": "../../plugins"`).
 2. Open VSX Link: Specify a list of `id:link` mappings in the `package.json` file by the `theiaPlugins` property (e.g. `"theiaPlugins": { "vscodevim.vim": "https://open-vsx.org/api/vscodevim/vim/1.29.0/file/vscodevim.vim-1.29.0.vsix" }`). Extensions can be found on the [Open VSX Registry](https://open-vsx.org/) by searching for the extension and copying the link linked to the Download button.
-When using the Theia CLI command `theia download:plugins`, the Theia CLI will download the `.vsix` files from the specified links and install them in the directory specified by the `theiaPluginsDir` property.
+   When using the Theia CLI command `theia download:plugins`, the Theia CLI will download the `.vsix` files from the specified links and install them in the directory specified by the `theiaPluginsDir` property.
 
 #### Building
 
@@ -41,3 +41,11 @@ export default new ContainerModule(bind => {
 ```
 
 The extension files themselves still have to be reachable under `hostedPlugin/<pluginId>/`, and the paths inside the metadata (`entryPoint`, `iconUrl`, `readmeUrl`, `licenseUrl`) have to match that layout.
+
+#### What extensions can expect at runtime
+
+- Extensions that only contribute to the backend are skipped at build time; the build summary lists them.
+- `ExtensionContext.globalState` and `ExtensionContext.workspaceState` are kept in the browser storage of the current host, i.e. per browser and per deployment, and the workspace state is kept per workspace. They are subject to the browser's storage quota.
+- `ExtensionContext.storageUri`, `globalStorageUri` and `logUri` point into the browser-local file system, below the same config directory the application itself uses. `storageUri` is `undefined` while no workspace is open, as it is with a backend.
+- Installing, uninstalling, enabling and disabling extensions fails with an explanatory error, and the Extensions view lists no installed, uninstalled or disabled extensions. Change the set of extensions by rebuilding the application.
+- There are no terminals, because there is no backend to run a shell in. Opening one fails with an explanatory error.

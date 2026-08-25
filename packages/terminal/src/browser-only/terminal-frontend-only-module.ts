@@ -15,10 +15,10 @@
 // *****************************************************************************
 
 import { ContainerModule } from '@theia/core/shared/inversify';
-import { TerminalFrontendOnlyContribution } from './terminal-frontend-only-contribution';
+import { BrowserOnlyTerminalService } from './browser-only-terminal-service';
 import { TerminalService } from '../browser/base/terminal-service';
 
 export default new ContainerModule((bind, unbind, isBound, rebind) => {
-    bind(TerminalFrontendOnlyContribution).toSelf().inSingletonScope();
-    rebind(TerminalService).toService(TerminalFrontendOnlyContribution);
+    bind(BrowserOnlyTerminalService).toSelf().inSingletonScope();
+    rebind(TerminalService).toService(BrowserOnlyTerminalService);
 });

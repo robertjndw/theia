@@ -16,22 +16,19 @@
 
 import { injectable } from '@theia/core/shared/inversify';
 import { TerminalService } from '../browser/base/terminal-service';
-import { Event, Emitter } from '@theia/core';
+import { Event } from '@theia/core';
 import { WidgetOpenerOptions } from '@theia/core/lib/browser';
 import { TerminalWidgetOptions, TerminalWidget } from '../browser/base/terminal-widget';
 
+/**
+ * A browser-only application has no backend to run a shell in, so it cannot open terminals.
+ * The remaining queries report an empty result rather than failing, so that callers such as
+ * the plugin host, which asks for the default shell on start up, keep working.
+ */
 @injectable()
-export class TerminalFrontendOnlyContribution implements TerminalService {
-    protected readonly onDidCreateTerminalEmitter = new Emitter<TerminalWidget>();
-    protected readonly onDidChangeCurrentTerminalEmitter = new Emitter<TerminalWidget | undefined>();
-
-    get onDidCreateTerminal(): Event<TerminalWidget> {
-        return this.onDidCreateTerminalEmitter.event;
-    }
-
-    get onDidChangeCurrentTerminal(): Event<TerminalWidget | undefined> {
-        return this.onDidChangeCurrentTerminalEmitter.event;
-    }
+export class BrowserOnlyTerminalService implements TerminalService {
+    readonly onDidCreateTerminal: Event<TerminalWidget> = Event.None;
+    readonly onDidChangeCurrentTerminal: Event<TerminalWidget | undefined> = Event.None;
 
     get currentTerminal(): TerminalWidget | undefined {
         return undefined;
@@ -42,7 +39,7 @@ export class TerminalFrontendOnlyContribution implements TerminalService {
     }
 
     async newTerminal(options: TerminalWidgetOptions): Promise<TerminalWidget> {
-        throw new Error('Method not implemented.');
+        throw new Error('Terminals are not supported in a browser-only application.');
     }
 
     async open(terminal: TerminalWidget, options?: WidgetOpenerOptions): Promise<void> { }

@@ -62,15 +62,21 @@ export class FrontendHostedPluginServer implements HostedPluginServer, RpcConnec
 
     protected async fetchDeployedPlugins(): Promise<DeployedPlugin[]> {
         const url = `./${PLUGINS_BASE_PATH}/${LIST_JSON}`;
-        const response = await fetch(url);
-        if (!response.ok) {
-            throw new Error(`Failed to load the deployed plugins from '${url}': ${response.status} ${response.statusText}`);
+        try {
+            const response = await fetch(url);
+            if (!response.ok) {
+                throw new Error(`${response.status} ${response.statusText}`);
+            }
+            const plugins = await response.json();
+            if (!Array.isArray(plugins)) {
+                throw new Error(`expected an array but got ${typeof plugins}`);
+            }
+            return plugins;
+        } catch (error) {
+            // drop the cached rejection so that a later load can pick the list up again
+            this.deployedPlugins = undefined;
+            throw new Error(`Failed to load the deployed plugins from '${url}': ${error.message}`);
         }
-        const plugins = await response.json();
-        if (!Array.isArray(plugins)) {
-            throw new Error(`Failed to load the deployed plugins from '${url}': expected an array but got ${typeof plugins}.`);
-        }
-        return plugins;
     }
 
     async getDeployedPluginIds(): Promise<PluginIdentifiers.VersionedId[]> {
@@ -93,7 +99,8 @@ export class FrontendHostedPluginServer implements HostedPluginServer, RpcConnec
 
     async getDeployedPlugins(ids: PluginIdentifiers.VersionedId[]): Promise<DeployedPlugin[]> {
         const plugins = await this.getPlugins();
-        return plugins.filter(p => ids.includes(PluginIdentifiers.componentsToVersionedId(p.metadata.model)));
+        const requested = new Set(ids);
+        return plugins.filter(p => requested.has(PluginIdentifiers.componentsToVersionedId(p.metadata.model)));
     }
 
     async getExtPluginAPI(): Promise<ExtPluginApi[]> {
