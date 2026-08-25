@@ -52,12 +52,12 @@ export class FrontendHostedPluginServer implements HostedPluginServer, RpcConnec
      * otherwise from the list written by the build.
      */
     protected getPlugins(): Promise<DeployedPlugin[]> {
-        if (!this.deployedPlugins) {
-            this.deployedPlugins = this.options
-                ? Promise.resolve(this.options.pluginMetadata)
-                : this.fetchDeployedPlugins();
-        }
-        return this.deployedPlugins;
+        return this.deployedPlugins ??= (this.options ? Promise.resolve(this.options.pluginMetadata) : this.fetchDeployedPlugins())
+            // drop the cached rejection so that a later load can pick the list up again
+            .catch(error => {
+                this.deployedPlugins = undefined;
+                throw error;
+            });
     }
 
     protected async fetchDeployedPlugins(): Promise<DeployedPlugin[]> {
@@ -73,8 +73,6 @@ export class FrontendHostedPluginServer implements HostedPluginServer, RpcConnec
             }
             return plugins;
         } catch (error) {
-            // drop the cached rejection so that a later load can pick the list up again
-            this.deployedPlugins = undefined;
             throw new Error(`Failed to load the deployed plugins from '${url}': ${error.message}`);
         }
     }

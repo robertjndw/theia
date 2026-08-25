@@ -23,10 +23,8 @@ import { EnvVariablesServer } from '@theia/core/lib/common/env-variables';
 import { FileService } from '@theia/filesystem/lib/browser/file-service';
 import { UntitledWorkspaceService } from '@theia/workspace/lib/common';
 import { PluginPathsService } from '../../main/common/plugin-paths-protocol';
-
-/** Directories below the config directory, mirroring the layout the backend `PluginPathsServiceImpl` uses. */
-const PLUGINS_LOGS_DIR = 'logs';
-const PLUGINS_WORKSPACE_STORAGE_DIR = 'workspace-storage';
+import { PluginPaths } from '../../main/common/paths/const';
+import { getWebLocks, requestLock, WarnOnce } from './web-locks';
 
 /**
  * Names of the per-session log folders, e.g. `20181205T093828-3e62e0e7-4934-41d6-8fa5-a38faaad2249`.
@@ -68,6 +66,7 @@ export class FrontendPluginPathService implements PluginPathsService {
     @inject(UntitledWorkspaceService)
     protected readonly untitledWorkspaceService: UntitledWorkspaceService;
 
+    protected configDirUri: Promise<URI> | undefined;
     protected hostLogPath: Promise<string> | undefined;
     protected readonly hostStoragePaths = new Map<string, Promise<string>>();
 
@@ -102,7 +101,7 @@ export class FrontendPluginPathService implements PluginPathsService {
      * application do not write over each other's logs.
      */
     protected async resolveHostLogPath(): Promise<string> {
-        const logsDirUri = (await this.getConfigDirUri()).resolve(PLUGINS_LOGS_DIR);
+        const logsDirUri = (await this.getConfigDirUri()).resolve(PluginPaths.PLUGINS_LOGS_DIR);
         const folderName = this.generateSessionFolderName();
         // awaited: the folder must not exist on disk before the lock is actually held, or another
         // tab's cleanup could list it, query() before the grant, and prune it as if it were dead
@@ -115,8 +114,8 @@ export class FrontendPluginPathService implements PluginPathsService {
 
     protected async resolveHostStoragePath(workspaceUri: string, rootUris: string[]): Promise<string> {
         const configDirUri = await this.getConfigDirUri();
-        const workspaceId = await this.buildWorkspaceId(workspaceUri, rootUris);
-        return this.ensureDirectory(configDirUri.resolve(PLUGINS_WORKSPACE_STORAGE_DIR).resolve(workspaceId));
+        const workspaceId = await this.buildWorkspaceId(configDirUri, workspaceUri, rootUris);
+        return this.ensureDirectory(configDirUri.resolve(PluginPaths.PLUGINS_WORKSPACE_STORAGE_DIR).resolve(workspaceId));
     }
 
     /**
@@ -152,20 +151,18 @@ export class FrontendPluginPathService implements PluginPathsService {
      * another tab while the Web Locks API is unavailable, which this falls back to in that case too.
      */
     protected async markSessionAlive(folderName: string): Promise<void> {
-        const locks = typeof navigator === 'object' ? navigator.locks : undefined;
+        const locks = getWebLocks();
         if (!locks) {
             return;
         }
         const granted = new Deferred<void>();
         // resolves `granted` from inside the callback, i.e. only once the lock is actually held, and
-        // then never settles itself, so the lock stays held until this document is destroyed;
-        // `LockGrantedCallback` is typed as `(lock: Lock | null) => T`, without accounting for this
-        // never-settling callback, hence the cast
-        const holdUntilTabCloses = (() => {
+        // then never settles itself, so the lock stays held until this document is destroyed
+        const holdUntilTabCloses = (): Promise<void> => {
             granted.resolve();
             return new Promise<void>(() => { /* never settles */ });
-        }) as unknown as LockGrantedCallback<void>;
-        locks.request(`${SESSION_LOCK_PREFIX}${folderName}`, holdUntilTabCloses)
+        };
+        requestLock(locks, `${SESSION_LOCK_PREFIX}${folderName}`, holdUntilTabCloses)
             .catch(error => {
                 this.logger.warn(`Failed to acquire the liveness lock for plugin log folder '${folderName}':`, error);
                 granted.resolve();
@@ -196,7 +193,8 @@ export class FrontendPluginPathService implements PluginPathsService {
         }
         const stillOpen = await this.queryOpenSessions();
         if (!stillOpen) {
-            this.warnAboutMissingLocksOnce();
+            FrontendPluginPathService.missingLocksWarning.warn(this.logger, 'Web Locks API unavailable: cannot tell a still-open tab\'s log folder from a '
+                + 'completed session; pruning old plugin log folders by count alone.');
         }
         await Promise.all(prunable
             .filter(uri => !stillOpen?.has(uri.path.base))
@@ -208,7 +206,7 @@ export class FrontendPluginPathService implements PluginPathsService {
      * `undefined` if the Web Locks API is unavailable, i.e. there is no way to tell.
      */
     protected async queryOpenSessions(): Promise<Set<string> | undefined> {
-        const locks = typeof navigator === 'object' ? navigator.locks : undefined;
+        const locks = getWebLocks();
         if (!locks) {
             return undefined;
         }
@@ -222,17 +220,9 @@ export class FrontendPluginPathService implements PluginPathsService {
         return openSessions;
     }
 
-    protected static warnedAboutMissingLocksForCleanup = false;
-    protected warnAboutMissingLocksOnce(): void {
-        if (!FrontendPluginPathService.warnedAboutMissingLocksForCleanup) {
-            FrontendPluginPathService.warnedAboutMissingLocksForCleanup = true;
-            this.logger.warn('Web Locks API unavailable: cannot tell a still-open tab\'s log folder from a completed '
-                + 'session; pruning old plugin log folders by count alone.');
-        }
-    }
+    protected static readonly missingLocksWarning = new WarnOnce();
 
-    protected async buildWorkspaceId(workspaceUri: string, rootUris: string[]): Promise<string> {
-        const configDirUri = await this.getConfigDirUri();
+    protected async buildWorkspaceId(configDirUri: URI, workspaceUri: string, rootUris: string[]): Promise<string> {
         if (this.untitledWorkspaceService.isUntitledWorkspace(new URI(workspaceUri), configDirUri)) {
             // an untitled workspace is named anew in every session, so key its storage on the roots instead
             return hashValue([...rootUris].sort().join(','));
@@ -241,17 +231,16 @@ export class FrontendPluginPathService implements PluginPathsService {
     }
 
     /**
-     * Creates the given directory if it does not exist yet and returns its path. Plugins receive
-     * the path rather than the URI, e.g. as `ExtensionContext.storagePath`.
+     * Creates the given directory, tolerating it already existing, and returns its path. Plugins
+     * receive the path rather than the URI, e.g. as `ExtensionContext.storagePath`.
      */
     protected async ensureDirectory(uri: URI): Promise<string> {
-        if (!await this.fileService.exists(uri)) {
-            await this.fileService.createFolder(uri, { fromUserGesture: false });
-        }
+        // tolerates the directory already existing, so no exists() check is needed first
+        await this.fileService.createFolder(uri, { fromUserGesture: false });
         return this.fileService.fsPath(uri);
     }
 
-    protected async getConfigDirUri(): Promise<URI> {
-        return new URI(await this.envServer.getConfigDirUri());
+    protected getConfigDirUri(): Promise<URI> {
+        return this.configDirUri ??= this.envServer.getConfigDirUri().then(uri => new URI(uri));
     }
 }

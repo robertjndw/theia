@@ -19,6 +19,7 @@ import { StorageService } from '@theia/core/lib/browser/storage-service';
 import { PluginDeployOptions, PluginIdentifiers, PluginServer, PluginStorageKind, PluginType } from '../../common';
 import { KeysToAnyValues, KeysToKeysToAnyValue } from '../../common/types';
 import { PluginPathsService } from '../../main/common/plugin-paths-protocol';
+import { getWebLocks, requestLock, WarnOnce } from './web-locks';
 
 const GLOBAL_STORAGE_KEY = 'plugin-storage:global';
 const WORKSPACE_STORAGE_KEY_PREFIX = 'plugin-storage:workspace:';
@@ -51,7 +52,7 @@ export class FrontendPluginServer implements PluginServer {
      * against each other either.
      */
     protected static readonly localLocks = new Map<string, Promise<unknown>>();
-    protected static warnedAboutMissingLocks = false;
+    protected static readonly missingLocksWarning = new WarnOnce();
 
     async install(pluginEntry: string, type?: PluginType, options?: PluginDeployOptions): Promise<void> {
         throw new Error('Installing plugins is not supported in a browser-only application.');
@@ -120,19 +121,14 @@ export class FrontendPluginServer implements PluginServer {
      * concurrent {@link setStorageValue} on this or another tab cannot interleave with it.
      */
     protected withStoreLock<T>(storeKey: string, task: () => Promise<T>): Promise<T> {
-        const locks = typeof navigator === 'object' ? navigator.locks : undefined;
+        const locks = getWebLocks();
         if (locks) {
-            // `LockGrantedCallback` is typed as `(lock: Lock | null) => T`, i.e. without accounting for
-            // an async callback, even though the Web Locks API awaits one; hence the cast.
-            return locks.request<T>(`${LOCK_NAME_PREFIX}${storeKey}`, task as unknown as LockGrantedCallback<T>);
+            return requestLock(locks, `${LOCK_NAME_PREFIX}${storeKey}`, task);
         }
         // Web Locks API unavailable, e.g. an insecure context or an older browser: fall back to
         // serializing writes within this JS realm. A concurrent write from a different tab, which
         // does not share this realm, can then still be lost.
-        if (!FrontendPluginServer.warnedAboutMissingLocks) {
-            FrontendPluginServer.warnedAboutMissingLocks = true;
-            this.logger.warn('Web Locks API unavailable: plugin storage updates from different tabs may race.');
-        }
+        FrontendPluginServer.missingLocksWarning.warn(this.logger, 'Web Locks API unavailable: plugin storage updates from different tabs may race.');
         const queue = FrontendPluginServer.localLocks;
         const previous = queue.get(storeKey) ?? Promise.resolve();
         const run = (async () => {
