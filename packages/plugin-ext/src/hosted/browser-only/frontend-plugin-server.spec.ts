@@ -21,6 +21,7 @@ import { Container } from '@theia/core/shared/inversify';
 import { StorageService } from '@theia/core/lib/browser/storage-service';
 import { PluginPathsService } from '../../main/common/plugin-paths-protocol';
 import { FrontendPluginServer } from './frontend-plugin-server';
+import { installFakeLockManager as installNavigatorLocks } from './test/navigator-locks-test-util';
 
 class InMemoryStorageService implements StorageService {
     readonly data = new Map<string, string>();
@@ -59,31 +60,9 @@ class FakeLockManager {
     }
 }
 
-/**
- * Installs a {@link FakeLockManager} as `navigator.locks` and returns a function that restores
- * whatever was there before. Does not assume `navigator` is currently defined at all: depending on
- * what other spec files ran first in this mocha process, `enableJSDOM`'s cleanup
- * (`packages/core/src/browser/test/jsdom.ts`) may have `delete`d the global `navigator` that
- * Node normally provides.
- */
+/** Installs a {@link FakeLockManager} as `navigator.locks`; see {@link installNavigatorLocks}. */
 function installFakeLockManager(): () => void {
-    const target = globalThis as { navigator?: { locks?: unknown } };
-    const hadNavigator = typeof navigator !== 'undefined';
-    if (!hadNavigator) {
-        Object.defineProperty(target, 'navigator', { value: {}, configurable: true });
-    }
-    const originalLocks = Object.getOwnPropertyDescriptor(navigator, 'locks');
-    Object.defineProperty(navigator, 'locks', { value: new FakeLockManager(), configurable: true });
-
-    return () => {
-        if (!hadNavigator) {
-            delete target.navigator;
-        } else if (originalLocks) {
-            Object.defineProperty(navigator, 'locks', originalLocks);
-        } else {
-            delete (navigator as { locks?: unknown }).locks;
-        }
-    };
+    return installNavigatorLocks(new FakeLockManager());
 }
 
 describe('FrontendPluginServer', () => {

@@ -29,6 +29,7 @@ import { EnvVariablesServer } from '@theia/core/lib/common/env-variables';
 import { FileService } from '@theia/filesystem/lib/browser/file-service';
 import { UntitledWorkspaceService, WorkspaceFileService } from '@theia/workspace/lib/common';
 import { FrontendPluginPathService } from './frontend-plugin-path-service';
+import { installFakeLockManager } from './test/navigator-locks-test-util';
 
 disableJSDOM();
 
@@ -109,34 +110,6 @@ class FakeLockManager {
     async query(): Promise<{ held: Array<{ name: string }> }> {
         return { held: [...this.held].map(name => ({ name })) };
     }
-}
-
-/**
- * Installs `manager` as `navigator.locks` and returns a function that restores whatever was there
- * before. Does not assume `navigator` is currently defined at all: this very file's own
- * `enableJSDOM()`/`disableJSDOM()` pair above (needed so `FileService` can be imported) already
- * deletes the global `navigator` that Node normally provides as a side effect of disabling jsdom
- * (see `packages/core/src/browser/test/jsdom.ts`), and depending on what other spec files ran first
- * in this mocha process, it may already be gone by the time a test runs.
- */
-function installFakeLockManager(manager: FakeLockManager): () => void {
-    const target = globalThis as { navigator?: { locks?: unknown } };
-    const hadNavigator = typeof navigator !== 'undefined';
-    if (!hadNavigator) {
-        Object.defineProperty(target, 'navigator', { value: {}, configurable: true });
-    }
-    const originalLocks = Object.getOwnPropertyDescriptor(navigator, 'locks');
-    Object.defineProperty(navigator, 'locks', { value: manager, configurable: true });
-
-    return () => {
-        if (!hadNavigator) {
-            delete target.navigator;
-        } else if (originalLocks) {
-            Object.defineProperty(navigator, 'locks', originalLocks);
-        } else {
-            delete (navigator as { locks?: unknown }).locks;
-        }
-    };
 }
 
 /** Lets a promise chain fire-and-forgotten by the code under test, e.g. its cleanup, run to completion. */
