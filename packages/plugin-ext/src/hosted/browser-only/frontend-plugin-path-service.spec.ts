@@ -75,16 +75,16 @@ class FakeFileService {
 const SESSION_LOCK_PREFIX = 'theia:plugin-log-session:';
 
 /**
- * A minimal stand-in for the browser's `LockManager`, supporting only what the module under test
- * needs: granting a request (there is never contention for one of our lock names, each of which is
- * unique to one tab's session) and reporting currently held locks via `query()`.
+ * Minimal stand-in for the browser's `LockManager` - just enough for this module: granting a
+ * request (our lock names are always unique to one tab's session, so there's never contention)
+ * and reporting held locks via `query()`.
  *
- * Grants are gated behind {@link grantGate} rather than handed out in the same microtask turn as
- * `request()`, since the real Web Locks API coordinates across tabs and so cannot grant instantly
- * either; a test can replace it with a `Deferred` to pin down exactly when a grant happens.
+ * Grants go through {@link grantGate} instead of resolving in the same microtask as `request()`,
+ * since the real API coordinates across tabs and can't grant instantly either. Swap it for a
+ * `Deferred` in a test to control exactly when a grant happens.
  *
- * A test can also set {@link rejectNextRequestWith} to make the next `request()` reject without ever
- * invoking its callback, as the real API can, e.g. when the document is not fully active.
+ * Set {@link rejectNextRequestWith} to make the next `request()` reject without ever calling its
+ * callback, which the real API can also do (e.g. document not fully active).
  */
 class FakeLockManager {
     grantGate: Promise<void> = Promise.resolve();

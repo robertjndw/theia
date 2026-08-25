@@ -27,12 +27,12 @@ const WORKSPACE_STORAGE_KEY_PREFIX = 'plugin-storage:workspace:';
 const LOCK_NAME_PREFIX = 'theia:plugin-storage:';
 
 /**
- * Plugins of a browser-only application are deployed at build time, so they cannot be
- * installed, uninstalled, enabled or disabled at runtime. The queries report an empty
- * result rather than failing, so that callers such as the plugin view can render.
+ * Plugins of a browser-only application are deployed at build time, so they can't be installed,
+ * uninstalled, enabled or disabled at runtime. The queries just report an empty result instead
+ * of failing, so callers like the plugin view still have something to render.
  *
  * The plugin key-value storage backing `ExtensionContext.globalState` and
- * `ExtensionContext.workspaceState` is kept in the browser storage of the current host.
+ * `ExtensionContext.workspaceState` lives in the browser storage of the current host.
  */
 @injectable()
 export class FrontendPluginServer implements PluginServer {
@@ -47,10 +47,10 @@ export class FrontendPluginServer implements PluginServer {
     protected readonly pluginPathsService: PluginPathsService;
 
     /**
-     * Fallback for {@link withStoreLock} when the Web Locks API is unavailable. Shared by every
-     * instance in this JS realm (`static`, not `protected readonly`), since two `FrontendPluginServer`s
-     * in the same realm - e.g. two plugin hosts sharing one page - would otherwise not serialize
-     * against each other either.
+     * Fallback for {@link withStoreLock} when the Web Locks API is unavailable. `static`, not
+     * `protected readonly`, so it's shared by every instance in this JS realm - otherwise two
+     * `FrontendPluginServer`s in the same realm (e.g. two plugin hosts sharing one page) wouldn't
+     * serialize against each other either.
      */
     protected static readonly localLocks = new Map<string, Mutex>();
     protected static readonly missingLocksWarning = new WarnOnce();
@@ -89,9 +89,9 @@ export class FrontendPluginServer implements PluginServer {
             this.logger.warn('Cannot save plugin data: no opened workspace.');
             return false;
         }
-        // the browser storage is shared with the application's other tabs, each of which runs its own
-        // plugin host, so the read and the write below have to be atomic or a concurrent update on
-        // another tab could be read here before it is written, and then be overwritten by this one
+        // the browser storage is shared with this application's other tabs, each running its own
+        // plugin host, so the read and write below need to be atomic - otherwise a concurrent
+        // update from another tab could land in between and get overwritten by this one
         await this.withStoreLock(storeKey, async () => {
             const store = await this.getStore(storeKey);
             if (value === undefined || Object.keys(value).length === 0) {
@@ -118,17 +118,17 @@ export class FrontendPluginServer implements PluginServer {
     }
 
     /**
-     * Runs `task` while holding the cross-tab lock for `storeKey`, via the Web Locks API, so that a
-     * concurrent {@link setStorageValue} on this or another tab cannot interleave with it.
+     * Runs `task` while holding the cross-tab lock for `storeKey`, via the Web Locks API, so a
+     * concurrent {@link setStorageValue} on this or another tab can't interleave with it.
      */
     protected withStoreLock<T>(storeKey: string, task: () => Promise<T>): Promise<T> {
         const locks = getWebLocks();
         if (locks) {
             return requestLock(locks, `${LOCK_NAME_PREFIX}${storeKey}`, task);
         }
-        // Web Locks API unavailable, e.g. an insecure context or an older browser: fall back to
-        // serializing writes within this JS realm. A concurrent write from a different tab, which
-        // does not share this realm, can then still be lost.
+        // no Web Locks API (insecure context, older browser): fall back to serializing writes
+        // within this JS realm. A write from another tab, which doesn't share this realm, can
+        // still race and get lost.
         FrontendPluginServer.missingLocksWarning.warn(this.logger, 'Web Locks API unavailable: plugin storage updates from different tabs may race.');
         const queue = FrontendPluginServer.localLocks;
         let mutex = queue.get(storeKey);
@@ -140,14 +140,14 @@ export class FrontendPluginServer implements PluginServer {
     }
 
     /**
-     * The browser storage key of the store holding the given kind of values, or `undefined` if
-     * there is nowhere to keep them, i.e. for workspace state while no workspace is open.
+     * The browser storage key holding the given kind of values, or `undefined` if there's
+     * nowhere to keep them - e.g. workspace state while no workspace is open.
      */
     protected async getStoreKey(kind: PluginStorageKind): Promise<string | undefined> {
         if (!kind) {
             return GLOBAL_STORAGE_KEY;
         }
-        // derived from the storage path so that the workspace state follows `ExtensionContext.storageUri`
+        // derived from the storage path so workspace state follows `ExtensionContext.storageUri`
         const storagePath = await this.pluginPathsService.getHostStoragePath(kind.workspace, kind.roots);
         return storagePath && `${WORKSPACE_STORAGE_KEY_PREFIX}${storagePath}`;
     }

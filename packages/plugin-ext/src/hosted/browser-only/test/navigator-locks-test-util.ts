@@ -15,11 +15,11 @@
 // ****************************************************************************
 
 /**
- * The subset of the Web Locks API's `LockManager` that the fakes in these tests actually implement.
- * The real `LockManager.request()` is overloaded with an optional `options` parameter that no fake
- * here needs, so typing {@link installFakeLockManager} directly against the DOM `LockManager`
- * interface would reject every fake as an incompatible overload; callers cast to the real type only
- * once, at the point where the fake is installed as `navigator.locks`.
+ * The subset of `LockManager` that the fakes in these tests actually implement. The real
+ * `LockManager.request()` is overloaded with an optional `options` parameter that none of our
+ * fakes need, so typing {@link installFakeLockManager} directly against the DOM `LockManager`
+ * interface would reject every fake as an incompatible overload - we cast to the real type just
+ * once instead, at the point where the fake gets installed as `navigator.locks`.
  */
 export interface FakeLockManager {
     request<T>(name: string, callback: () => T | PromiseLike<T>): Promise<T>;
@@ -27,11 +27,11 @@ export interface FakeLockManager {
 }
 
 /**
- * Installs `manager` as `navigator.locks` and returns a function that restores whatever was there
- * before. Does not assume `navigator` is currently defined at all: `enableJSDOM()`/`disableJSDOM()`
- * (see `packages/core/src/browser/test/jsdom.ts`) deletes the global `navigator` that Node normally
- * provides as a side effect of disabling jsdom, and depending on what other spec files ran first in
- * this mocha process, it may already be gone by the time a test runs.
+ * Installs `manager` as `navigator.locks` and returns a function that restores whatever was
+ * there before. Doesn't assume `navigator` is even defined: `enableJSDOM()`/`disableJSDOM()`
+ * (see `packages/core/src/browser/test/jsdom.ts`) deletes the global `navigator` that Node
+ * normally provides as a side effect of disabling jsdom, and depending on which spec files ran
+ * earlier in this mocha process, it may already be gone by the time a test runs.
  */
 export function installFakeLockManager(manager: FakeLockManager): () => void {
     const target = globalThis as { navigator?: { locks?: unknown } };

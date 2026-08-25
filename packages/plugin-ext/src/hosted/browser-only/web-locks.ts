@@ -16,10 +16,7 @@
 
 import { ILogger } from '@theia/core';
 
-/**
- * The Web Locks API of this browsing context, or `undefined` in an insecure context or an older
- * browser - callers fall back to serializing within this JS realm only in that case.
- */
+/** The Web Locks API of this browsing context, or `undefined` in an insecure context or an older browser. */
 export function getWebLocks(): LockManager | undefined {
     return typeof navigator === 'object' ? navigator.locks : undefined;
 }
@@ -27,15 +24,15 @@ export function getWebLocks(): LockManager | undefined {
 /**
  * Requests `name` from `locks` and runs `callback` once granted, same as `LockManager.request()`.
  *
- * `LockGrantedCallback` is typed as `(lock: Lock | null) => T`, without accounting for an async or
- * never-settling callback, even though the Web Locks API supports and awaits one; this wraps the
- * resulting cast in one place instead of at every call site.
+ * `LockGrantedCallback` is typed as `(lock: Lock | null) => T`, which doesn't account for an
+ * async or never-settling callback even though the API itself supports and awaits one - this
+ * just wraps the cast in one place instead of at every call site.
  */
 export function requestLock<T>(locks: LockManager, name: string, callback: () => T | PromiseLike<T>): Promise<T> {
     return locks.request<T>(name, callback as unknown as LockGrantedCallback<T>);
 }
 
-/** Logs a message via `logger.warn` the first time {@link warn} is called, and does nothing after. */
+/** Logs via `logger.warn` the first time {@link warn} is called, and does nothing after that. */
 export class WarnOnce {
     protected warned = false;
 

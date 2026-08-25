@@ -26,34 +26,24 @@ import { PluginPathsService } from '../../main/common/plugin-paths-protocol';
 import { PluginPaths } from '../../main/common/paths/const';
 import { getWebLocks, requestLock, WarnOnce } from './web-locks';
 
-/**
- * Names of the per-session log folders, e.g. `20181205T093828-3e62e0e7-4934-41d6-8fa5-a38faaad2249`.
- *
- * Unlike the backend, where one `PluginPathsServiceImpl` singleton serves every tab, each browser
- * tab runs its own instance of this service; a timestamp alone, as the backend uses, is not enough
- * to keep them apart, since duplicating a tab or restoring a session commonly opens several within
- * the same second. The random suffix guarantees a folder of its own regardless.
- */
+// Session folder name, e.g. `20181205T093828-3e62e0e7-4934-41d6-8fa5-a38faaad2249`. Unlike the
+// backend, where one `PluginPathsServiceImpl` singleton serves every tab, here each tab runs its
+// own instance, so a timestamp alone isn't enough to tell them apart - duplicating a tab or
+// restoring a session can easily open several within the same second. Hence the random suffix.
 const SESSION_FOLDER_PATTERN = /^\d{8}T\d{6}-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
-/**
- * How many per-session log folders to keep, i.e. the backend's `--plugin-max-session-logs-folders`
- * default - there is no CLI to read the option from in a browser-only application, so this shares
- * the same constant the backend's default derives from, rather than a copy that could drift from it.
- */
+// How many session log folders to keep around. Same default as the backend's
+// `--plugin-max-session-logs-folders`, reused directly since there's no CLI here to read it from.
 const MAX_SESSION_LOGS_FOLDERS = PluginPaths.DEFAULT_PLUGIN_MAX_SESSION_LOGS_FOLDERS;
 
-/**
- * Prefix of the Web Locks API lock a tab holds for as long as it is open, named after its own
- * session folder, so that {@link FrontendPluginPathService.cleanUpOldLogs} can tell a tab that is
- * still open apart from one whose session has actually ended - count alone cannot, since e.g.
- * restoring a session can open more tabs at once than {@link MAX_SESSION_LOGS_FOLDERS}.
- */
+// Prefix for the Web Locks API lock a tab holds while it's open, named after its session folder.
+// Lets cleanUpOldLogs() tell a still-open tab apart from a finished session - folder count alone
+// can't, since restoring a session can open more tabs at once than MAX_SESSION_LOGS_FOLDERS.
 const SESSION_LOCK_PREFIX = 'theia:plugin-log-session:';
 
 /**
- * Resolves the plugin log and storage locations of a browser-only application below the config
- * directory, which is backed by the same (browser local) file system as the workspace itself.
+ * Resolves plugin log and storage locations for a browser-only application, under the config
+ * directory, which lives on the same (browser-local) file system as the workspace.
  */
 @injectable()
 export class FrontendPluginPathService implements PluginPathsService {
@@ -84,12 +74,12 @@ export class FrontendPluginPathService implements PluginPathsService {
 
     getHostStoragePath(workspaceUri: string | undefined, rootUris: string[]): Promise<string | undefined> {
         if (!workspaceUri) {
-            // no workspace, hence no place to store workspace state, as on the backend
+            // no workspace, no place to store workspace state - same as the backend
             return Promise.resolve(undefined);
         }
-        // JSON-encoded rather than joined with a plain separator: `workspaceUri` and `rootUris` are URIs,
-        // which may themselves contain ':' or ',' (e.g. a Windows drive letter), so a plain-text join could
-        // let two different (workspaceUri, rootUris) pairs collide on the same cache key.
+        // JSON-encoded rather than joined with a separator: workspaceUri/rootUris are URIs and can
+        // contain ':' or ',' themselves (e.g. a Windows drive letter), so a plain-text join risks
+        // two different pairs colliding on the same cache key.
         const cacheKey = JSON.stringify([workspaceUri, [...rootUris].sort()]);
         let hostStoragePath = this.hostStoragePaths.get(cacheKey);
         if (!hostStoragePath) {
@@ -103,15 +93,12 @@ export class FrontendPluginPathService implements PluginPathsService {
         return hostStoragePath;
     }
 
-    /**
-     * Each session logs into a folder of its own, as on the backend, so that the tabs of an
-     * application do not write over each other's logs.
-     */
+    /** Each session logs into its own folder, like on the backend, so tabs don't write over each other's logs. */
     protected async resolveHostLogPath(): Promise<string> {
         const logsDirUri = (await this.getConfigDirUri()).resolve(PluginPaths.PLUGINS_LOGS_DIR);
         const folderName = this.generateSessionFolderName();
-        // awaited: the folder must not exist on disk before the lock is actually held, or another
-        // tab's cleanup could list it, query() before the grant, and prune it as if it were dead
+        // must await: if the folder existed on disk before the lock is actually held, another
+        // tab's cleanup could list it, query() before the grant lands, and prune it as dead
         await this.markSessionAlive(folderName);
         const hostLogPath = await this.ensureDirectory(logsDirUri.resolve(folderName).resolve('host'));
         // as on the backend, we never wait for the cleanup
@@ -126,10 +113,9 @@ export class FrontendPluginPathService implements PluginPathsService {
     }
 
     /**
-     * Generates a folder name in the format `YYYYMMDDTHHMMSS-<uuid>`, for example
-     * `20181205T093828-3e62e0e7-4934-41d6-8fa5-a38faaad2249`. The timestamp keeps folders roughly
-     * sorted by recency for {@link cleanUpOldLogs}; the suffix is what actually guarantees
-     * uniqueness, including between two tabs created in the same second.
+     * Generates a folder name like `20181205T093828-3e62e0e7-4934-41d6-8fa5-a38faaad2249`. The
+     * timestamp keeps folders roughly sorted by recency for {@link cleanUpOldLogs}; the suffix is
+     * what actually guarantees uniqueness between two tabs created in the same second.
      */
     protected generateSessionFolderName(): string {
         const timeStamp = new Date().toISOString().replace(/[-:]|(\..*)/g, '');
@@ -141,21 +127,19 @@ export class FrontendPluginPathService implements PluginPathsService {
     }
 
     /**
-     * Holds the Web Locks API lock named after `folderName` for as long as this tab's document
-     * exists: the browser releases it automatically when the tab is closed or navigated away from,
-     * which is exactly the "is this session still open" signal {@link cleanUpOldLogs} needs.
+     * Holds the Web Locks API lock named after `folderName` for as long as this tab's document is
+     * around - the browser releases it automatically on close or navigation, which is exactly the
+     * "is this session still open" signal {@link cleanUpOldLogs} needs.
      *
-     * Resolves only once the lock is actually granted, i.e. once `navigator.locks.query()` is
-     * guaranteed to report it as held. `request()` grants a lock asynchronously - across tabs, it has
-     * to - so a caller that did not wait for this could create the session folder on disk before the
-     * lock protecting it exists, during which another tab's {@link cleanUpOldLogs} could see the
-     * folder, query the not-yet-held lock, and prune it as if the session had already ended.
+     * Resolves only once the lock is actually granted, not just requested. `request()` grants
+     * asynchronously across tabs, so a caller that didn't wait here could create the session
+     * folder before the lock protecting it exists - and another tab's {@link cleanUpOldLogs}
+     * could catch it in that window and prune it as dead.
      *
-     * Also resolves, rather than hanging forever, if `request()` itself rejects without ever
-     * invoking the callback - for example because the document is not fully active at the time. A
-     * plugin host that never starts because it could not secure the log folder's liveness lock would
-     * be worse than the pre-existing, already-accepted risk that a live session's folder is pruned by
-     * another tab while the Web Locks API is unavailable, which this falls back to in that case too.
+     * Also resolves (rather than hanging forever) if `request()` rejects without ever granting,
+     * e.g. because the document isn't fully active yet. Failing to start a plugin host over this
+     * would be worse than the risk we already accept when the Web Locks API is unavailable at
+     * all - a live session's folder getting pruned by another tab - so we fall back the same way.
      */
     protected async markSessionAlive(folderName: string): Promise<void> {
         const locks = getWebLocks();
@@ -163,8 +147,8 @@ export class FrontendPluginPathService implements PluginPathsService {
             return;
         }
         const granted = new Deferred<void>();
-        // resolves `granted` from inside the callback, i.e. only once the lock is actually held, and
-        // then never settles itself, so the lock stays held until this document is destroyed
+        // resolves `granted` once the lock is actually held, then never settles itself, so the
+        // lock stays held until this document goes away
         const holdUntilTabCloses = (): Promise<void> => {
             granted.resolve();
             return new Promise<void>(() => { /* never settles */ });
@@ -178,25 +162,24 @@ export class FrontendPluginPathService implements PluginPathsService {
     }
 
     /**
-     * Keeps the {@link MAX_SESSION_LOGS_FOLDERS} most recent session folders, so that reloading does
-     * not fill up the browser storage - except `ownFolderName`, which this call is never allowed to
-     * touch, and any folder {@link isSessionAlive} reports as still open: count alone cannot tell a
-     * completed session apart from a tab that is still open, and restoring a browser session can
-     * plausibly open more tabs at once than {@link MAX_SESSION_LOGS_FOLDERS}.
+     * Keeps the {@link MAX_SESSION_LOGS_FOLDERS} most recent session folders around, so reloading
+     * doesn't fill up browser storage - except `ownFolderName`, which is never touched, and any
+     * folder {@link queryOpenSessions} still reports as open. Count alone can't tell a finished
+     * session apart from an open tab, and restoring a browser session can open more tabs at once
+     * than {@link MAX_SESSION_LOGS_FOLDERS}.
      */
     protected async cleanUpOldLogs(logsDirUri: URI, ownFolderName: string): Promise<void> {
         const logsDir = await this.fileService.resolve(logsDirUri);
         const candidates = (logsDir.children ?? [])
-            // we never clean a folder that is not a session folder of ours, or the one just created above
+            // skip anything that isn't one of our session folders, or the one just created above
             .filter(child => child.isDirectory && child.resource.path.base !== ownFolderName && SESSION_FOLDER_PATTERN.test(child.resource.path.base))
             .map(child => child.resource)
-            // newest first, so that the oldest ones are the ones cut off; ties within the same second,
-            // e.g. several tabs opened together, are broken arbitrarily by the random suffix, which is fine
-            //
-            // ordinal comparison, not `localeCompare`: the folder name format is fixed ASCII (digits and
-            // lowercase hex), and locale-aware collation could sort it inconsistently across locales
+            // newest first, so the oldest ones get cut off; ties within the same second (e.g. several
+            // tabs opened together) are broken arbitrarily by the random suffix, which is fine here.
+            // Ordinal comparison, not localeCompare - the format is fixed ASCII, and locale-aware
+            // sorting could order it differently depending on the user's locale
             .sort((one, other) => (other.path.base < one.path.base ? -1 : other.path.base > one.path.base ? 1 : 0));
-        // `ownFolderName` occupies one of the retained slots without being a candidate above
+        // ownFolderName takes up one of the retained slots without being a candidate above
         const prunable = candidates.slice(MAX_SESSION_LOGS_FOLDERS - 1);
         if (prunable.length === 0) {
             return;
@@ -212,8 +195,8 @@ export class FrontendPluginPathService implements PluginPathsService {
     }
 
     /**
-     * The session folder names of every tab currently holding its {@link markSessionAlive} lock, or
-     * `undefined` if the Web Locks API is unavailable, i.e. there is no way to tell.
+     * Session folder names of every tab currently holding its {@link markSessionAlive} lock, or
+     * `undefined` if the Web Locks API isn't available - in which case there's no way to tell.
      */
     protected async queryOpenSessions(): Promise<Set<string> | undefined> {
         const locks = getWebLocks();
@@ -241,11 +224,10 @@ export class FrontendPluginPathService implements PluginPathsService {
     }
 
     /**
-     * Creates the given directory, tolerating it already existing, and returns its path. Plugins
-     * receive the path rather than the URI, e.g. as `ExtensionContext.storagePath`.
+     * Creates `uri` as a directory (fine if it already exists) and returns its path. Plugins get
+     * the path rather than the URI, e.g. as `ExtensionContext.storagePath`.
      */
     protected async ensureDirectory(uri: URI): Promise<string> {
-        // tolerates the directory already existing, so no exists() check is needed first
         await this.fileService.createFolder(uri, { fromUserGesture: false });
         return this.fileService.fsPath(uri);
     }

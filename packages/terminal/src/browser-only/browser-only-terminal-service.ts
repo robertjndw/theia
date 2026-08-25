@@ -21,9 +21,9 @@ import { WidgetOpenerOptions } from '@theia/core/lib/browser';
 import { TerminalWidgetOptions, TerminalWidget } from '../browser/base/terminal-widget';
 
 /**
- * A browser-only application has no backend to run a shell in, so it cannot open terminals.
- * The remaining queries report an empty result rather than failing, so that callers such as
- * the plugin host, which asks for the default shell on start up, keep working.
+ * A browser-only application has no backend to run a shell in, so it can't open terminals. The
+ * remaining queries just report an empty result instead of failing, so callers like the plugin
+ * host - which asks for the default shell on startup - keep working.
  */
 @injectable()
 export class BrowserOnlyTerminalService implements TerminalService {

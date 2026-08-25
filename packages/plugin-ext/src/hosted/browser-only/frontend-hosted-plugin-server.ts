@@ -21,19 +21,18 @@ import { Event, RpcConnectionEventEmitter } from '@theia/core';
 
 export const PluginLocalOptions = Symbol('PluginLocalOptions');
 /**
- * Optional override for the statically deployed plugins of a browser-only application.
- *
- * By default the plugins prepared at build time are used, i.e. the ones listed in
- * `lib/frontend/hostedPlugin/list.json`. Bind this to supply the metadata by hand instead,
- * e.g. when the plugins are hosted somewhere the build cannot see.
+ * Optional override for the statically deployed plugins of a browser-only application. By
+ * default we use whatever the build prepared, i.e. `lib/frontend/hostedPlugin/list.json`. Bind
+ * this to supply the metadata by hand instead, e.g. if the plugins are hosted somewhere the
+ * build can't see.
  */
 export interface PluginLocalOptions {
     pluginMetadata: DeployedPlugin[];
 }
 
 /**
- * Serves the plugins that were statically deployed into the frontend bundle. There is no
- * backend in a browser-only application, so nothing can be deployed or undeployed at runtime.
+ * Serves the plugins statically deployed into the frontend bundle. There's no backend in a
+ * browser-only application, so nothing can be deployed or undeployed at runtime.
  */
 @injectable()
 export class FrontendHostedPluginServer implements HostedPluginServer, RpcConnectionEventEmitter {
@@ -47,13 +46,10 @@ export class FrontendHostedPluginServer implements HostedPluginServer, RpcConnec
 
     protected deployedPlugins: Promise<DeployedPlugin[]> | undefined;
 
-    /**
-     * The statically deployed plugins, from {@link PluginLocalOptions} if bound,
-     * otherwise from the list written by the build.
-     */
+    /** The statically deployed plugins, from {@link PluginLocalOptions} if bound, otherwise from the list the build wrote. */
     protected getPlugins(): Promise<DeployedPlugin[]> {
         return this.deployedPlugins ??= (this.options ? Promise.resolve(this.options.pluginMetadata) : this.fetchDeployedPlugins())
-            // drop the cached rejection so that a later load can pick the list up again
+            // drop the cached rejection so a later load can retry
             .catch(error => {
                 this.deployedPlugins = undefined;
                 throw error;
@@ -83,7 +79,7 @@ export class FrontendHostedPluginServer implements HostedPluginServer, RpcConnec
     }
 
     getInstalledPluginIds(): Promise<PluginIdentifiers.VersionedId[]> {
-        // Statically deployed plugins are the only ones that can be installed.
+        // the statically deployed plugins are the only ones that could ever be "installed"
         return this.getDeployedPluginIds();
     }
 
@@ -106,7 +102,7 @@ export class FrontendHostedPluginServer implements HostedPluginServer, RpcConnec
     }
 
     async onMessage(targetHost: string, message: Uint8Array): Promise<void> {
-        // Messages to the plugin host are delivered by the frontend directly.
+        // the frontend delivers messages to the plugin host directly, not through here
     }
 
     setClient(client: HostedPluginClient | undefined): void {
