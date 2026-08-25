@@ -36,8 +36,12 @@ import { getWebLocks, requestLock, WarnOnce } from './web-locks';
  */
 const SESSION_FOLDER_PATTERN = /^\d{8}T\d{6}-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
-/** How many per-session log folders to keep, i.e. the backend's `--plugin-max-session-logs-folders` default. */
-const MAX_SESSION_LOGS_FOLDERS = 10;
+/**
+ * How many per-session log folders to keep, i.e. the backend's `--plugin-max-session-logs-folders`
+ * default - there is no CLI to read the option from in a browser-only application, so this shares
+ * the same constant the backend's default derives from, rather than a copy that could drift from it.
+ */
+const MAX_SESSION_LOGS_FOLDERS = PluginPaths.DEFAULT_PLUGIN_MAX_SESSION_LOGS_FOLDERS;
 
 /**
  * Prefix of the Web Locks API lock a tab holds for as long as it is open, named after its own
@@ -83,7 +87,10 @@ export class FrontendPluginPathService implements PluginPathsService {
             // no workspace, hence no place to store workspace state, as on the backend
             return Promise.resolve(undefined);
         }
-        const cacheKey = `${workspaceUri}:${[...rootUris].sort().join(',')}`;
+        // JSON-encoded rather than joined with a plain separator: `workspaceUri` and `rootUris` are URIs,
+        // which may themselves contain ':' or ',' (e.g. a Windows drive letter), so a plain-text join could
+        // let two different (workspaceUri, rootUris) pairs collide on the same cache key.
+        const cacheKey = JSON.stringify([workspaceUri, [...rootUris].sort()]);
         let hostStoragePath = this.hostStoragePaths.get(cacheKey);
         if (!hostStoragePath) {
             hostStoragePath = this.resolveHostStoragePath(workspaceUri, rootUris)
@@ -185,7 +192,10 @@ export class FrontendPluginPathService implements PluginPathsService {
             .map(child => child.resource)
             // newest first, so that the oldest ones are the ones cut off; ties within the same second,
             // e.g. several tabs opened together, are broken arbitrarily by the random suffix, which is fine
-            .sort((one, other) => other.path.base.localeCompare(one.path.base));
+            //
+            // ordinal comparison, not `localeCompare`: the folder name format is fixed ASCII (digits and
+            // lowercase hex), and locale-aware collation could sort it inconsistently across locales
+            .sort((one, other) => (other.path.base < one.path.base ? -1 : other.path.base > one.path.base ? 1 : 0));
         // `ownFolderName` occupies one of the retained slots without being a candidate above
         const prunable = candidates.slice(MAX_SESSION_LOGS_FOLDERS - 1);
         if (prunable.length === 0) {

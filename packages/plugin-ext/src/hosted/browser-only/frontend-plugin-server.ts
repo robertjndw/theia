@@ -14,6 +14,7 @@
 // SPDX-License-Identifier: EPL-2.0 OR GPL-2.0-only WITH Classpath-exception-2.0
 // ****************************************************************************
 import { inject, injectable, named } from '@theia/core/shared/inversify';
+import { Mutex } from 'async-mutex';
 import { ILogger } from '@theia/core';
 import { StorageService } from '@theia/core/lib/browser/storage-service';
 import { PluginDeployOptions, PluginIdentifiers, PluginServer, PluginStorageKind, PluginType } from '../../common';
@@ -51,7 +52,7 @@ export class FrontendPluginServer implements PluginServer {
      * in the same realm - e.g. two plugin hosts sharing one page - would otherwise not serialize
      * against each other either.
      */
-    protected static readonly localLocks = new Map<string, Promise<unknown>>();
+    protected static readonly localLocks = new Map<string, Mutex>();
     protected static readonly missingLocksWarning = new WarnOnce();
 
     async install(pluginEntry: string, type?: PluginType, options?: PluginDeployOptions): Promise<void> {
@@ -130,13 +131,12 @@ export class FrontendPluginServer implements PluginServer {
         // does not share this realm, can then still be lost.
         FrontendPluginServer.missingLocksWarning.warn(this.logger, 'Web Locks API unavailable: plugin storage updates from different tabs may race.');
         const queue = FrontendPluginServer.localLocks;
-        const previous = queue.get(storeKey) ?? Promise.resolve();
-        const run = (async () => {
-            await previous.catch(() => undefined);
-            return task();
-        })();
-        queue.set(storeKey, run.catch(() => undefined));
-        return run;
+        let mutex = queue.get(storeKey);
+        if (!mutex) {
+            mutex = new Mutex();
+            queue.set(storeKey, mutex);
+        }
+        return mutex.runExclusive(task);
     }
 
     /**
