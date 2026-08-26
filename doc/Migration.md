@@ -114,6 +114,31 @@ The `lib/**/*` glob already covers `lib/backend/shell-integrations/`. If you use
 
 ### v1.75.0
 
+#### React 19 and the automatic JSX runtime
+
+Theia now requires `react`/`react-dom` `^19` and React 18 is no longer supported.
+The `@theia/core` peer dependency ranges for `react`, `react-dom`, `@types/react`, and `@types/react-dom` are narrowed to `^19.0.0`, so all four need to be bumped.
+Since v1.74.0 `react`/`react-dom` are peer dependencies instead of direct dependencies of `@theia/core`.
+Thus, depending on your package manager and its settings, you might need to add them as explicit dependencies of your product.
+
+Upgrading React itself is covered by the [React 19 upgrade guide](https://react.dev/blog/2024/04/25/react-19-upgrade-guide).
+The change most likely to affect extension code is that `useRef` no longer has a zero-argument overload, so `React.useRef<T | undefined>()` becomes `React.useRef<T | undefined>(undefined)`.
+
+All Theia packages are now compiled with the automatic JSX runtime:
+
+```json
+"jsx": "react-jsx",
+"jsxImportSource": "@theia/core/shared/react"
+```
+
+`@theia/core/shared/react/jsx-runtime` and `@theia/core/shared/react/jsx-dev-runtime` are new re-exports, so the generated JSX calls still resolve to the single React instance shared by `@theia/core`.
+The only exception is `@theia/core`: it cannot import its own re-export, so `packages/core/tsconfig.json` overrides `jsxImportSource` with `react`, which resolves to the same module.
+
+Adopters do not have to switch, but if you want the same setup in your own extensions:
+
+- set `jsx` and `jsxImportSource` as above in your `tsconfig.json` (if you use `jsx: "react-jsxdev"`, the `jsx-dev-runtime` re-export is used instead)
+- remove `import * as React from '@theia/core/shared/react'` from files that only needed it for JSX. Keep the import wherever `React.*` types or APIs are used (`React.ReactNode`, `React.FC`, `React.MouseEvent`, hooks, …). With `noUnusedLocals` enabled the compiler reports the now-obsolete imports.
+
 #### Browser-only config directory moved to `/.theia` [#14776](https://github.com/eclipse-theia/theia/pull/14776)
 
 The browser-only `EnvVariablesServer` stub (`packages/core/src/browser-only/frontend-only-application-module.ts`) previously returned an empty string for `getConfigDirUri()`. `new URI('')` resolves to `file:///`, so in browser-only mode the config directory was effectively the root of the OPFS file system, and every consumer wrote its state there, alongside the user's workspace directories. `getConfigDirUri()` now returns `file:///.theia`, matching the backend's default `.theia` configuration folder (the `configurationFolder` property).
