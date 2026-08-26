@@ -20,9 +20,15 @@ import { FrontendHostedPluginServer } from './hosted/browser-only/frontend-hoste
 import { PluginPathsService } from './main/common/plugin-paths-protocol';
 import { FrontendPluginPathService } from './hosted/browser-only/frontend-plugin-path-service';
 import { FrontendPluginServer } from './hosted/browser-only/frontend-plugin-server';
+import { HostedPluginFileServiceContribution, HostedPluginFileSystemProvider } from './hosted/browser-only/hosted-plugin-file-system-provider';
+import { FileServiceContribution } from '@theia/filesystem/lib/browser/file-service';
 
 export default new ContainerModule((bind, unbind, isBound, rebind) => {
     rebind(HostedPluginServer).to(FrontendHostedPluginServer).inSingletonScope();
     rebind(PluginServer).to(FrontendPluginServer).inSingletonScope();
     rebind(PluginPathsService).to(FrontendPluginPathService).inSingletonScope();
+
+    bind(HostedPluginFileSystemProvider).toSelf().inSingletonScope();
+    bind(HostedPluginFileServiceContribution).toSelf().inSingletonScope();
+    bind(FileServiceContribution).toService(HostedPluginFileServiceContribution);
 });

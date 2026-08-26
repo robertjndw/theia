@@ -16,6 +16,7 @@
 
 import {
     PLUGINS_BASE_PATH,
+    PLUGINS_SCHEME,
     THEIA_PLUGIN_START_METHOD,
     THEIA_PLUGIN_STOP_METHOD,
     UNPUBLISHED,
@@ -66,6 +67,17 @@ export function toPluginUrl(pck: PluginIdentifierSource, relativePath: string): 
         segments.push(encodeURIComponent(segment));
     }
     return `${PLUGINS_BASE_PATH}/${getPluginId(pck)}/${segments.join('/')}`;
+}
+
+/**
+ * Like {@link toPluginUrl}, but as a `hostedPlugin:` URI for the assets read through the
+ * `FileService` (color themes, icon themes, icon fonts). A bare relative path has no scheme for it
+ * to resolve.
+ *
+ * Drops the {@link PLUGINS_BASE_PATH} prefix; whoever serves the scheme puts it back.
+ */
+export function toPluginUri(pck: PluginIdentifierSource, relativePath: string): string {
+    return `${PLUGINS_SCHEME}:/${toPluginUrl(pck, relativePath).substring(PLUGINS_BASE_PATH.length + 1)}`;
 }
 
 /**

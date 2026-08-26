@@ -116,19 +116,33 @@ pluginManager.setPluginHost({
                     pluginsModulesNames.set(plugin.lifecycle.frontendModuleName!, plugin);
                     return { target: result, plugin };
                 } else {
+                    const common = {
+                        pluginPath: pluginModel.entryPoint.backend,
+                        pluginFolder: pluginModel.packagePath,
+                        pluginUri: pluginModel.packageUri,
+                        model: pluginModel,
+                        lifecycle: pluginLifecycle,
+                        isUnderDevelopment: !!plg.isUnderDevelopment
+                    };
+                    if (pluginModel.entryPoint.backend) {
+                        // Runs in another host, so its manifest is that host's problem.
+                        return {
+                            target: foreign,
+                            plugin: {
+                                ...common,
+                                get rawModel(): never {
+                                    throw new Error('not supported');
+                                }
+                            }
+                        };
+                    }
+                    // No entry point anywhere, so there is nothing to run - it only contributes
+                    // grammars, themes and the like. It does still turn up in `theia.extensions`,
+                    // where reading `packageJSON` must not throw, so give it a real manifest.
+                    // Only browser-only gets here; with a backend these go to the backend host.
                     return {
                         target: foreign,
-                        plugin: {
-                            pluginPath: pluginModel.entryPoint.backend,
-                            pluginFolder: pluginModel.packagePath,
-                            pluginUri: pluginModel.packageUri,
-                            model: pluginModel,
-                            lifecycle: pluginLifecycle,
-                            get rawModel(): never {
-                                throw new Error('not supported');
-                            },
-                            isUnderDevelopment: !!plg.isUnderDevelopment
-                        }
+                        plugin: { ...common, rawModel: await loadManifest(pluginModel) }
                     };
                 }
             }));
