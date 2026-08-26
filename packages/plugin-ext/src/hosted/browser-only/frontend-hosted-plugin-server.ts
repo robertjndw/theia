@@ -18,6 +18,7 @@ import { injectable, inject, optional } from '@theia/core/shared/inversify';
 import { LIST_JSON, PLUGINS_BASE_PATH } from '@theia/plugin-utils/lib/common/constants';
 import { DeployedPlugin, ExtPluginApi, HostedPluginClient, HostedPluginServer, PluginIdentifiers } from '../../common';
 import { Event, RpcConnectionEventEmitter } from '@theia/core';
+import { memoizeAsync } from './async-memoize';
 
 export const PluginLocalOptions = Symbol('PluginLocalOptions');
 /**
@@ -44,17 +45,9 @@ export class FrontendHostedPluginServer implements HostedPluginServer, RpcConnec
 
     protected client: HostedPluginClient | undefined;
 
-    protected deployedPlugins: Promise<DeployedPlugin[]> | undefined;
-
     /** The statically deployed plugins, from {@link PluginLocalOptions} if bound, otherwise from the list the build wrote. */
-    protected getPlugins(): Promise<DeployedPlugin[]> {
-        return this.deployedPlugins ??= (this.options ? Promise.resolve(this.options.pluginMetadata) : this.fetchDeployedPlugins())
-            // drop the cached rejection so a later load can retry
-            .catch(error => {
-                this.deployedPlugins = undefined;
-                throw error;
-            });
-    }
+    protected readonly getPlugins = memoizeAsync((): Promise<DeployedPlugin[]> =>
+        this.options ? Promise.resolve(this.options.pluginMetadata) : this.fetchDeployedPlugins());
 
     protected async fetchDeployedPlugins(): Promise<DeployedPlugin[]> {
         const url = `./${PLUGINS_BASE_PATH}/${LIST_JSON}`;

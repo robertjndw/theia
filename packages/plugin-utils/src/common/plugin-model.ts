@@ -47,12 +47,12 @@ export function getPluginId(plugin: PluginIdentifierSource): string {
 }
 
 /**
- * Builds a static-friendly plugin asset URL: `hostedPlugin/<id>/<segments...>`.
- * Path separators stay literal `/`; each segment is `encodeURIComponent`'d so plain
- * static file servers (browser-only) resolve assets without needing Express `:path(*)` decoding.
- * `.` is dropped and `..` is resolved within the plugin root (leading `..` is ignored).
+ * Builds `<id>/<segments...>` for a plugin asset. Path separators stay literal `/`; each segment
+ * is `encodeURIComponent`'d so plain static file servers (browser-only) resolve assets without
+ * needing Express `:path(*)` decoding. `.` is dropped and `..` is resolved within the plugin root
+ * (leading `..` is ignored).
  */
-export function toPluginUrl(pck: PluginIdentifierSource, relativePath: string): string {
+function toPluginAssetPath(pck: PluginIdentifierSource, relativePath: string): string {
     const segments: string[] = [];
     for (const segment of relativePath.replace(/\\/g, '/').split('/')) {
         if (!segment || segment === '.') {
@@ -66,18 +66,21 @@ export function toPluginUrl(pck: PluginIdentifierSource, relativePath: string): 
         }
         segments.push(encodeURIComponent(segment));
     }
-    return `${PLUGINS_BASE_PATH}/${getPluginId(pck)}/${segments.join('/')}`;
+    return `${getPluginId(pck)}/${segments.join('/')}`;
+}
+
+/** Builds a static-friendly plugin asset URL: `hostedPlugin/<id>/<segments...>`. */
+export function toPluginUrl(pck: PluginIdentifierSource, relativePath: string): string {
+    return `${PLUGINS_BASE_PATH}/${toPluginAssetPath(pck, relativePath)}`;
 }
 
 /**
  * Like {@link toPluginUrl}, but as a `hostedPlugin:` URI for the assets read through the
  * `FileService` (color themes, icon themes, icon fonts). A bare relative path has no scheme for it
  * to resolve.
- *
- * Drops the {@link PLUGINS_BASE_PATH} prefix; whoever serves the scheme puts it back.
  */
 export function toPluginUri(pck: PluginIdentifierSource, relativePath: string): string {
-    return `${PLUGINS_SCHEME}:/${toPluginUrl(pck, relativePath).substring(PLUGINS_BASE_PATH.length + 1)}`;
+    return `${PLUGINS_SCHEME}:/${toPluginAssetPath(pck, relativePath)}`;
 }
 
 /**

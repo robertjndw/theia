@@ -19,12 +19,14 @@ import { ILogger } from '@theia/core';
 import URI from '@theia/core/lib/common/uri';
 import { Deferred } from '@theia/core/lib/common/promise-util';
 import { generateUuid, hashValue } from '@theia/core/lib/common/uuid';
+import { compare } from '@theia/core/lib/common/strings';
 import { EnvVariablesServer } from '@theia/core/lib/common/env-variables';
 import { FileService } from '@theia/filesystem/lib/browser/file-service';
 import { UntitledWorkspaceService } from '@theia/workspace/lib/common';
 import { PluginPathsService } from '../../main/common/plugin-paths-protocol';
 import { PluginPaths } from '../../main/common/paths/const';
 import { getWebLocks, requestLock, WarnOnce } from './web-locks';
+import { memoizeAsync, memoizeAsyncByKey } from './async-memoize';
 
 // Session folder name, e.g. `20181205T093828-3e62e0e7-4934-41d6-8fa5-a38faaad2249`. Unlike the
 // backend, where one `PluginPathsServiceImpl` singleton serves every tab, here each tab runs its
@@ -61,45 +63,35 @@ export class FrontendPluginPathService implements PluginPathsService {
     protected readonly untitledWorkspaceService: UntitledWorkspaceService;
 
     protected configDirUri: Promise<URI> | undefined;
-    protected hostLogPath: Promise<string> | undefined;
-    protected readonly hostStoragePaths = new Map<string, Promise<string>>();
 
-    getHostLogPath(): Promise<string> {
-        return this.hostLogPath ??= this.resolveHostLogPath()
-            .catch(error => {
-                this.hostLogPath = undefined;
-                throw error;
-            });
-    }
+    readonly getHostLogPath = memoizeAsync((): Promise<string> => this.resolveHostLogPath());
+
+    protected readonly resolveCachedHostStoragePath = memoizeAsyncByKey(
+        ({ workspaceUri, rootUris }: { workspaceUri: string; rootUris: string[] }) => this.resolveHostStoragePath(workspaceUri, rootUris),
+        // JSON-encoded rather than joined with a separator: workspaceUri/rootUris are URIs and can
+        // contain ':' or ',' themselves (e.g. a Windows drive letter), so a plain-text join risks
+        // two different pairs colliding on the same cache key.
+        ({ workspaceUri, rootUris }) => JSON.stringify([workspaceUri, [...rootUris].sort()])
+    );
 
     getHostStoragePath(workspaceUri: string | undefined, rootUris: string[]): Promise<string | undefined> {
         if (!workspaceUri) {
             // no workspace, no place to store workspace state - same as the backend
             return Promise.resolve(undefined);
         }
-        // JSON-encoded rather than joined with a separator: workspaceUri/rootUris are URIs and can
-        // contain ':' or ',' themselves (e.g. a Windows drive letter), so a plain-text join risks
-        // two different pairs colliding on the same cache key.
-        const cacheKey = JSON.stringify([workspaceUri, [...rootUris].sort()]);
-        let hostStoragePath = this.hostStoragePaths.get(cacheKey);
-        if (!hostStoragePath) {
-            hostStoragePath = this.resolveHostStoragePath(workspaceUri, rootUris)
-                .catch(error => {
-                    this.hostStoragePaths.delete(cacheKey);
-                    throw error;
-                });
-            this.hostStoragePaths.set(cacheKey, hostStoragePath);
-        }
-        return hostStoragePath;
+        return this.resolveCachedHostStoragePath({ workspaceUri, rootUris });
     }
 
     /** Each session logs into its own folder, like on the backend, so tabs don't write over each other's logs. */
     protected async resolveHostLogPath(): Promise<string> {
-        const logsDirUri = (await this.getConfigDirUri()).resolve(PluginPaths.PLUGINS_LOGS_DIR);
         const folderName = this.generateSessionFolderName();
-        // must await: if the folder existed on disk before the lock is actually held, another
-        // tab's cleanup could list it, query() before the grant lands, and prune it as dead
-        await this.markSessionAlive(folderName);
+        // must await the lock: if the folder existed on disk before the lock is actually held,
+        // another tab's cleanup could list it, query() before the grant lands, and prune it as
+        // dead. Independent of the config dir lookup, so the two run concurrently.
+        const [logsDirUri] = await Promise.all([
+            this.getConfigDirUri().then(uri => uri.resolve(PluginPaths.PLUGINS_LOGS_DIR)),
+            this.markSessionAlive(folderName)
+        ]);
         const hostLogPath = await this.ensureDirectory(logsDirUri.resolve(folderName).resolve('host'));
         // as on the backend, we never wait for the cleanup
         this.cleanUpOldLogs(logsDirUri, folderName).catch(error => this.logger.error('Failed to clean up old plugin log folders:', error));
@@ -178,7 +170,7 @@ export class FrontendPluginPathService implements PluginPathsService {
             // tabs opened together) are broken arbitrarily by the random suffix, which is fine here.
             // Ordinal comparison, not localeCompare - the format is fixed ASCII, and locale-aware
             // sorting could order it differently depending on the user's locale
-            .sort((one, other) => (other.path.base < one.path.base ? -1 : other.path.base > one.path.base ? 1 : 0));
+            .sort((one, other) => compare(other.path.base, one.path.base));
         // ownFolderName takes up one of the retained slots without being a candidate above
         const prunable = candidates.slice(MAX_SESSION_LOGS_FOLDERS - 1);
         if (prunable.length === 0) {
