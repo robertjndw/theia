@@ -23,6 +23,11 @@ import { FrontendApplicationConfigProvider } from '@theia/core/lib/browser/front
 // `WorkspaceService` transitively reads the frontend application config at module load time.
 FrontendApplicationConfigProvider.set({});
 
+// `xterm` probes for a canvas 2d context when it is loaded, which JSDOM does not implement and
+// loudly reports. Nothing under test renders, so an inert stub is enough to keep the output clean.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+(window.HTMLCanvasElement.prototype as any).getContext = () => undefined;
+
 import { expect } from 'chai';
 import { Container, ContainerModule } from '@theia/core/shared/inversify';
 import { ContributionProvider, Event, ILogger, MessageService, SelectionService } from '@theia/core';

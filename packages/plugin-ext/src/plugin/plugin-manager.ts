@@ -28,6 +28,7 @@ import {
     ConfigStorage,
     PluginManagerInitializeParams,
     PluginManagerStartParams,
+    PluginManagerStartResult,
     TerminalServiceExt,
     LocalizationExt,
     ExtensionKind
@@ -206,7 +207,7 @@ export abstract class AbstractPluginManagerExtImpl<P extends Record<string, any>
         }
     }
 
-    async $start(params: PluginManagerStartParams): Promise<void> {
+    async $start(params: PluginManagerStartParams): Promise<PluginManagerStartResult> {
         this.configStorage = params.configStorage;
 
         const [plugins, foreignPlugins] = await this.host.init(params.plugins);
@@ -219,6 +220,11 @@ export abstract class AbstractPluginManagerExtImpl<P extends Record<string, any>
             this.registerPlugin(plugin);
         }
 
+        // The host may skip a plugin it could not prepare, so report those back rather than
+        // letting the caller assume every requested plugin is now running.
+        const registered = new Set([...plugins, ...foreignPlugins].map(plugin => plugin.model.id));
+        const failed = params.plugins.filter(plugin => !registered.has(plugin.model.id)).map(plugin => plugin.model.id);
+
         // ensure plugins are registered before running activation events
         this.ready.resolve();
         // run eager plugins
@@ -228,10 +234,12 @@ export abstract class AbstractPluginManagerExtImpl<P extends Record<string, any>
         }
 
         if (this.host.loadTests) {
-            return this.host.loadTests();
+            await this.host.loadTests();
+            return { failed };
         }
 
         this.fireOnDidChange();
+        return { failed };
     }
 
     protected registerPlugin(plugin: Plugin): void {

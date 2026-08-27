@@ -14,6 +14,10 @@
 // SPDX-License-Identifier: EPL-2.0 OR GPL-2.0-only WITH Classpath-exception-2.0
 // *****************************************************************************
 
+// A tagged result rather than `R | undefined`, so a `prepare()` that legitimately resolves to
+// `undefined` isn't mistaken for a failure and dropped from the result.
+type Outcome<T, R> = { ok: true; value: R } | { ok: false; item: T; error: unknown };
+
 /**
  * Runs `prepare` for every item concurrently, preserving the original order in the result. An
  * item whose `prepare` rejects is reported via `onError` and left out of the result rather than
@@ -25,15 +29,17 @@ export async function settleIsolated<T, R>(
     prepare: (item: T) => Promise<R>,
     onError: (item: T, error: unknown) => void
 ): Promise<R[]> {
-    // `R` is unconstrained, so TS can't rule out it being itself thenable; the cast tells it what
-    // we already know - `prepare` resolves to a plain `R`, never something requiring a further await.
-    const settled = await Promise.all(items.map(async (item): Promise<R | undefined> => {
-        try {
-            return await prepare(item);
-        } catch (error) {
-            onError(item, error);
-            return undefined;
+    const settled = await Promise.all(items.map(item => prepare(item).then(
+        (value): Outcome<T, R> => ({ ok: true, value }),
+        (error): Outcome<T, R> => ({ ok: false, item, error })
+    )));
+    const result: R[] = [];
+    for (const outcome of settled) {
+        if (outcome.ok) {
+            result.push(outcome.value);
+        } else {
+            onError(outcome.item, outcome.error);
         }
-    })) as Array<R | undefined>;
-    return settled.filter((value): value is R => value !== undefined);
+    }
+    return result;
 }

@@ -96,4 +96,27 @@ describe('settleIsolated', () => {
         expect(result).to.deep.equal([2, 4, 6]);
         expect(errors).to.be.empty;
     });
+
+    it('keeps a successful item whose prepare() resolves to undefined, in order, alongside rejections and normal values', async () => {
+        // Regression test: `undefined` used to double as the internal failure sentinel, so a
+        // legitimately `undefined` result was indistinguishable from a failure and silently dropped.
+        const failedItems: string[] = [];
+
+        const result = await settleIsolated(
+            ['a', 'b', 'c', 'd'],
+            async item => {
+                if (item === 'a') {
+                    return undefined;
+                }
+                if (item === 'c') {
+                    throw new Error('boom');
+                }
+                return item;
+            },
+            item => failedItems.push(item)
+        );
+
+        expect(result).to.deep.equal([undefined, 'b', 'd']);
+        expect(failedItems).to.deep.equal(['c']);
+    });
 });
