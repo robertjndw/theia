@@ -1,5 +1,5 @@
 // *****************************************************************************
-// Copyright (C) 2024 robertjndw
+// Copyright (C) 2026 robertjndw
 //
 // This program and the accompanying materials are made available under the
 // terms of the Eclipse Public License v. 2.0 which is available at
@@ -15,10 +15,13 @@
 // *****************************************************************************
 
 import { ContainerModule } from '@theia/core/shared/inversify';
-import { BrowserOnlyTerminalService } from './browser-only-terminal-service';
-import { TerminalService } from '../browser/base/terminal-service';
+import { BrowserOnlyTerminalFrontendContribution } from './browser-only-terminal-frontend-contribution';
+import { TerminalFrontendContribution } from '../browser/terminal-frontend-contribution';
 
 export default new ContainerModule((bind, unbind, isBound, rebind) => {
-    bind(BrowserOnlyTerminalService).toSelf().inSingletonScope();
-    rebind(TerminalService).toService(BrowserOnlyTerminalService);
+    // `TerminalService`, `FrontendApplicationContribution`, `CommandContribution` and the other
+    // contribution points bound in `terminal-frontend-module.ts` are all resolved via
+    // `toService(TerminalFrontendContribution)`, so rebinding the contribution itself is what
+    // makes every one of those paths go through the browser-only implementation.
+    rebind(TerminalFrontendContribution).to(BrowserOnlyTerminalFrontendContribution).inSingletonScope();
 });

@@ -154,6 +154,12 @@ export class VSXExtension implements VSXExtensionData, TreeElement {
     @postConstruct()
     protected postConstruct(): void {
         this.registryUri = this.environment.getRegistryUri();
+        // `getRegistryLink()` awaits this promise lazily and needs the real rejection
+        // (e.g. in browser-only mode, where there is no backend to resolve it), so we must
+        // not swallow it here. This catch only marks the promise as handled to avoid an
+        // unhandled rejection at construction time; the rejection itself is left intact for
+        // whoever awaits `registryUri` later.
+        this.registryUri.catch(() => { /* handled above, see comment */ });
     }
 
     get uri(): URI {

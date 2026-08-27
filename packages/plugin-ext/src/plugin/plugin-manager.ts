@@ -245,8 +245,7 @@ export abstract class AbstractPluginManagerExtImpl<P extends Record<string, any>
         }
         this.registry.set(plugin.model.id, plugin);
         if (!plugin.pluginPath) {
-            // Nothing to activate without an entry point, and `rawModel` throws for plugins whose
-            // code lives in another host, so don't touch it.
+            // No entry point at all, so nothing to activate here.
             return;
         }
         const activationEvents = this.getActivationEvents(plugin);

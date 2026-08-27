@@ -25,6 +25,14 @@ At runtime the `frontendOnly` module of `@theia/plugin-ext` serves that list to 
 
 To verify that the extensions were correctly packaged, check the `lib/frontend/hostedPlugin` directory after a build. It should contain one directory per extension plus the `list.json` file. The build also prints a summary of the prepared and skipped extensions.
 
+#### Deploying
+
+Serve the `hostedPlugin/` directory with compression and caching enabled.
+
+`list.json` carries the normalized metadata of every bundled extension, including the TextMate grammars they contribute, so it grows with the number of extensions: for the ~85 extensions of the browser-only example it is around 5 MB uncompressed and around 800 KB gzipped. It is fetched and parsed on every application start, before any extension can load, so serving it uncompressed or uncacheable is noticeable on startup. Note that the `theia start` development server disables caching on purpose so that rebuilds are picked up; a production deployment should not.
+
+Each extension's `package.json` is fetched separately by the plugin host on start up as well, so the number of requests grows with the number of bundled extensions.
+
 #### Supplying the metadata manually
 
 Adopters who cannot rely on the build-time preparation - for example when the extensions are hosted elsewhere and are not visible to the build - can bind `PluginLocalOptions` to provide the metadata themselves. When bound, it takes precedence over `list.json`:
@@ -47,5 +55,5 @@ The extension files themselves still have to be reachable under `hostedPlugin/<p
 - Extensions that only contribute to the backend are skipped at build time; the build summary lists them.
 - `ExtensionContext.globalState` and `ExtensionContext.workspaceState` are kept in the browser storage of the current host, i.e. per browser and per deployment, and the workspace state is kept per workspace. They are subject to the browser's storage quota.
 - `ExtensionContext.storageUri`, `globalStorageUri` and `logUri` point into the browser-local file system, below the same config directory the application itself uses. `storageUri` is `undefined` while no workspace is open, as it is with a backend.
-- Installing, uninstalling, enabling and disabling extensions fails with an explanatory error, and the Extensions view lists no installed, uninstalled or disabled extensions. Change the set of extensions by rebuilding the application.
-- There are no terminals, because there is no backend to run a shell in. Opening one fails with an explanatory error.
+- The Extensions view lists the statically deployed extensions as built-in (`@builtin`); it lists no uninstalled or disabled extensions, since neither concept applies without a backend. Installing, uninstalling, enabling and disabling extensions fails with an explanatory error. Change the set of extensions by rebuilding the application.
+- There are no terminals, because there is no backend to run a shell in. The UI tells the user that terminals are unavailable, and the VS Code `window.createTerminal` API rejects.

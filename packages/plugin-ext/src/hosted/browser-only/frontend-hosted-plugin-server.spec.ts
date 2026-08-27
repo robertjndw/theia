@@ -1,5 +1,5 @@
 // *****************************************************************************
-// Copyright (C) 2023 EclipseSource and others.
+// Copyright (C) 2026 EclipseSource and others.
 //
 // This program and the accompanying materials are made available under the
 // terms of the Eclipse Public License v. 2.0 which is available at
@@ -16,6 +16,7 @@
 
 import { expect } from 'chai';
 import { Container } from '@theia/core/shared/inversify';
+import { enableJSDOM } from '@theia/core/lib/browser/test/jsdom';
 import { DeployedPlugin, PluginType } from '../../common';
 import { FrontendHostedPluginServer, PluginLocalOptions } from './frontend-hosted-plugin-server';
 
@@ -33,6 +34,11 @@ function plugin(name: string, version = '1.0.0'): DeployedPlugin {
 }
 
 describe('FrontendHostedPluginServer', () => {
+
+    // `fetchDeployedPlugins` resolves the list URL against `document.baseURI`.
+    let disableJSDOM: () => void;
+    before(() => { disableJSDOM = enableJSDOM(); });
+    after(() => disableJSDOM());
 
     const originalFetch = globalThis.fetch;
     let requestedUrls: string[];
@@ -63,7 +69,7 @@ describe('FrontendHostedPluginServer', () => {
         const server = createServer();
 
         expect(await server.getDeployedPluginIds()).to.deep.equal(['theia.a@1.0.0', 'theia.b@1.0.0']);
-        expect(requestedUrls).to.deep.equal(['./hostedPlugin/list.json']);
+        expect(requestedUrls).to.deep.equal(['http://localhost/hostedPlugin/list.json']);
     });
 
     it('fetches the list only once', async () => {
@@ -102,7 +108,7 @@ describe('FrontendHostedPluginServer', () => {
 
         await server.getDeployedPluginIds().then(
             () => expect.fail('should have rejected'),
-            error => expect(error.message).to.contain('./hostedPlugin/list.json').and.to.contain('404'));
+            error => expect(error.message).to.contain('http://localhost/hostedPlugin/list.json').and.to.contain('404'));
 
         expect(await server.getDeployedPluginIds()).to.deep.equal(['theia.a@1.0.0']);
     });

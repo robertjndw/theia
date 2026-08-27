@@ -1,5 +1,5 @@
 // *****************************************************************************
-// Copyright (C) 2023 EclipseSource and others.
+// Copyright (C) 2026 EclipseSource and others.
 //
 // This program and the accompanying materials are made available under the
 // terms of the Eclipse Public License v. 2.0 which is available at
@@ -50,7 +50,9 @@ export class FrontendHostedPluginServer implements HostedPluginServer, RpcConnec
         this.options ? Promise.resolve(this.options.pluginMetadata) : this.fetchDeployedPlugins());
 
     protected async fetchDeployedPlugins(): Promise<DeployedPlugin[]> {
-        const url = `./${PLUGINS_BASE_PATH}/${LIST_JSON}`;
+        // Resolved against `document.baseURI`, like `HostedPluginFileSystemProvider#toUrl`, so
+        // this keeps working when the application is deployed under a sub-path.
+        const url = new URL(`${PLUGINS_BASE_PATH}/${LIST_JSON}`, document.baseURI).toString();
         try {
             const response = await fetch(url);
             if (!response.ok) {
