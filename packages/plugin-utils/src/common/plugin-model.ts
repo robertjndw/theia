@@ -69,6 +69,15 @@ function toPluginAssetPath(pck: PluginIdentifierSource, relativePath: string): s
     return `${getPluginId(pck)}/${segments.join('/')}`;
 }
 
+/**
+ * Re-encodes an already decoded plugin asset path - what `URI.path` hands back - so it can be
+ * appended to a URL unchanged. Encoding per segment rather than as a whole keeps `/` literal, which
+ * plain static file servers need, and preserves names containing `#`, `?` or `%`.
+ */
+export function encodePluginAssetPath(decodedPath: string): string {
+    return decodedPath.split('/').map(encodeURIComponent).join('/');
+}
+
 /** Builds a static-friendly plugin asset URL: `hostedPlugin/<id>/<segments...>`. */
 export function toPluginUrl(pck: PluginIdentifierSource, relativePath: string): string {
     return `${PLUGINS_BASE_PATH}/${toPluginAssetPath(pck, relativePath)}`;

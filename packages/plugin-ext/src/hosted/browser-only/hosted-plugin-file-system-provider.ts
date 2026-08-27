@@ -22,6 +22,7 @@ import {
 } from '@theia/filesystem/lib/common/files';
 import { FileService, FileServiceContribution } from '@theia/filesystem/lib/browser/file-service';
 import { PLUGINS_BASE_PATH, PLUGINS_SCHEME } from '@theia/plugin-utils/lib/common/constants';
+import { encodePluginAssetPath } from '@theia/plugin-utils/lib/common/plugin-model';
 
 /**
  * Reads the plugin assets the build dropped under `PLUGINS_BASE_PATH`. With a backend those come
@@ -68,10 +69,12 @@ export class HostedPluginFileSystemProvider implements FileSystemProvider {
 
     /**
      * Maps the URI back to the path the build actually wrote, resolved against `document.baseURI`
-     * so this still works when the application is deployed under a sub-path.
+     * so this still works when the application is deployed under a sub-path. `URI.path` is decoded,
+     * so it has to be re-encoded - otherwise a `#` or `?` in an asset name would be read as a
+     * fragment or query by `URL`.
      */
     protected toUrl(resource: URI): string {
-        return new URL(`${PLUGINS_BASE_PATH}${resource.path.toString()}`, document.baseURI).toString();
+        return new URL(`${PLUGINS_BASE_PATH}${encodePluginAssetPath(resource.path.toString())}`, document.baseURI).toString();
     }
 
     protected async fetch(resource: URI, method: 'GET' | 'HEAD'): Promise<Response> {
