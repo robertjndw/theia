@@ -24,7 +24,7 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v7
 
-      # Native modules like native-keymap still build during npm ci, even though browser-only doesn't use them
+      # native-keymap is built during npm ci, even though browser-only doesn't need it
       - name: Install System Packages
         run: |
           sudo apt-get update
@@ -55,7 +55,7 @@ jobs:
 
       - name: Bundle Browser-Only Example
         working-directory: examples/browser-only
-        # Also prepares the downloaded plugins into lib/frontend/hostedPlugin
+        # also copies the downloaded plugins to lib/frontend/hostedPlugin
         run: npx theia build --mode production
         env:
           NODE_OPTIONS: --max_old_space_size=4096

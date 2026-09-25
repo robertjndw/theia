@@ -39,7 +39,7 @@ export class ExampleOPFSInitialization extends DefaultOPFSInitialization {
 
     protected async initializeDirectory(provider: OPFSFileSystemProvider, directory: string, files: { name: string, content: string }[]): Promise<void> {
         const directoryUri = new URI(directory);
-        // Only seed on first launch so the user's edits survive a reload
+        // don't overwrite the user's changes on reload
         if (await provider.exists(directoryUri)) {
             return;
         }

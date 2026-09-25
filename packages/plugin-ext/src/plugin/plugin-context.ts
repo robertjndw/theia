@@ -1685,8 +1685,7 @@ export class Plugin<T> implements theia.Plugin<T> {
         this.pluginType = plugin.model.entryPoint.frontend ? 'frontend' : 'backend';
 
         if (this.pluginType === 'frontend') {
-            // Resolve against the worker script instead of the origin, so this also works when the
-            // app is served from a sub path (e.g. GitHub Pages). worker-main loads plugins the same way.
+            // relative to the worker script, not the origin, so it works under a sub path like /theia/ on GitHub Pages
             this.pluginUri = URI.parse(new URL(PluginPackage.toPluginUrl(plugin.model, ''), self.location.href).toString());
         } else {
             this.pluginUri = URI.parse(plugin.pluginUri);
