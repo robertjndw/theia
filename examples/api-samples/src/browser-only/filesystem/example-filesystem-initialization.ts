@@ -19,6 +19,8 @@ import { inject, injectable, interfaces } from '@theia/core/shared/inversify';
 import { EncodingService } from '@theia/core/lib/common/encoding-service';
 import { OPFSInitialization, DefaultOPFSInitialization } from '@theia/filesystem/lib/browser-only/opfs-filesystem-initialization';
 import { OPFSFileSystemProvider } from '@theia/filesystem/lib/browser-only/opfs-filesystem-provider';
+import { exerciseFiles } from './example-exercise';
+import { solutionFiles } from './example-solution';
 
 @injectable()
 export class ExampleOPFSInitialization extends DefaultOPFSInitialization {
@@ -31,27 +33,20 @@ export class ExampleOPFSInitialization extends DefaultOPFSInitialization {
     }
 
     override async initializeFS(provider: OPFSFileSystemProvider): Promise<void> {
-        // Check whether the directory exists (relative to the root directory)
-        if (await provider.exists(new URI('/workspace'))) {
-            await provider.readdir(new URI('/workspace'));
-        } else {
-            await provider.mkdir(new URI('/workspace'));
-            await provider.writeFile(new URI('/workspace/my-file.txt'), this.encodingService.encode('foo').buffer, { create: true, overwrite: false });
-        }
+        await this.initializeDirectory(provider, '/exercise', exerciseFiles);
+        await this.initializeDirectory(provider, '/solution', solutionFiles);
+    }
 
-        if (await provider.exists(new URI('/workspace2'))) {
-            await provider.readdir(new URI('/workspace2'));
-        } else {
-            await provider.mkdir(new URI('/workspace2'));
-            await provider.writeFile(new URI('/workspace2/my-file.json'), this.encodingService.encode('{ foo: true }').buffer, { create: true, overwrite: false });
+    protected async initializeDirectory(provider: OPFSFileSystemProvider, directory: string, files: { name: string, content: string }[]): Promise<void> {
+        const directoryUri = new URI(directory);
+        // Only seed on first launch so the user's edits survive a reload
+        if (await provider.exists(directoryUri)) {
+            return;
         }
-
-        // You can also create an index of the files and directories in the file system
-        // await provider.clear();
-        // await provider.createIndex([
-        //     [new URI('/workspace/my-file.txt'), this.encodingService.encode('bar').buffer],
-        //     [new URI('/workspace2/my-file.json'), this.encodingService.encode('{ foo: true }').buffer]
-        // ]);
+        await provider.mkdir(directoryUri);
+        for (const file of files) {
+            await provider.writeFile(directoryUri.resolve(file.name), this.encodingService.encode(file.content).buffer, { create: true, overwrite: false });
+        }
     }
 }
 

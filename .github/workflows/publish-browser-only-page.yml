@@ -1,0 +1,71 @@
+name: Deploy Theia Browser-Only to GitHub Pages
+
+on:
+  push:
+    branches:
+      - ci/github-pages
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set Up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24.x
+          cache: 'npm'
+
+      - name: Set Up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Install and Compile
+        run: |
+          npm ci
+          npm run compile
+        env:
+          NODE_OPTIONS: --max_old_space_size=4096
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # https://github.com/microsoft/vscode-ripgrep/issues/9
+
+      - name: Download Plugins
+        working-directory: examples/browser-only
+        run: npm run download:plugins
+
+      - name: Bundle Browser-Only Example
+        working-directory: examples/browser-only
+        # Also prepares the downloaded plugins into lib/frontend/hostedPlugin
+        run: npx theia build --mode production
+        env:
+          NODE_OPTIONS: --max_old_space_size=4096
+
+      - name: Upload static files as artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: examples/browser-only/lib/frontend/
+
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

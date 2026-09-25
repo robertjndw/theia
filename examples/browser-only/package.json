@@ -14,7 +14,15 @@
       }
     }
   },
-  "theiaPluginsDir": "../../plugins",
+  "theiaPluginsDir": "plugins",
+  "theiaPlugins": {
+    "vscode-builtin-extensions": "https://github.com/eclipse-theia/vscode-builtin-extensions/releases/download/1.108.2/vscode-builtin-extensions-1.108.2.tar.gz",
+    "robertjndw.ts-executor-web": "https://github.com/robertjndw/ts-executor-web/releases/download/v0.0.1/ts-executor-web-0.0.1.vsix"
+  },
+  "theiaPluginsExcludeIds": [
+    "ms-vscode.js-debug-companion",
+    "vscode.extension-editing"
+  ],
   "dependencies": {
     "@theia/ai-chat": "1.76.0",
     "@theia/ai-chat-ui": "1.76.0",
@@ -80,7 +88,8 @@
     "start:watch": "concurrently --kill-others -n tsc,bundle,run -c red,yellow,green \"tsc -b -w --preserveWatchOutput\" \"npm run -s watch:bundle\" \"npm run -s start\"",
     "watch": "concurrently --kill-others -n tsc,bundle -c red,yellow \"tsc -b -w --preserveWatchOutput\" \"npm run -s watch:bundle\"",
     "watch:bundle": "theia build --watch --mode development",
-    "watch:compile": "tsc -b -w"
+    "watch:compile": "tsc -b -w",
+    "download:plugins": "theia download:plugins"
   },
   "devDependencies": {
     "@theia/cli": "1.76.0"

@@ -282,7 +282,6 @@ import { CommentsExtImpl } from './comments';
 import { CustomEditorsExtImpl } from './custom-editors';
 import { WebviewViewsExtImpl } from './webview-views';
 import { PluginPackage } from '../common';
-import { Endpoint } from '@theia/core/lib/browser/endpoint';
 import { FilePermission } from '@theia/filesystem/lib/common/files';
 import { TabsExtImpl } from './tabs';
 import { LocalizationExtImpl } from './localization-ext';
@@ -1686,8 +1685,9 @@ export class Plugin<T> implements theia.Plugin<T> {
         this.pluginType = plugin.model.entryPoint.frontend ? 'frontend' : 'backend';
 
         if (this.pluginType === 'frontend') {
-            const { origin } = new Endpoint();
-            this.pluginUri = URI.parse(origin + '/' + PluginPackage.toPluginUrl(plugin.model, ''));
+            // Resolve against the worker script instead of the origin, so this also works when the
+            // app is served from a sub path (e.g. GitHub Pages). worker-main loads plugins the same way.
+            this.pluginUri = URI.parse(new URL(PluginPackage.toPluginUrl(plugin.model, ''), self.location.href).toString());
         } else {
             this.pluginUri = URI.parse(plugin.pluginUri);
         }
