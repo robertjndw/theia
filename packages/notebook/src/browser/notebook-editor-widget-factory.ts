@@ -17,9 +17,11 @@
 import { nls, URI } from '@theia/core';
 import { WidgetFactory, NavigatableWidgetOptions, LabelProvider } from '@theia/core/lib/browser';
 import { inject, injectable } from '@theia/core/shared/inversify';
-import { NotebookEditorWidget, NotebookEditorWidgetContainerFactory, NotebookEditorProps } from './notebook-editor-widget';
+import { NotebookEditorWidget, NotebookEditorWidgetContainerFactory, NotebookEditorProps, NOTEBOOK_EDITOR_ID_PREFIX } from './notebook-editor-widget';
 import { NotebookService } from './service/notebook-service';
 import { NotebookModelResolverService } from './service/notebook-model-resolver-service';
+import { Deferred } from '@theia/core/lib/common/promise-util';
+import { NotebookModel } from './view-model/notebook-model';
 
 export interface NotebookEditorWidgetOptions extends NavigatableWidgetOptions {
     notebookType: string;
@@ -27,6 +29,13 @@ export interface NotebookEditorWidgetOptions extends NavigatableWidgetOptions {
 
 @injectable()
 export class NotebookEditorWidgetFactory implements WidgetFactory {
+
+    static createID(uri: URI, counter?: number): string {
+        return NOTEBOOK_EDITOR_ID_PREFIX
+            + uri.toString()
+            + (counter !== undefined ? `:${counter}` : '');
+    }
+
     readonly id: string = NotebookEditorWidget.ID;
 
     @inject(NotebookService)
@@ -51,6 +60,9 @@ export class NotebookEditorWidgetFactory implements WidgetFactory {
 
         const editor = await this.createEditor(uri, options.notebookType);
 
+        // Set the widget ID with counter to support multiple instances
+        editor.id = NotebookEditorWidgetFactory.createID(uri, options.counter);
+
         this.setLabels(editor, uri);
         const labelListener = this.labelProvider.onDidChange(event => {
             if (event.affects(uri)) {
@@ -62,10 +74,19 @@ export class NotebookEditorWidgetFactory implements WidgetFactory {
     }
 
     protected async createEditor(uri: URI, notebookType: string): Promise<NotebookEditorWidget> {
+        const notebookData = new Deferred<NotebookModel>();
+        const resolverError = new Deferred<string>();
+        this.notebookModelResolver.resolve(uri, notebookType).then(model => {
+            notebookData.resolve(model);
+        }).catch((reason: Error) => {
+            resolverError.resolve(reason.message);
+        });
+
         return this.createNotebookEditorWidget({
             uri,
             notebookType,
-            notebookData: this.notebookModelResolver.resolve(uri, notebookType),
+            notebookData: notebookData.promise,
+            error: resolverError.promise
         });
     }
 

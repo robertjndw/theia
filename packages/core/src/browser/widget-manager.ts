@@ -15,7 +15,7 @@
 // *****************************************************************************
 
 import { inject, named, injectable } from 'inversify';
-import { Widget } from '@phosphor/widgets';
+import { Widget } from '@lumino/widgets';
 import { ILogger, Emitter, Event, ContributionProvider, MaybePromise, WaitUntilEvent } from '../common';
 import stableJsonStringify = require('fast-json-stable-stringify');
 
@@ -119,7 +119,7 @@ export class WidgetManager {
     @inject(ContributionProvider) @named(WidgetFactory)
     protected readonly factoryProvider: ContributionProvider<WidgetFactory>;
 
-    @inject(ILogger)
+    @inject(ILogger) @named('core:WidgetManager')
     protected readonly logger: ILogger;
 
     protected readonly onWillCreateWidgetEmitter = new Emitter<WillCreateWidgetEvent>();

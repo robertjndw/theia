@@ -15,11 +15,12 @@
 // *****************************************************************************
 
 import { Container } from 'inversify';
-import { ContributionProvider } from '../../common';
-import { CorePreferences } from '../core-preferences';
+import { ContributionProvider, ILogger } from '../../common';
+import { CorePreferences } from '../../common/core-preferences';
 import { FrontendApplicationContribution } from '../frontend-application-contribution';
 import { DefaultWindowService } from './default-window-service';
 import assert = require('assert');
+import { MockLogger } from '../../common/test/mock-logger';
 
 describe('DefaultWindowService', () => {
     class TestFrontendApplicationContribution implements FrontendApplicationContribution {
@@ -42,6 +43,7 @@ describe('DefaultWindowService', () => {
             .toConstantValue({
                 'application.confirmExit': confirmExit,
             });
+        container.bind(ILogger).to(MockLogger).inSingletonScope();
         return container.get(DefaultWindowService);
     }
     it('onWillStop should be called on every contribution (never)', () => {
@@ -74,5 +76,27 @@ describe('DefaultWindowService', () => {
         assert(frontendContributions.every(contribution => !contribution.onWillStopCalled), 'contributions should not be called yet');
         assert(windowService['collectContributionUnloadVetoes']().length > 0, 'there should be vetoes');
         assert(frontendContributions.every(contribution => contribution.onWillStopCalled), 'contributions should have been called');
+    });
+    it('should reload unconditionally when restored from the back/forward cache', () => {
+        const frontendContributions: TestFrontendApplicationContribution[] = [
+            new TestFrontendApplicationContribution(true),
+        ];
+        const windowService = setupWindowService('always', frontendContributions);
+        let reloaded = 0;
+        windowService.reload = () => { reloaded++; };
+        windowService['handlePageShow']({ persisted: false } as PageTransitionEvent);
+        const reloadsBeforeRestore = reloaded;
+        windowService['handlePageShow']({ persisted: true } as PageTransitionEvent);
+        assert(reloadsBeforeRestore === 0, 'a regular page show should not reload');
+        assert(reloaded === 1, 'a restored page should reload');
+        assert(windowService['collectContributionUnloadVetoes']().length === 0, 'the recovery reload should not be vetoed');
+    });
+    it('onUnload should fire at most once, even if `pagehide` fires repeatedly', () => {
+        const windowService = setupWindowService('never', []);
+        let fired = 0;
+        windowService.onUnload(() => fired++);
+        windowService['handlePageHide']();
+        windowService['handlePageHide']();
+        assert(fired === 1, `onUnload should have fired once, but fired ${fired} time(s)`);
     });
 });

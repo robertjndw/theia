@@ -15,6 +15,7 @@
 // *****************************************************************************
 
 import { injectable, inject } from '@theia/core/shared/inversify';
+import { Emitter, Event } from '@theia/core';
 import { OutputChannel, OutputChannelManager } from '@theia/output/lib/browser/output-channel';
 
 @injectable()
@@ -25,12 +26,24 @@ export class ContainerOutputProvider implements ContainerOutputProvider {
 
     protected currentChannel?: OutputChannel;
 
+    protected readonly onDidReportStatusEmitter = new Emitter<string>();
+    /** Fires with each curated attach status message (from {@link RemoteStatusReport}). */
+    readonly onDidReportStatus: Event<string> = this.onDidReportStatusEmitter.event;
+
     openChannel(): void {
         this.currentChannel = this.outputChannelManager.getChannel('Container');
         this.currentChannel.show();
     };
 
     onRemoteOutput(output: string): void {
-        this.currentChannel?.appendLine(output);
+        if (output) {
+            this.currentChannel?.appendLine(output);
+        }
+    }
+
+    onRemoteStatus(message: string): void {
+        if (message) {
+            this.onDidReportStatusEmitter.fire(message);
+        }
     }
 }

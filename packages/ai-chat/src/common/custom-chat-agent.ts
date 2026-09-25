@@ -14,31 +14,41 @@
 // SPDX-License-Identifier: EPL-2.0 OR GPL-2.0-only WITH Classpath-exception-2.0
 // *****************************************************************************
 
-import { AgentSpecificVariables, PromptTemplate } from '@theia/ai-core';
-import { AbstractStreamParsingChatAgent, ChatAgent, SystemMessageDescription } from './chat-agents';
-import { injectable } from '@theia/core/shared/inversify';
+import { CustomAgentPromptVariant, LanguageModelRequirement } from '@theia/ai-core';
+import { AbstractStreamParsingChatAgent } from './chat-agents';
+import { ILogger } from '@theia/core';
+import { inject, injectable, named } from '@theia/core/shared/inversify';
 
 @injectable()
-export class CustomChatAgent
-    extends AbstractStreamParsingChatAgent
-    implements ChatAgent {
-    name: string;
-    description: string;
-    readonly variables: string[] = [];
-    readonly functions: string[] = [];
-    readonly promptTemplates: PromptTemplate[] = [];
-    readonly agentSpecificVariables: AgentSpecificVariables[] = [];
+export class CustomChatAgent extends AbstractStreamParsingChatAgent {
+    @inject(ILogger) @named('ai-chat:CustomChatAgent')
+    protected override readonly logger: ILogger;
 
-    constructor(
-    ) {
-        super('CustomChatAgent', [{ purpose: 'chat' }], 'chat');
-    }
-    protected override async getSystemMessageDescription(): Promise<SystemMessageDescription | undefined> {
-        const resolvedPrompt = await this.promptService.getPrompt(`${this.name}_prompt`);
-        return resolvedPrompt ? SystemMessageDescription.fromResolvedPromptTemplate(resolvedPrompt) : undefined;
-    }
+    id: string = 'CustomChatAgent';
+    name: string = 'CustomChatAgent';
+    languageModelRequirements: LanguageModelRequirement[] = [{ purpose: 'chat' }];
+    protected defaultLanguageModelPurpose: string = 'chat';
 
     set prompt(prompt: string) {
-        this.promptTemplates.push({ id: `${this.name}_prompt`, template: prompt });
+        // the name is dynamic, so we set the promptId here
+        this.systemPromptId = `${this.name}_prompt`;
+        this.prompts.push({ id: this.systemPromptId, defaultVariant: { id: `${this.name}_prompt`, template: prompt } });
+    }
+
+    /**
+     * Replace the variants of this agent's prompt set with the given list. Must be called
+     * AFTER {@link prompt} has been set, since it mutates the most recently pushed prompt set.
+     * Each entry becomes an additional variant of the default prompt; the variant id is used
+     * verbatim as the fragment id.
+     */
+    set promptVariants(variants: CustomAgentPromptVariant[] | undefined) {
+        if (!variants || variants.length === 0) {
+            return;
+        }
+        const promptSet = this.prompts[this.prompts.length - 1];
+        if (!promptSet) {
+            return;
+        }
+        promptSet.variants = variants.map(v => ({ id: v.id, template: v.template }));
     }
 }

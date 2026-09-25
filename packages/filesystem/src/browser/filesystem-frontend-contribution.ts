@@ -14,11 +14,10 @@
 // SPDX-License-Identifier: EPL-2.0 OR GPL-2.0-only WITH Classpath-exception-2.0
 // *****************************************************************************
 
-import { nls } from '@theia/core';
+import { CorePreferences, nls, ILogger } from '@theia/core';
 import {
     ApplicationShell,
     CommonCommands,
-    CorePreferences,
     ExpandableTreeNode,
     FrontendApplication,
     FrontendApplicationContribution,
@@ -36,14 +35,14 @@ import { Command, CommandContribution, CommandRegistry } from '@theia/core/lib/c
 import { Deferred } from '@theia/core/lib/common/promise-util';
 import URI from '@theia/core/lib/common/uri';
 import { environment } from '@theia/core/shared/@theia/application-package/lib/environment';
-import { inject, injectable } from '@theia/core/shared/inversify';
+import { inject, injectable, named } from '@theia/core/shared/inversify';
 import { UserWorkingDirectoryProvider } from '@theia/core/lib/browser/user-working-directory-provider';
 import { FileChangeType, FileChangesEvent, FileOperation } from '../common/files';
 import { FileDialogService, SaveFileDialogProps } from './file-dialog';
 import { FileSelection } from './file-selection';
 import { FileService, UserFileOperationEvent } from './file-service';
-import { FileUploadResult, FileUploadService } from './file-upload-service';
-import { FileSystemPreferences } from './filesystem-preferences';
+import { FileSystemPreferences } from '../common/filesystem-preferences';
+import { FileUploadService } from '../common/upload/file-upload';
 
 export namespace FileSystemCommands {
 
@@ -95,6 +94,9 @@ export class FileSystemFrontendContribution implements FrontendApplicationContri
 
     @inject(UserWorkingDirectoryProvider)
     protected readonly workingDirectory: UserWorkingDirectoryProvider;
+
+    @inject(ILogger) @named('filesystem:FileSystemFrontendContribution')
+    protected readonly logger: ILogger;
 
     protected onDidChangeEditorFileEmitter = new Emitter<{ editor: NavigatableWidget, type: FileChangeType }>();
     readonly onDidChangeEditorFile = this.onDidChangeEditorFileEmitter.event;
@@ -162,7 +164,7 @@ export class FileSystemFrontendContribution implements FrontendApplicationContri
         });
     }
 
-    protected async upload(selection: FileSelection): Promise<FileUploadResult | undefined> {
+    protected async upload(selection: FileSelection): Promise<FileUploadService.UploadResult | undefined> {
         try {
             const source = TreeWidgetSelection.getSource(this.selectionService.selection);
             const fileUploadResult = await this.uploadService.upload(selection.fileStat.isDirectory ? selection.fileStat.resource : selection.fileStat.resource.parent);
@@ -172,7 +174,7 @@ export class FileSystemFrontendContribution implements FrontendApplicationContri
             return fileUploadResult;
         } catch (e) {
             if (!isCancelled(e)) {
-                console.error(e);
+                this.logger.error(e);
             }
         }
     }
@@ -228,7 +230,7 @@ export class FileSystemFrontendContribution implements FrontendApplicationContri
             try {
                 await operation();
             } catch (e) {
-                console.error(e);
+                this.logger.error(e);
             }
         });
     }

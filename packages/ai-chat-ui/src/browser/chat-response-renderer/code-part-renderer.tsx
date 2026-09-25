@@ -23,14 +23,16 @@ import { ClipboardService } from '@theia/core/lib/browser/clipboard-service';
 import { inject, injectable, named } from '@theia/core/shared/inversify';
 import * as React from '@theia/core/shared/react';
 import { ReactNode } from '@theia/core/shared/react';
+import { nls } from '@theia/core/lib/common/nls';
 import { Position } from '@theia/core/shared/vscode-languageserver-protocol';
 import { EditorManager, EditorWidget } from '@theia/editor/lib/browser';
-import { MonacoEditor } from '@theia/monaco/lib/browser/monaco-editor';
+import { SimpleMonacoEditor } from '@theia/monaco/lib/browser/simple-monaco-editor';
 import { MonacoEditorProvider } from '@theia/monaco/lib/browser/monaco-editor-provider';
 import { MonacoLanguages } from '@theia/monaco/lib/browser/monaco-languages';
 import { ChatResponsePartRenderer } from '../chat-response-part-renderer';
 import { ChatViewTreeWidget, ResponseNode } from '../chat-tree-view/chat-view-tree-widget';
 import { IMouseEvent } from '@theia/monaco-editor-core';
+import { CodeWrapperEditors } from './code-wrapper-editors';
 
 export const CodePartRendererAction = Symbol('CodePartRendererAction');
 /**
@@ -113,7 +115,7 @@ export class CodePartRenderer
     private getTitle(uri: URI | undefined, language: string | undefined): string {
         // If there is a URI, use the file name as the title. Otherwise, use the language as the title.
         // If there is no language, use a generic fallback title.
-        return uri?.path?.toString().split('/').pop() ?? language ?? 'Generated Code';
+        return uri?.path?.toString().split('/').pop() ?? language ?? nls.localize('theia/ai/chat-ui/code-part-renderer/generatedCode', 'Generated Code');
     }
 
     /**
@@ -136,7 +138,8 @@ export class CodePartRenderer
         this.contextMenuRenderer.render({
             menuPath: ChatViewTreeWidget.CONTEXT_MENU,
             anchor: { x: event.posx, y: event.posy },
-            args: [node, { code }]
+            args: [node, { code }],
+            context: event.target
         });
         event.preventDefault();
     }
@@ -154,10 +157,30 @@ export class CopyToClipboardButtonAction implements CodePartRendererAction {
 
 const CopyToClipboardButton = (props: { code: string, clipboardService: ClipboardService }) => {
     const { code, clipboardService } = props;
+    const [copied, setCopied] = React.useState(false);
+    const timeoutRef = React.useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+
+    React.useEffect(() => () => {
+        if (timeoutRef.current !== undefined) {
+            clearTimeout(timeoutRef.current);
+        }
+    }, []);
+
     const copyCodeToClipboard = React.useCallback(() => {
         clipboardService.writeText(code);
+        setCopied(true);
+        if (timeoutRef.current !== undefined) {
+            clearTimeout(timeoutRef.current);
+        }
+        timeoutRef.current = setTimeout(() => {
+            setCopied(false);
+            timeoutRef.current = undefined;
+        }, 2000);
     }, [code, clipboardService]);
-    return <div className='button codicon codicon-copy' title='Copy' role='button' onClick={copyCodeToClipboard}></div>;
+
+    const iconClass = copied ? 'codicon-check' : 'codicon-copy';
+    const title = copied ? nls.localizeByDefault('Copied') : nls.localizeByDefault('Copy');
+    return <div className={`button codicon ${iconClass}`} title={title} role='button' onClick={copyCodeToClipboard}></div>;
 };
 
 @injectable()
@@ -189,7 +212,7 @@ const InsertCodeAtCursorButton = (props: { code: string, editorManager: EditorMa
             }]);
         }
     }, [code, editorManager]);
-    return <div className='button codicon codicon-insert' title='Insert at Cursor' role='button' onClick={insertCode}></div>;
+    return <div className='button codicon codicon-insert' title={nls.localizeByDefault('Insert At Cursor')} role='button' onClick={insertCode}></div>;
 };
 
 /**
@@ -204,11 +227,11 @@ export const CodeWrapper = (props: {
 }) => {
     // eslint-disable-next-line no-null/no-null
     const ref = React.useRef<HTMLDivElement | null>(null);
-    const editorRef = React.useRef<MonacoEditor | undefined>(undefined);
+    const editorRef = React.useRef<SimpleMonacoEditor | undefined>(undefined);
 
     const createInputElement = async () => {
         const resource = await props.untitledResourceResolver.createUntitledResource(undefined, props.language);
-        const editor = await props.editorProvider.createInline(resource.uri, ref.current!, {
+        const editor = await props.editorProvider.createSimpleInline(resource.uri, ref.current!, {
             readOnly: true,
             autoSizing: true,
             scrollBeyondLastLine: false,
@@ -222,16 +245,23 @@ export const CodeWrapper = (props: {
             wordWrap: 'off',
             codeLens: false,
             inlayHints: { enabled: 'off' },
-            hover: { enabled: false }
+            hover: { enabled: 'off' }
         });
         editor.document.textEditorModel.setValue(props.content);
         editor.getControl().onContextMenu(e => props.contextMenuCallback(e.event));
         editorRef.current = editor;
+        if (ref.current) {
+            CodeWrapperEditors.set(ref.current, editor);
+        }
     };
 
     React.useEffect(() => {
         createInputElement();
+        const element = ref.current;
         return () => {
+            if (element) {
+                CodeWrapperEditors.remove(element);
+            }
             if (editorRef.current) {
                 editorRef.current.dispose();
             }
@@ -246,5 +276,5 @@ export const CodeWrapper = (props: {
 
     editorRef.current?.resizeToFit();
 
-    return <div className='theia-CodeWrapper' ref={ref}></div>;
+    return <div className={CodeWrapperEditors.CLASS} ref={ref}></div>;
 };

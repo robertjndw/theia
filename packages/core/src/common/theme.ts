@@ -18,6 +18,8 @@ import { URI } from 'vscode-uri';
 
 export type ThemeType = 'light' | 'dark' | 'hc' | 'hcLight';
 
+export type ThemeMode = 'light' | 'dark';
+
 export interface Theme {
     readonly id: string;
     readonly type: ThemeType;
@@ -32,6 +34,10 @@ export function isHighContrast(scheme: ThemeType): boolean {
     return scheme === 'hc' || scheme === 'hcLight';
 }
 
+export function getThemeMode(type: ThemeType): ThemeMode {
+    return (type === 'hc' || type === 'dark') ? 'dark' : 'light';
+}
+
 export interface ThemeChangeEvent {
     readonly newTheme: Theme;
     readonly oldTheme?: Theme;
@@ -41,9 +47,22 @@ export interface ThemeColor {
     readonly id: string;
 }
 
+// Copied from https://github.com/microsoft/vscode/blob/1.106.1/src/vs/base/common/themables.ts
+export function isThemeColor(obj: unknown): obj is ThemeColor {
+    return !!obj && typeof obj === 'object' && typeof (<ThemeColor>obj).id === 'string';
+}
+
 export interface ThemeIcon {
     readonly id: string;
     readonly color?: ThemeColor;
+}
+
+// Copied and modified from https://github.com/microsoft/vscode/blob/1.106.1/src/vs/base/common/themables.ts
+export function isThemeIcon(obj: unknown): obj is ThemeIcon {
+    return !!obj &&
+        typeof obj === 'object' &&
+        typeof (<ThemeIcon>obj).id === 'string' &&
+        (typeof (<ThemeIcon>obj).color === 'undefined' || isThemeColor((<ThemeIcon>obj).color));
 }
 
 export interface IconDefinition {

@@ -15,12 +15,13 @@
 // *****************************************************************************
 
 import * as path from 'path';
-import { inject, injectable } from '@theia/core/shared/inversify';
-import { PluginDeployerResolverContext } from '@theia/plugin-ext';
+import { inject, injectable, named } from '@theia/core/shared/inversify';
+import { PluginDeployerResolverContext, PluginIdentifiers } from '@theia/plugin-ext';
 import { LocalPluginDeployerResolver } from '@theia/plugin-ext/lib/main/node/resolvers/local-plugin-deployer-resolver';
 import { PluginVSCodeEnvironment } from '../common/plugin-vscode-environment';
 import { isVSCodePluginFile } from './plugin-vscode-file-handler';
-import { existsInDeploymentDir, unpackToDeploymentDir } from './plugin-vscode-utils';
+import { existsInDeploymentDir, unpackToDeploymentDir, extractExtensionIdentityFromVsix } from './plugin-vscode-utils';
+import { ILogger } from '@theia/core';
 
 @injectable()
 export class LocalVSIXFilePluginDeployerResolver extends LocalPluginDeployerResolver {
@@ -28,6 +29,9 @@ export class LocalVSIXFilePluginDeployerResolver extends LocalPluginDeployerReso
     static FILE_EXTENSION = '.vsix';
 
     @inject(PluginVSCodeEnvironment) protected readonly environment: PluginVSCodeEnvironment;
+
+    @inject(ILogger) @named('plugin-ext-vscode:LocalVSIXFilePluginDeployerResolver')
+    protected override readonly logger: ILogger;
 
     protected get supportedScheme(): string {
         return LocalVSIXFilePluginDeployerResolver.LOCAL_FILE;
@@ -38,14 +42,40 @@ export class LocalVSIXFilePluginDeployerResolver extends LocalPluginDeployerReso
     }
 
     async resolveFromLocalPath(pluginResolverContext: PluginDeployerResolverContext, localPath: string): Promise<void> {
-        const extensionId = path.basename(localPath, LocalVSIXFilePluginDeployerResolver.FILE_EXTENSION);
+        // Extract the true extension identity from the VSIX package.json
+        // This prevents duplicate installations when the same extension is installed from VSIX files with different filenames
+        // See: https://github.com/eclipse-theia/theia/issues/16845
+        const components = await extractExtensionIdentityFromVsix(localPath);
 
-        if (await existsInDeploymentDir(this.environment, extensionId)) {
-            console.log(`[${pluginResolverContext.getOriginId()}]: Target dir already exists in plugin deployment dir`);
+        if (!components) {
+            // Fallback to filename-based ID if package.json cannot be read
+            // This maintains backward compatibility for edge cases
+            const fallbackId = path.basename(localPath, LocalVSIXFilePluginDeployerResolver.FILE_EXTENSION);
+            this.logger.warn(`[${pluginResolverContext.getOriginId()}]: Could not read extension identity from VSIX, falling back to filename: ${fallbackId}`);
+
+            if (await existsInDeploymentDir(this.environment, fallbackId)) {
+                this.logger.info(`[${pluginResolverContext.getOriginId()}]: Target dir already exists in plugin deployment dir`);
+                return;
+            }
+
+            const fallbackDeploymentDir = await unpackToDeploymentDir(this.environment, localPath, fallbackId);
+            pluginResolverContext.addPlugin(fallbackId, fallbackDeploymentDir);
             return;
         }
 
-        const extensionDeploymentDir = await unpackToDeploymentDir(this.environment, localPath, extensionId);
-        pluginResolverContext.addPlugin(extensionId, extensionDeploymentDir);
+        const versionedId = PluginIdentifiers.componentsToVersionedId(components);
+
+        // Check if the deployment directory already exists on disk
+        if (await existsInDeploymentDir(this.environment, versionedId)) {
+            const unversionedId = PluginIdentifiers.componentsToUnversionedId(components);
+            const error = new Error(
+                `Extension ${unversionedId} is already installed (version: ${components.version}).`
+            );
+            error.name = 'DuplicateExtensionError';
+            throw error;
+        }
+
+        const extensionDeploymentDir = await unpackToDeploymentDir(this.environment, localPath, versionedId);
+        pluginResolverContext.addPlugin(versionedId, extensionDeploymentDir);
     }
 }

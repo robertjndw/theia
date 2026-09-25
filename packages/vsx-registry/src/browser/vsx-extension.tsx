@@ -21,24 +21,30 @@ import URI from '@theia/core/lib/common/uri';
 import { TreeElement, TreeElementNode } from '@theia/core/lib/browser/source-tree';
 import { OpenerService, open, OpenerOptions } from '@theia/core/lib/browser/opener-service';
 import { HostedPluginSupport } from '@theia/plugin-ext/lib/hosted/browser/hosted-plugin';
-import { PluginServer, DeployedPlugin, PluginType, PluginIdentifiers, PluginDeployOptions } from '@theia/plugin-ext/lib/common/plugin-protocol';
+import { PluginServer, DeployedPlugin, PluginIdentifiers, PluginDeployOptions } from '@theia/plugin-ext/lib/common/plugin-protocol';
+import { WorkspaceTrustService } from '@theia/workspace/lib/browser/workspace-trust-service';
 import { VSCodeExtensionUri } from '@theia/plugin-ext-vscode/lib/common/plugin-vscode-uri';
 import { ProgressService } from '@theia/core/lib/common/progress-service';
 import { Endpoint } from '@theia/core/lib/browser/endpoint';
 import { VSXEnvironment } from '../common/vsx-environment';
 import { VSXExtensionsSearchModel } from './vsx-extensions-search-model';
+import { TypeBadge } from './type-badge';
+import { ExtensionCard, ExtensionCardTrust } from './extension-card';
 import { CommandRegistry, MenuPath, nls } from '@theia/core/lib/common';
 import { codicon, ConfirmDialog, ContextMenuRenderer, HoverService, TreeWidget } from '@theia/core/lib/browser';
 import { VSXExtensionNamespaceAccess, VSXUser } from '@theia/ovsx-client/lib/ovsx-types';
 import { WindowService } from '@theia/core/lib/browser/window/window-service';
 import { MarkdownStringImpl } from '@theia/core/lib/common/markdown-rendering';
+import { VSXExtensionsModel } from './vsx-extensions-model';
 
 export const EXTENSIONS_CONTEXT_MENU: MenuPath = ['extensions_context_menu'];
 
 export namespace VSXExtensionsContextMenu {
     export const INSTALL = [...EXTENSIONS_CONTEXT_MENU, '1_install'];
-    export const COPY = [...EXTENSIONS_CONTEXT_MENU, '2_copy'];
-    export const CONTRIBUTION = [...EXTENSIONS_CONTEXT_MENU, '3_contribution'];
+    export const DISABLE = [...EXTENSIONS_CONTEXT_MENU, '2_disable'];
+    export const ENABLE = [...EXTENSIONS_CONTEXT_MENU, '2_enable'];
+    export const COPY = [...EXTENSIONS_CONTEXT_MENU, '3_copy'];
+    export const CONTRIBUTION = [...EXTENSIONS_CONTEXT_MENU, '4_contribution'];
 }
 
 @injectable()
@@ -86,6 +92,8 @@ export class VSXExtensionData {
 @injectable()
 export class VSXExtensionOptions {
     readonly id: string;
+    readonly version?: string;
+    readonly model: VSXExtensionsModel;
 }
 
 export const VSXExtensionFactory = Symbol('VSXExtensionFactory');
@@ -136,6 +144,9 @@ export class VSXExtension implements VSXExtensionData, TreeElement {
     @inject(CommandRegistry)
     readonly commandRegistry: CommandRegistry;
 
+    @inject(WorkspaceTrustService)
+    protected readonly workspaceTrustService: WorkspaceTrustService;
+
     protected readonly data: Partial<VSXExtensionData> = {};
 
     protected registryUri: Promise<string>;
@@ -153,8 +164,16 @@ export class VSXExtension implements VSXExtensionData, TreeElement {
         return this.options.id;
     }
 
+    get installedVersion(): string | undefined {
+        return this.plugin?.metadata.model.version || this.options.version;
+    }
+
+    get model(): VSXExtensionsModel {
+        return this.options.model;
+    }
+
     get visible(): boolean {
-        return !!this.name;
+        return true;
     }
 
     get plugin(): DeployedPlugin | undefined {
@@ -162,11 +181,31 @@ export class VSXExtension implements VSXExtensionData, TreeElement {
     }
 
     get installed(): boolean {
-        return !!this.plugin;
+        return this.model.isInstalled(this.id);
+    }
+
+    get uninstalled(): boolean {
+        const installedVersion = this.installedVersion;
+        return !!installedVersion && this.model
+            .isUninstalled(PluginIdentifiers.idAndVersionToVersionedId({ id: this.id as PluginIdentifiers.UnversionedId, version: installedVersion }));
+    }
+
+    get deployed(): boolean {
+        const installedVersion = this.installedVersion;
+        return !!installedVersion && this.model
+            .isDeployed(PluginIdentifiers.idAndVersionToVersionedId({ id: this.id as PluginIdentifiers.UnversionedId, version: installedVersion }));
+    }
+
+    get disabled(): boolean {
+        return this.model.isDisabled(this.id);
+    }
+
+    get disabledByTrust(): boolean {
+        return this.pluginSupport.disabledByTrust.has(this.id as PluginIdentifiers.UnversionedId);
     }
 
     get builtin(): boolean {
-        return this.plugin?.type === PluginType.System;
+        return this.model.isBuiltIn(this.id);
     }
 
     update(data: Partial<VSXExtensionData>): void {
@@ -207,7 +246,7 @@ export class VSXExtension implements VSXExtensionData, TreeElement {
     }
 
     get displayName(): string | undefined {
-        return this.getData('displayName') || this.name;
+        return this.getData('displayName') || this.name || this.id;
     }
 
     get description(): string | undefined {
@@ -231,12 +270,18 @@ export class VSXExtension implements VSXExtensionData, TreeElement {
     }
 
     get readmeUrl(): string | undefined {
-        const plugin = this.plugin;
-        const readmeUrl = plugin && plugin.metadata.model.readmeUrl;
-        if (readmeUrl) {
-            return new Endpoint({ path: readmeUrl }).getRestUrl().toString();
-        }
-        return this.data['readmeUrl'];
+        return this.localReadmeUrl ?? this.data['readmeUrl'];
+    }
+
+    /**
+     * The README URL served by the local plugin host for an installed extension, or `undefined`
+     * if the README is not available locally (e.g. for a non-installed extension whose README is
+     * hosted by the remote registry). A local README is same-origin and can be fetched directly by
+     * the frontend, whereas a remote README must be retrieved through the backend `VSXRegistryService`.
+     */
+    get localReadmeUrl(): string | undefined {
+        const readmeUrl = this.plugin?.metadata.model.readmeUrl;
+        return readmeUrl ? new Endpoint({ path: readmeUrl }).getRestUrl().toString() : undefined;
     }
 
     get licenseUrl(): string | undefined {
@@ -281,8 +326,21 @@ export class VSXExtension implements VSXExtensionData, TreeElement {
     }
 
     get tooltip(): string {
-        let md = `__${this.displayName}__ ${VSXExtension.formatVersion(this.version)}\n\n${this.description}\n_____\n\n${nls.localizeByDefault('Publisher: {0}', this.publisher)}`;
-
+        const version = VSXExtension.formatVersion(this.version);
+        let md = `__${this.displayName}__`;
+        if (version) {
+            md += ` ${version}`;
+        }
+        if (this.disabled && this.installed) {
+            md += ` (${nls.localizeByDefault('Disabled')})`;
+        }
+        if (this.description) {
+            md += `\n\n${this.description}`;
+        }
+        md += '\n_____\n\n';
+        if (this.publisher) {
+            md += nls.localizeByDefault('Publisher: {0}', this.publisher);
+        }
         if (this.license) {
             md += `  \r${nls.localize('theia/vsx-registry/license', 'License: {0}', this.license)}`;
         }
@@ -295,52 +353,102 @@ export class VSXExtension implements VSXExtensionData, TreeElement {
             md += `  \r${getAverageRatingTitle(this.averageRating)}`;
         }
 
+        if (this.disabledByTrust) {
+            md += `  \r${nls.localizeByDefault(
+                'This extension has been disabled because the current workspace is not trusted.'
+            )}`;
+        }
+
         return md;
     }
 
-    protected _busy = 0;
-    get busy(): boolean {
-        return !!this._busy;
+    protected _currentTaskName: string | undefined;
+    get currentTask(): string | undefined {
+        return this._currentTaskName;
+    }
+    protected _currentTask: Promise<void> | undefined;
+
+    protected runTask(name: string, task: () => Promise<void>): Promise<void> {
+        if (this._currentTask) {
+            return Promise.reject('busy');
+        }
+        this._currentTaskName = name;
+        this._currentTask = task();
+        this._currentTask.finally(() => {
+            this._currentTask = undefined;
+            this._currentTaskName = undefined;
+        });
+        return this._currentTask;
     }
 
     async install(options?: PluginDeployOptions): Promise<void> {
         if (!this.verified) {
             const choice = await new ConfirmDialog({
-                title: nls.localize('theia/vsx-registry/confirmDialogTitle', 'Are you sure you want to proceed with the installation ?'),
+                title: nls.localize('theia/vsx-registry/confirmDialogTitle', 'Are you sure you want to proceed with the installation?'),
                 msg: nls.localize('theia/vsx-registry/confirmDialogMessage', 'The extension "{0}" is unverified and might pose a security risk.', this.displayName)
             }).open();
-            if (choice) {
-                this.doInstall(options);
+            if (!choice) {
+                return;
             }
-        } else {
-            this.doInstall(options);
         }
+        const isTrusted = await this.workspaceTrustService.getWorkspaceTrust();
+        if (!isTrusted) {
+            const choice = await new ConfirmDialog({
+                title: nls.localizeByDefault('Restricted Mode'),
+                msg: nls.localize(
+                    'theia/vsx-registry/restrictedModeInstallWarning',
+                    'The extension \'{0}\' may be disabled if it does not support running in Restricted Mode. Trust this workspace to ensure the extension works as expected.',
+                    this.displayName
+                )
+            }).open();
+            if (!choice) {
+                return;
+            }
+        }
+        await this.doInstall(options);
     }
 
     async uninstall(): Promise<void> {
-        this._busy++;
-        try {
-            const { plugin } = this;
-            if (plugin) {
-                await this.progressService.withProgress(
+        const { id, installedVersion } = this;
+        if (id && installedVersion) {
+            await this.runTask(nls.localizeByDefault('Uninstalling'),
+                async () => await this.progressService.withProgress(
                     nls.localizeByDefault('Uninstalling {0}...', this.id), 'extensions',
-                    () => this.pluginServer.uninstall(PluginIdentifiers.componentsToVersionedId(plugin.metadata.model))
+                    () => this.pluginServer.uninstall(PluginIdentifiers.idAndVersionToVersionedId({ id: (id as PluginIdentifiers.UnversionedId), version: installedVersion }))
+                )
+            );
+        }
+    }
+
+    async disable(): Promise<void> {
+        const { id, installedVersion } = this;
+        if (id && installedVersion) {
+            await this.runTask(nls.localize('vsx.disabling', 'Disabling'), async () => {
+                await this.progressService.withProgress(
+                    nls.localize('vsx.disabling.extensions', 'Disabling {0}...', this.id), 'extensions',
+                    () => this.pluginServer.disablePlugin(id as PluginIdentifiers.UnversionedId)
                 );
-            }
-        } finally {
-            this._busy--;
+            });
+        }
+    }
+
+    async enable(): Promise<void> {
+        const { id, installedVersion } = this;
+        if (id && installedVersion) {
+            await this.runTask(nls.localize('vsx.enabling', 'Enabling'), async () => {
+                await this.progressService.withProgress(
+                    nls.localize('vsx.enabling.extension', 'Enabling {0}...', this.id), 'extensions',
+                    () => this.pluginServer.enablePlugin(id as PluginIdentifiers.UnversionedId)
+                );
+            });
         }
     }
 
     protected async doInstall(options?: PluginDeployOptions): Promise<void> {
-        this._busy++;
-        try {
-            await this.progressService.withProgress(nls.localizeByDefault("Installing extension '{0}' v{1}...", this.id, this.version ?? 0), 'extensions', () =>
-                this.pluginServer.deploy(this.uri.toString(), undefined, options)
-            );
-        } finally {
-            this._busy--;
-        }
+        await this.runTask(nls.localizeByDefault('Installing'),
+            () => this.progressService.withProgress(nls.localizeByDefault("Installing extension '{0}' v{1}...", this.id, this.version ?? 0), 'extensions', () =>
+                this.pluginServer.install(this.uri.toString(), undefined, options)
+            ));
     }
 
     handleContextMenu(e: React.MouseEvent<HTMLElement, MouseEvent>): void {
@@ -351,7 +459,8 @@ export class VSXExtension implements VSXExtensionData, TreeElement {
                 x: e.clientX,
                 y: e.clientY,
             },
-            args: [this]
+            args: [this],
+            context: e.currentTarget
         });
     }
 
@@ -434,32 +543,26 @@ export abstract class AbstractVSXExtensionComponent<Props extends AbstractVSXExt
     };
 
     protected renderAction(host?: TreeWidget): React.ReactNode {
-        const { builtin, busy, plugin } = this.props.extension;
+        const { builtin, currentTask, disabled, uninstalled, installed, deployed } = this.props.extension;
         const isFocused = (host?.model.getFocusedNode() as TreeElementNode)?.element === this.props.extension;
         const tabIndex = (!host || isFocused) ? 0 : undefined;
-        const installed = !!plugin;
-        const outOfSynch = plugin?.metadata.outOfSync;
-        if (builtin) {
-            return <div className="codicon codicon-settings-gear action" tabIndex={tabIndex} onClick={this.manage}></div>;
+        const inactive = disabled || uninstalled || !installed;
+        const outOfSync = (installed && uninstalled) || deployed === inactive;
+        if (currentTask) {
+            return <button className="theia-button action prominent theia-mod-disabled">{currentTask}</button>;
         }
-        if (busy) {
-            if (installed) {
-                return <button className="theia-button action theia-mod-disabled">{nls.localizeByDefault('Uninstalling')}</button>;
+        return <div>
+            {
+                outOfSync && <button className="theia-button action" onClick={this.reloadWindow}>{nls.localizeByDefault('Reload Window')}</button>
             }
-            return <button className="theia-button action prominent theia-mod-disabled">{nls.localizeByDefault('Installing')}</button>;
-        }
-        if (installed) {
-            return <div>
-                {
-                    outOfSynch
-                        ? <button className="theia-button action" onClick={this.reloadWindow}>{nls.localizeByDefault('Reload Window')}</button>
-                        : <button className="theia-button action" onClick={this.uninstall}>{nls.localizeByDefault('Uninstall')}</button>
-                }
-
-                <div className="codicon codicon-settings-gear action" onClick={this.manage}></div>
-            </div>;
-        }
-        return <button className="theia-button prominent action" onClick={this.install}>{nls.localizeByDefault('Install')}</button>;
+            {
+                !builtin && installed && !uninstalled && <button className="theia-button action" onClick={this.uninstall}>{nls.localizeByDefault('Uninstall')}</button>
+            }
+            {
+                !builtin && !installed && <button className="theia-button prominent action" onClick={this.install}>{nls.localizeByDefault('Install')}</button>
+            }
+            <div className="codicon codicon-settings-gear action" tabIndex={tabIndex} onClick={this.manage}></div>
+        </div>;
     }
 
 }
@@ -485,52 +588,47 @@ export namespace VSXExtensionComponent {
 
 export class VSXExtensionComponent<Props extends VSXExtensionComponent.Props = VSXExtensionComponent.Props> extends AbstractVSXExtensionComponent<Props> {
     override render(): React.ReactNode {
-        const { iconUrl, publisher, displayName, description, version, downloadCount, averageRating, tooltip, verified } = this.props.extension;
+        const {
+            iconUrl, publisher, displayName, description, version, downloadCount,
+            averageRating, tooltip, verified, disabled, disabledByTrust, installed
+        } = this.props.extension;
 
-        return <div
-            className='theia-vsx-extension noselect'
-            onMouseEnter={event => {
-                this.props.hoverService.requestHover({
-                    content: new MarkdownStringImpl(tooltip),
-                    target: event.currentTarget,
-                    position: 'right'
-                });
-            }}
-            onMouseUp={event => {
-                if (event.button === 2) {
-                    this.manage(event);
-                }
-            }}
-        >
-            {iconUrl ?
-                <img className='theia-vsx-extension-icon' src={iconUrl} /> :
-                <div className='theia-vsx-extension-icon placeholder' />}
-            <div className='theia-vsx-extension-content'>
-                <div className='title'>
-                    <div className='noWrapInfo'>
-                        <span className='name'>{displayName}</span> <span className='version'>{VSXExtension.formatVersion(version)}</span>
-                    </div>
-                    <div className='stat'>
-                        {!!downloadCount && <span className='download-count'><i className={codicon('cloud-download')} />{downloadCompactFormatter.format(downloadCount)}</span>}
-                        {!!averageRating && <span className='average-rating'><i className={codicon('star-full')} />{averageRatingFormatter(averageRating)}</span>}
-                    </div>
-                </div>
-                <div className='noWrapInfo theia-vsx-extension-description'>{description}</div>
-                <div className='theia-vsx-extension-action-bar'>
-                    <div className='theia-vsx-extension-publisher-container'>
-                        {verified === true ? (
-                            <i className={codicon('verified-filled')} />
-                        ) : verified === false ? (
-                            <i className={codicon('verified')} />
-                        ) : (
-                            <i className={codicon('question')} />
-                        )}
-                        <span className='noWrapInfo theia-vsx-extension-publisher'>{publisher}</span>
-                    </div>
-                    {this.renderAction(this.props.host)}
-                </div>
-            </div>
-        </div >;
+        const trust: ExtensionCardTrust = verified === true ? 'verified' : verified === false ? 'unverified' : 'unknown';
+
+        return <ExtensionCard
+            title={displayName ?? ''}
+            version={VSXExtension.formatVersion(version)}
+            // Preserve the previous behaviour of always rendering the description row.
+            description={description ?? ''}
+            iconUrl={iconUrl}
+            typeBadge={
+                <TypeBadge
+                    icon={<i className='theia-extensions-type-badge-icon theia-extensions-type-badge-icon--extension' />}
+                    label={nls.localizeByDefault('Extension')}
+                    variant='extension'
+                />
+            }
+            titleLabels={
+                <>
+                    {disabled && installed && <span className='disabled'>&nbsp;({nls.localizeByDefault('disabled')})</span>}
+                    {disabledByTrust && <span className='disabled' title={nls.localizeByDefault('Disabled in Restricted Mode')}>
+                        ({nls.localizeByDefault('Restricted Mode')})
+                    </span>}
+                </>
+            }
+            stat={
+                <>
+                    {!!downloadCount && <span className='download-count'><i className={codicon('cloud-download')} />{downloadCompactFormatter.format(downloadCount)}</span>}
+                    {!!averageRating && <span className='average-rating'><i className={codicon('star-full')} />{averageRatingFormatter(averageRating)}</span>}
+                </>
+            }
+            publisher={publisher}
+            trust={trust}
+            actions={this.renderAction(this.props.host)}
+            extraClassName={disabledByTrust ? 'theia-vsx-extension-disabled-by-trust' : undefined}
+            hover={{ content: new MarkdownStringImpl(tooltip), hoverService: this.props.hoverService }}
+            onContextMenu={event => this.manage(event)}
+        />;
     }
 }
 
@@ -546,13 +644,13 @@ export class VSXExtensionEditorComponent extends AbstractVSXExtensionComponent {
     override render(): React.ReactNode {
         const {
             builtin, preview, id, iconUrl, publisher, displayName, description, version,
-            averageRating, downloadCount, repository, license, readme
+            averageRating, downloadCount, repository, license, readme, disabled, installed, disabledByTrust
         } = this.props.extension;
 
         const sanitizedReadme = !!readme ? DOMPurify.sanitize(readme) : undefined;
 
         return <React.Fragment>
-            <div className='header' ref={ref => this.header = (ref || undefined)}>
+            <div className='header' ref={ref => { this.header = (ref || undefined); }}>
                 {iconUrl ?
                     <img className='icon-container' src={iconUrl} /> :
                     <div className='icon-container placeholder' />}
@@ -562,6 +660,8 @@ export class VSXExtensionEditorComponent extends AbstractVSXExtensionComponent {
                         <span title='Extension identifier' className='identifier'>{id}</span>
                         {preview && <span className='preview'>Preview</span>}
                         {builtin && <span className='builtin'>Built-in</span>}
+                        {disabled && installed && <span className='disabled'>{nls.localizeByDefault('Disabled')}</span>}
+                        {disabledByTrust && <span className='restricted'>{nls.localizeByDefault('Restricted Mode')}</span>}
                     </div>
                     <div className='subtitle'>
                         <span title='Publisher name' className='publisher' onClick={this.searchPublisher}>
@@ -579,15 +679,20 @@ export class VSXExtensionEditorComponent extends AbstractVSXExtensionComponent {
                         {version && <span className='version'>{VSXExtension.formatVersion(version)}</span>}
                     </div>
                     <div className='description noWrapInfo'>{description}</div>
+                    {disabledByTrust && <div className='theia-vsx-extension-restricted-notice'>
+                        {nls.localizeByDefault(
+                            'This extension has been disabled because the current workspace is not trusted.'
+                        )}
+                    </div>}
                     {this.renderAction()}
                 </div>
             </div>
             {
                 sanitizedReadme &&
                 <div className='scroll-container'
-                    ref={ref => this._scrollContainer = (ref || undefined)}>
+                    ref={ref => { this._scrollContainer = (ref || undefined); }}>
                     <div className='body'
-                        ref={ref => this.body = (ref || undefined)}
+                        ref={ref => { this.body = (ref || undefined); }}
                         onClick={this.openLink}
                         // eslint-disable-next-line react/no-danger
                         dangerouslySetInnerHTML={{ __html: sanitizedReadme }}

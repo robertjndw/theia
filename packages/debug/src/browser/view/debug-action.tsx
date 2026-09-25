@@ -16,11 +16,12 @@
 
 import * as React from '@theia/core/shared/react';
 import { codiconArray, DISABLED_CLASS } from '@theia/core/lib/browser';
+import { MenuPath } from '@theia/core';
 
 export class DebugAction extends React.Component<DebugAction.Props> {
 
     override render(): React.ReactNode {
-        const { enabled, label, iconClass } = this.props;
+        const { enabled, label, tooltip, iconClass } = this.props;
         const classNames = ['debug-action'];
         if (iconClass) {
             classNames.push(...codiconArray(iconClass, true));
@@ -30,8 +31,8 @@ export class DebugAction extends React.Component<DebugAction.Props> {
         }
         return <span tabIndex={0}
             className={classNames.join(' ')}
-            title={label}
-            onClick={this.props.run}
+            title={tooltip || label}
+            onClick={() => { this.props.run([]); }}
             ref={this.setRef} >
             {!iconClass && <div>{label}</div>}
         </span>;
@@ -44,14 +45,15 @@ export class DebugAction extends React.Component<DebugAction.Props> {
     }
 
     protected ref: HTMLElement | undefined;
-    protected setRef = (ref: HTMLElement | null) => this.ref = ref || undefined;
+    protected setRef = (ref: HTMLElement | null): void => { this.ref = ref || undefined; };
 
 }
 export namespace DebugAction {
     export interface Props {
         label: string
+        tooltip?: string
         iconClass: string
-        run: () => void
+        run: (effectiveMenuPath: MenuPath) => void
         enabled?: boolean
     }
 }

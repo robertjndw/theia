@@ -18,15 +18,25 @@ If a rule causes distress during discussions itself, it has to be reviewed on [t
 
 - [1.](#pr-template) Each PR description has to follow the [PR template](https://github.com/eclipse-theia/theia/blob/master/.github/PULL_REQUEST_TEMPLATE.md)
 
+<a name="human-in-the-loop"></a>
+
+- [2.](#human-in-the-loop) Contributors can use whatever tools they would like to craft their contributions, but there must be a human in the loop. Contributors must read and review all LLM-generated code or text before they ask other project members to review it. The contributor is always the author and is fully accountable for their contributions. Contributors should be sufficiently confident that the contribution is high enough quality that asking for a review is a good use of scarce maintainer time, and they should be able to answer questions about their work themselves during review.
+
 <a name="design-review"></a>
 
-- [2.](#design-review) A PR can be opened early for the design review before going into the detailed implementation.
+- [3.](#design-review) A PR can be opened early for the design review before going into the detailed implementation.
   - A request on the design review should be an explicit comment.
   - Such PR should be marked as a draft or with the WIP prefix.
 
 <a name="fixups"></a>
 
-- [3.](#fixups) Changes done _after_ the PR has been opened should be kept in separate commits until the review process is finished. This allows reviewers to re-review only the updated parts of the PR and to determine what needs to be tested again. The "fixup" commits must be squashed before merging in order to keep a clean history.
+- [4.](#fixups) Changes done _after_ the PR has been opened should be kept in separate commits until the review process is finished. This allows reviewers to re-review only the updated parts of the PR and to determine what needs to be tested again. The "fixup" commits must be squashed before merging in order to keep a clean history.
+
+<a name="changelog-entry"></a>
+
+- [5.](#changelog-entry) A changelog entry is only mandatory for [breaking changes](#checklist-breaking-changes), which are declared in the `Breaking changes` section of the PR description. PRs with non-breaking changes should _not_ add an entry to [CHANGELOG.md](https://github.com/eclipse-theia/theia/blob/master/CHANGELOG.md); their entries are collected at [release time](Publishing.md#15-update-changelog).
+
+  > Why? It avoids the frequent merge conflicts in `CHANGELOG.md` that a manual entry per PR causes.
 
 ## Requesting a Review
 
@@ -51,8 +61,12 @@ If a rule causes distress during discussions itself, it has to be reviewed on [t
 - [2.](#checklist-project-org) The new code is aligned with the [project organization](code-organization.md) and [coding conventions](coding-guidelines.md).
 <a name="checklist-breaking-changes"></a>
 - [3.](#checklist-breaking-changes) Breaking changes are justified and recorded in the [changelog](https://github.com/eclipse-theia/theia/blob/master/CHANGELOG.md).
+  - Whether a PR is breaking is declared in the `Breaking changes` section of its description. Non-breaking changes need no changelog entry, see [the changelog rule](#changelog-entry): a missing entry is not a review finding, and an entry added for a non-breaking change should be dropped.
 <a name="checklist-dependencies"></a>
 - [4.](#checklist-dependencies) New dependencies are justified and [verified](https://github.com/eclipse-theia/theia/wiki/Registering-CQs#wip---new-ecd-theia-intellectual-property-clearance-approach-experimental).
+  - For newly added dependencies, we run the [license check workflow](../.github/workflows/license-check.yml), but not in review mode.
+    - If the license check reveals that a review is needed for the new dependency (i.e., `ERROR: Found results that aren't part of the baseline! X some-dependency, some-license`), we need to run the license check in review mode (`npm run license:check:review`).
+    - Since we have no PAT secret defined for the repo at the moment, the license check in review mode needs to be done locally, either by the contributor (if they are a Theia committer) or by the reviewer.
 <a name="checklist-copied-code"></a>
 - [5.](#checklist-copied-code) Copied code is justified and [approved via a CQ](https://github.com/eclipse-theia/theia/wiki/Registering-CQs#case-3rd-party-project-code-copiedforked-from-another-project-into-eclipse-theia-maintained-by-us).
   - Look closely at the GitHub actions running for your PR: the 3pp/dash license check should be green.
@@ -62,10 +76,13 @@ If a rule causes distress during discussions itself, it has to be reviewed on [t
 <a name="checklist-sign-off"></a>
 - [7.](#checklist-sign-off) Commits are signed-off: <https://github.com/eclipse-theia/theia/blob/master/CONTRIBUTING.md#sign-your-work>.
 <a name="checklist-meaningful-commits"></a>
-- [8.](#checklist-meaningful-commit) Each commit has meaningful title and a body that explains what it does. One can take inspiration from the `What it does` section from the PR.
+- [8.](#checklist-meaningful-commits) Each commit has meaningful title and a body that explains what it does. One can take inspiration from the `What it does` section from the PR.
 <a name="checklist-commit-history"></a>
 - [9.](#checklist-commit-history) Commit history is rebased on master and contains only meaningful commits and changes (less are usually better).
   - For example, use `git pull -r` or `git fetch && git rebase` to pick up changes from the master.
+<a name="checklist-i18n"></a>
+- [10.](#checklist-i18n) User-facing text is internationalized using the `nls` service.
+  - For details, please see the [Internationalization/Localization section](./coding-guidelines.md#internationalizationlocalization) in the Coding Guidelines.
 
 ## Reviewing
 
@@ -128,7 +145,7 @@ provided that the original author accepted the [ECA](https://github.com/eclipse-
 - [1.](#landing-pr) A PR can be landed when:
   - CI build has succeeded.
   - The author has accepted the [Eclipse Contributor Agreement](https://github.com/eclipse-theia/theia/blob/master/CONTRIBUTING.md#eclipse-contributor-agreement).
-  - All checks from [the review checklist](#pull-request-review-checklist) are approved by at least one reviewer.
+  - All checks from [the review checklist](#review-checklist) are approved by at least one reviewer.
   - There are no unresolved review comments.
 <a name="merging-pr"></a>
 - [2.](#merging-pr) Pull requests satisfying the criteria above should be merged in a timely fashion to avoid a buildup of approved PR's at release time. Responsibility for merging a PR falls to
@@ -155,4 +172,5 @@ then an author and maintainers have 2 days to resolve them after that a PR has t
   Such changes have to be done by an experienced maintainer to avoid regressions and long reviews.
   - It should be a 3rd party component, e.g. Theia is not a logging framework or a proxy server.
   - It changes development infrastructure, e.g. testing frameworks, packaging and so on.
-Such changes have to be done by active maintainers after agreement in [the dev meeting](https://github.com/eclipse-theia/theia/wiki/Dev-Meetings).
+  Such changes have to be done by active maintainers after agreement in [the dev meeting](https://github.com/eclipse-theia/theia/wiki/Dev-Meetings).
+  - It violates the [human-in-the-loop](#human-in-the-loop) policy.

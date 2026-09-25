@@ -14,35 +14,62 @@
 // SPDX-License-Identifier: EPL-2.0 OR GPL-2.0-only WITH Classpath-exception-2.0
 // *****************************************************************************
 
-import { injectable } from '@theia/core/shared/inversify';
+import { injectable, inject, named } from '@theia/core/shared/inversify';
 import { Argv } from '@theia/core/shared/yargs';
 import { CliContribution } from '@theia/core/lib/node/cli';
-import { CliPreferences } from '../common/cli-preferences';
+import { RemoteCliContext, RemoteCliContribution } from '@theia/core/lib/node/remote/remote-cli-contribution';
+import { CliPreferences, CliPreferenceEntry } from '../common/cli-preferences';
+import { ILogger } from '@theia/core';
 
 @injectable()
-export class PreferenceCliContribution implements CliContribution, CliPreferences {
+export class PreferenceCliContribution implements CliContribution, CliPreferences, RemoteCliContribution {
+
+    @inject(ILogger) @named('preferences:PreferenceCliContribution')
+    protected readonly logger: ILogger;
 
     protected preferences: [string, unknown][] = [];
+    protected sessionPreferences: [string, unknown][] = [];
 
     configure(conf: Argv<{}>): void {
         conf.option('set-preference', {
             nargs: 1,
-            desc: 'sets the specified preference'
+            desc: 'sets the specified preference (persisted to user settings)'
+        });
+        conf.option('session-preference', {
+            nargs: 1,
+            desc: 'sets the specified preference for this process only (in-memory, not persisted)'
         });
     }
 
     setArguments(args: Record<string, unknown>): void {
         if (args.setPreference) {
-            const preferences: string[] = args.setPreference instanceof Array ? args.setPreference : [args.setPreference];
-            for (const preference of preferences) {
-                const firstEqualIndex = preference.indexOf('=');
-                this.preferences.push([preference.substring(0, firstEqualIndex), JSON.parse(preference.substring(firstEqualIndex + 1))]);
-            }
+            this.parseInto(args.setPreference, this.preferences);
         }
+        if (args.sessionPreference) {
+            this.parseInto(args.sessionPreference, this.sessionPreferences);
+        }
+    }
+
+    protected parseInto(raw: unknown, target: [string, unknown][]): void {
+        const entries: string[] = raw instanceof Array ? raw : [raw as string];
+        target.push(...CliPreferenceEntry.parseAll(entries, message => this.logger.warn(message)));
     }
 
     async getPreferences(): Promise<[string, unknown][]> {
         return this.preferences;
+    }
+
+    async getSessionPreferences(): Promise<[string, unknown][]> {
+        return this.sessionPreferences;
+    }
+
+    /**
+     * Forward `--session-preference` values to the remote backend when attaching
+     * to a remote (e.g. dev container). Values are base64-encoded JSON to survive
+     * shell argument parsing intact.
+     */
+    enhanceArgs(_context: RemoteCliContext): string[] {
+        return this.sessionPreferences.map(entry => CliPreferenceEntry.toArg('session-preference', entry));
     }
 
 }

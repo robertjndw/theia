@@ -22,11 +22,11 @@ import { DebugSession } from '../debug-session';
 import URI from '@theia/core/lib/common/uri';
 import { ExpressionContainer, ExpressionItem } from './debug-console-items';
 import { Severity } from '@theia/core/lib/common/severity';
-import { inject, injectable, postConstruct } from '@theia/core/shared/inversify';
+import { inject, injectable, postConstruct, named } from '@theia/core/shared/inversify';
 import { DebugSessionManager } from '../debug-session-manager';
 import * as monaco from '@theia/monaco-editor-core';
 import { LanguageSelector } from '@theia/monaco-editor-core/esm/vs/editor/common/languageSelector';
-import { Disposable } from '@theia/core';
+import { Disposable, ILogger } from '@theia/core';
 
 export const DebugConsoleSessionFactory = Symbol('DebugConsoleSessionFactory');
 
@@ -39,7 +39,12 @@ export class DebugConsoleSession extends ConsoleSession {
 
     @inject(DebugSessionManager) protected readonly sessionManager: DebugSessionManager;
 
+    @inject(ILogger) @named('debug:DebugConsoleSession')
+    protected readonly logger: ILogger;
+
     protected items: ConsoleItem[] = [];
+
+    protected _terminated = false;
 
     protected _debugSession: DebugSession;
 
@@ -55,6 +60,17 @@ export class DebugConsoleSession extends ConsoleSession {
     set debugSession(value: DebugSession) {
         this._debugSession = value;
         this.id = value.id;
+    }
+
+    get terminated(): boolean {
+        return this._terminated;
+    }
+
+    markTerminated(): void {
+        if (!this._terminated) {
+            this._terminated = true;
+            this.fireDidChange();
+        }
     }
 
     @postConstruct()
@@ -85,10 +101,62 @@ export class DebugConsoleSession extends ConsoleSession {
             triggerCharacters: ['.'],
             provideCompletionItems: (model, position) => this.completions(model, position),
         }));
+        this.toDispose.push(this.sessionManager.onDidResolveLazyVariable(() => this.fireDidChange()));
     }
 
     getElements(): IterableIterator<ConsoleItem> {
-        return this.items.filter(e => !this.severity || e.severity === this.severity)[Symbol.iterator]();
+        return this.items.filter(e => this.matchesFilter(e))[Symbol.iterator]();
+    }
+
+    protected matchesFilter(item: ConsoleItem): boolean {
+        if (this.severity && item.severity !== this.severity) {
+            return false;
+        }
+        if (this.filterText) {
+            const text = this.getItemText(item).toLowerCase();
+            const parsedFilters = this.parseFilterText(this.filterText.toLowerCase());
+
+            if (parsedFilters.include.length > 0) {
+                const matchesAnyInclude = parsedFilters.include.some(filter => text.includes(filter));
+                if (!matchesAnyInclude) {
+                    return false;
+                }
+            }
+
+            for (const filter of parsedFilters.exclude) {
+                if (text.includes(filter)) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+
+    protected parseFilterText(filterText: string): { include: string[]; exclude: string[] } {
+        const include: string[] = [];
+        const exclude: string[] = [];
+
+        const terms = filterText.split(',').map(term => term.trim()).filter(term => term.length > 0);
+
+        for (const term of terms) {
+            if (term.startsWith('!') && term.length > 1) {
+                exclude.push(term.substring(1));
+            } else {
+                include.push(term);
+            }
+        }
+
+        return { include, exclude };
+    }
+
+    protected getItemText(item: ConsoleItem): string {
+        if (item instanceof AnsiConsoleItem) {
+            return item.content;
+        }
+        if (item instanceof ExpressionItem) {
+            return `${item.expression} ${item.value}`;
+        }
+        return '';
     }
 
     protected async completions(model: monaco.editor.ITextModel, position: monaco.Position): Promise<monaco.languages.CompletionList | undefined> {
@@ -183,7 +251,7 @@ export class DebugConsoleSession extends ConsoleSession {
         const body = event.body;
         const { category, variablesReference } = body;
         if (category === 'telemetry') {
-            console.debug(`telemetry/${event.body.output}`, event.body.data);
+            this.logger.debug(`telemetry/${event.body.output}`, event.body.data);
             return;
         }
         const severity = category === 'stderr' ? Severity.Error : event.body.category === 'console' ? Severity.Warning : Severity.Info;

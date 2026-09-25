@@ -17,15 +17,16 @@
 import * as React from 'react';
 import { injectable, inject } from 'inversify';
 import debounce = require('lodash.debounce');
-import { CommandService } from '../../common';
+import { CancellationTokenSource, CommandService, nls } from '../../common';
 import { ReactWidget } from '../widgets/react-widget';
 import { FrontendApplicationStateService } from '../frontend-application-state';
 import { LabelParser, LabelIcon } from '../label-parser';
-import { PreferenceService } from '../preferences';
 import { StatusBar, StatusBarEntry, StatusBarAlignment, StatusBarViewEntry } from './status-bar-types';
 import { StatusBarViewModel } from './status-bar-view-model';
 import { HoverService } from '../hover-service';
 import { codicon } from '../widgets';
+import { PreferenceService } from '../../common/preferences';
+import { MarkdownString } from '../../common/markdown-rendering';
 export { StatusBar, StatusBarAlignment, StatusBarEntry };
 
 @injectable()
@@ -33,6 +34,8 @@ export class StatusBarImpl extends ReactWidget implements StatusBar {
 
     protected backgroundColor: string | undefined;
     protected color: string | undefined;
+
+    protected preferencesReady = false;
 
     constructor(
         @inject(CommandService) protected readonly commands: CommandService,
@@ -49,17 +52,25 @@ export class StatusBarImpl extends ReactWidget implements StatusBar {
         // Hide the status bar until the `workbench.statusBar.visible` preference returns with a `true` value.
         this.hide();
         this.preferences.ready.then(() => {
-            const preferenceValue = this.preferences.get<boolean>('workbench.statusBar.visible', true);
-            this.setHidden(!preferenceValue);
+            this.preferencesReady = true;
+            this.updateVisibility();
         });
         this.toDispose.push(
             this.preferences.onPreferenceChanged(preference => {
                 if (preference.preferenceName === 'workbench.statusBar.visible') {
-                    this.setHidden(!preference.newValue);
+                    this.updateVisibility();
                 }
             })
         );
         this.toDispose.push(this.viewModel.onDidChange(() => this.debouncedUpdate()));
+    }
+
+    protected updateVisibility(): void {
+        if (!this.preferencesReady) {
+            return; // Don't change visibility until preferences have loaded
+        }
+        const prefHides = !this.preferences.get<boolean>('workbench.statusBar.visible', true);
+        this.setHidden(prefHides);
     }
 
     protected debouncedUpdate = debounce(() => this.update(), 50);
@@ -98,7 +109,7 @@ export class StatusBarImpl extends ReactWidget implements StatusBar {
     protected internalSetColor(color?: string): void {
         this.color = color;
     }
-    protected render(): JSX.Element {
+    protected render(): React.JSX.Element {
         const leftEntries = Array.from(this.viewModel.getLeft(), entry => this.renderElement(entry));
         const rightEntries = Array.from(this.viewModel.getRight(), entry => this.renderElement(entry));
 
@@ -108,13 +119,43 @@ export class StatusBarImpl extends ReactWidget implements StatusBar {
         </React.Fragment>;
     }
 
-    protected onclick(entry: StatusBarEntry): () => void {
+    protected triggerCommand(entry: StatusBarEntry): () => void {
         return () => {
             if (entry.command) {
                 const args = entry.arguments || [];
                 this.commands.executeCommand(entry.command, ...args);
             }
         };
+    }
+
+    /**
+     * Request a hover to be displayed for a status bar entry.
+     * @param e The mouse event that triggered the hover request
+     * @param entry The status bar entry to display hover for
+     * @param skipDelay When true, requests the hover immediately without delay (for click-triggered hovers)
+     */
+    protected requestHover(e: React.MouseEvent<HTMLElement, MouseEvent>, entry: StatusBarEntry, skipDelay = false): void {
+        const target = e.currentTarget;
+        if (typeof entry.tooltip === 'function') {
+            const cancellationSource = new CancellationTokenSource();
+            this.doRequestHover(target, nls.localizeByDefault('Loading...'), skipDelay, () => cancellationSource.dispose());
+            Promise.resolve(entry.tooltip(cancellationSource.token))
+                .catch(() => undefined)
+                .then(res => res && !cancellationSource.token.isCancellationRequested && this.doRequestHover(target, res, skipDelay));
+        } else {
+            this.doRequestHover(target, entry.tooltip!, skipDelay);
+        }
+    }
+
+    protected doRequestHover(target: HTMLElement, content: string | HTMLElement | MarkdownString, skipDelay = false, onHide?: () => void): void {
+        this.hoverService.requestHover({
+            content,
+            target,
+            position: 'top',
+            interactive: content instanceof HTMLElement || MarkdownString.is(content),
+            onHide,
+            skipHoverDelay: skipDelay
+        });
     }
 
     protected createAttributes(viewEntry: StatusBarViewEntry): React.Attributes & React.HTMLAttributes<HTMLElement> {
@@ -126,9 +167,11 @@ export class StatusBarImpl extends ReactWidget implements StatusBar {
             attrs.className += ' hasCommand';
         }
         if (entry.command) {
-            attrs.onClick = this.onclick(entry);
+            attrs.onClick = this.triggerCommand(entry);
         } else if (entry.onclick) {
             attrs.onClick = e => entry.onclick?.(e.nativeEvent);
+        } else {
+            attrs.onClick = e => this.requestHover(e, entry, true);
         }
 
         if (viewEntry.compact && viewEntry.alignment !== undefined) {
@@ -136,11 +179,7 @@ export class StatusBarImpl extends ReactWidget implements StatusBar {
         }
 
         if (entry.tooltip) {
-            attrs.onMouseEnter = e => this.hoverService.requestHover({
-                content: entry.tooltip!,
-                target: e.currentTarget,
-                position: 'top'
-            });
+            attrs.onMouseEnter = e => this.requestHover(e, entry);
         }
         if (entry.className) {
             attrs.className += ' ' + entry.className;
@@ -163,9 +202,9 @@ export class StatusBarImpl extends ReactWidget implements StatusBar {
         return attrs;
     }
 
-    protected renderElement(entry: StatusBarViewEntry): JSX.Element {
+    protected renderElement(entry: StatusBarViewEntry): React.JSX.Element {
         const childStrings = this.entryService.parse(entry.entry.text);
-        const children: JSX.Element[] = [];
+        const children: React.JSX.Element[] = [];
 
         childStrings.forEach((val, key) => {
             if (LabelIcon.is(val)) {

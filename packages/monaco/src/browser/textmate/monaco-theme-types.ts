@@ -16,8 +16,7 @@
 
 import * as monaco from '@theia/monaco-editor-core';
 import { IStandaloneTheme } from '@theia/monaco-editor-core/esm/vs/editor/standalone/common/standaloneTheme';
-import { IOnigLib, Registry } from 'vscode-textmate';
-import { IRawTheme } from 'vscode-textmate/release/theme';
+import { IOnigLib, IRawTheme, Registry } from 'vscode-textmate';
 
 export interface ThemeMix extends IRawTheme, monaco.editor.IStandaloneThemeData { }
 export interface MixStandaloneTheme extends IStandaloneTheme {
@@ -30,6 +29,18 @@ export const TextmateRegistryFactory = Symbol('TextmateRegistryFactory');
 export type TextmateRegistryFactory = (currentTheme?: ThemeMix) => Registry;
 
 export type MonacoThemeColor = monaco.editor.IColors;
+export namespace MonacoThemeColor {
+    /** Expands shorthand hex (`#RGB`, `#RGBA`) to long form; other values pass through. */
+    export function expandShorthandHex(color: string): string {
+        return /^#[0-9a-fA-F]{3,4}$/.test(color)
+            ? '#' + [...color.slice(1)].map(digit => digit + digit).join('')
+            : color;
+    }
+    /** Whether monaco accepts `color` as a token color, i.e. 6/8-digit hex (see monaco's `ColorMap.getId`). */
+    export function isTokenColor(color: string): boolean {
+        return /^#[0-9a-fA-F]{6}([0-9a-fA-F]{2})?$/.test(color);
+    }
+}
 export interface MonacoTokenRule extends monaco.editor.ITokenThemeRule { };
 export type MonacoBuiltinTheme = monaco.editor.BuiltinTheme;
 export interface MonacoTheme extends monaco.editor.IStandaloneThemeData {

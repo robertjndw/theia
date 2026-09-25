@@ -17,12 +17,20 @@
 import debounce = require('lodash.debounce');
 import { inject, injectable, named } from 'inversify';
 // eslint-disable-next-line max-len
-import { CommandRegistry, ContributionProvider, Disposable, DisposableCollection, Emitter, Event, MenuModelRegistry, MenuNode, MenuPath } from '../../../common';
-import { ContextKeyService } from '../../context-key-service';
+import { CommandRegistry, ContributionProvider, Disposable, DisposableCollection, Emitter, Event, MenuModelRegistry, MenuPath, ILogger } from '../../../common';
+import { ContextKeyService, ContextMatcher } from '../../context-key-service';
 import { FrontendApplicationContribution } from '../../frontend-application-contribution';
 import { Widget } from '../../widgets';
-import { MenuDelegate, ReactTabBarToolbarItem, RenderedToolbarItem, TabBarToolbarItem } from './tab-bar-toolbar-types';
-import { ToolbarMenuNodeWrapper } from './tab-bar-toolbar-menu-adapters';
+import { Navigatable } from '../../navigatable-types';
+import { ResourceContextKey } from '../../resource-context-key';
+import { WidgetContextKeyContribution } from '../../widget-context-key-contribution';
+import { ReactTabBarToolbarAction, RenderedToolbarAction } from './tab-bar-toolbar-types';
+import { CommandMenuAsToolbarItemWrapper, SubmenuAsToolbarItemWrapper, ToolbarActionWrapper } from './tab-bar-toolbar-menu-adapters';
+import { KeybindingRegistry } from '../../keybinding';
+import { LabelParser } from '../../label-parser';
+import { ContextMenuRenderer } from '../../context-menu-renderer';
+import { CommandMenu, CompoundMenuNode, MenuNode, RenderedMenuNode } from '../../../common/menu';
+import { ReactToolbarItemImpl, RenderedToolbarItemImpl, TabBarToolbarItem } from './tab-toolbar-item';
 
 /**
  * Clients should implement this interface if they want to contribute to the tab-bar toolbar.
@@ -39,24 +47,37 @@ export interface TabBarToolbarContribution {
     registerToolbarItems(registry: TabBarToolbarRegistry): void;
 }
 
-function yes(): true { return true; }
 const menuDelegateSeparator = '=@=';
-
+interface MenuDelegate {
+    menuPath: MenuPath;
+    isVisible(widget?: Widget): boolean;
+}
 /**
  * Main, shared registry for tab-bar toolbar items.
  */
 @injectable()
 export class TabBarToolbarRegistry implements FrontendApplicationContribution {
 
-    protected items = new Map<string, TabBarToolbarItem | ReactTabBarToolbarItem>();
+    protected items = new Map<string, TabBarToolbarItem>();
     protected menuDelegates = new Map<string, MenuDelegate>();
 
     @inject(CommandRegistry) protected readonly commandRegistry: CommandRegistry;
     @inject(ContextKeyService) protected readonly contextKeyService: ContextKeyService;
     @inject(MenuModelRegistry) protected readonly menuRegistry: MenuModelRegistry;
+    @inject(KeybindingRegistry) protected readonly keybindingRegistry: KeybindingRegistry;
+    @inject(LabelParser) protected readonly labelParser: LabelParser;
+    @inject(ContextMenuRenderer) protected readonly contextMenuRenderer: ContextMenuRenderer;
+
+    @inject(ResourceContextKey) protected readonly resourceContextKey: ResourceContextKey;
 
     @inject(ContributionProvider) @named(TabBarToolbarContribution)
     protected readonly contributionProvider: ContributionProvider<TabBarToolbarContribution>;
+
+    @inject(ContributionProvider) @named(WidgetContextKeyContribution)
+    protected readonly contextKeyContributionProvider: ContributionProvider<WidgetContextKeyContribution>;
+
+    @inject(ILogger) @named('core:TabBarToolbarRegistry')
+    protected readonly logger: ILogger;
 
     protected readonly onDidChangeEmitter = new Emitter<void>();
     readonly onDidChange: Event<void> = this.onDidChangeEmitter.event;
@@ -75,17 +96,35 @@ export class TabBarToolbarRegistry implements FrontendApplicationContribution {
      *
      * @param item the item to register.
      */
-    registerItem(item: RenderedToolbarItem | ReactTabBarToolbarItem): Disposable {
-        const { id } = item;
-        if (this.items.has(id)) {
-            throw new Error(`A toolbar item is already registered with the '${id}' ID.`);
+    registerItem(item: RenderedToolbarAction | ReactTabBarToolbarAction): Disposable {
+        if (ReactTabBarToolbarAction.is(item)) {
+            return this.doRegisterItem(new ReactToolbarItemImpl(this.commandRegistry, this.contextKeyService, item));
+        } else {
+            if (item.menuPath) {
+                return this.doRegisterItem(new ToolbarActionWrapper(item.menuPath,
+                    this.commandRegistry, this.menuRegistry, this.contextKeyService, this.contextMenuRenderer, item));
+            } else {
+                const wrapper = new RenderedToolbarItemImpl(this.commandRegistry, this.contextKeyService, this.keybindingRegistry, this.labelParser, item);
+                const disposables = this.doRegisterItem(wrapper);
+                disposables.push(wrapper);
+                return disposables;
+            }
         }
-        this.items.set(id, item);
+    }
+
+    doRegisterItem(item: TabBarToolbarItem): DisposableCollection {
+        if (this.items.has(item.id)) {
+            throw new Error(`A toolbar item is already registered with the '${item.id}' ID.`);
+        }
+        this.items.set(item.id, item);
         this.fireOnDidChange();
         const toDispose = new DisposableCollection(
-            Disposable.create(() => this.fireOnDidChange()),
-            Disposable.create(() => this.items.delete(id))
+            Disposable.create(() => {
+                this.items.delete(item.id);
+                this.fireOnDidChange();
+            })
         );
+
         if (item.onDidChange) {
             toDispose.push(item.onDidChange(() => this.fireOnDidChange()));
         }
@@ -97,31 +136,42 @@ export class TabBarToolbarRegistry implements FrontendApplicationContribution {
      *
      * By default returns with all items where the command is enabled and `item.isVisible` is `true`.
      */
-    visibleItems(widget: Widget): Array<TabBarToolbarItem | ReactTabBarToolbarItem> {
+    visibleItems(widget: Widget): Array<TabBarToolbarItem> {
         if (widget.isDisposed) {
             return [];
         }
-        const result: Array<TabBarToolbarItem | ReactTabBarToolbarItem> = [];
+        const result: Array<TabBarToolbarItem> = [];
+        const contextMatcher = this.contextMatcherFor(widget);
         for (const item of this.items.values()) {
-            if (this.isItemVisible(item, widget)) {
+            if (item.isVisible(widget, contextMatcher)) {
                 result.push(item);
             }
         }
+
         for (const delegate of this.menuDelegates.values()) {
             if (delegate.isVisible(widget)) {
                 const menu = this.menuRegistry.getMenu(delegate.menuPath);
-                for (const child of menu.children) {
-                    if (!child.when || this.contextKeyService.match(child.when, widget.node)) {
-                        if (child.children) {
-                            for (const grandchild of child.children) {
-                                if (!grandchild.when || this.contextKeyService.match(grandchild.when, widget.node)) {
-                                    const menuPath = this.menuRegistry.getPath(grandchild);
-                                    result.push(new ToolbarMenuNodeWrapper(grandchild, child.id, delegate.menuPath, menuPath));
+                if (menu) {
+                    for (const child of menu.children) {
+                        if (child.isVisible([...delegate.menuPath, child.id], contextMatcher, widget.node, widget)) {
+                            if (CompoundMenuNode.is(child)) {
+                                for (const grandchild of child.children) {
+                                    if (grandchild.isVisible([...delegate.menuPath, child.id, grandchild.id],
+                                        contextMatcher, widget.node, widget) && RenderedMenuNode.is(grandchild)) {
+                                        if (CommandMenu.is(grandchild)) {
+                                            result.push(new CommandMenuAsToolbarItemWrapper([...delegate.menuPath, child.id, grandchild.id], this.commandRegistry,
+                                                this.menuRegistry, this.contextKeyService, this.contextMenuRenderer, grandchild, child.id));
+                                        } else if (CompoundMenuNode.is(grandchild)) {
+                                            result.push(new SubmenuAsToolbarItemWrapper([...delegate.menuPath, child.id, grandchild.id], this.commandRegistry, this.menuRegistry,
+                                                this.contextKeyService, this.contextMenuRenderer, grandchild, child.id));
+                                        }
+
+                                    }
                                 }
+                            } else if (CommandMenu.is(child)) {
+                                result.push(new CommandMenuAsToolbarItemWrapper([...delegate.menuPath, child.id], this.commandRegistry, this.menuRegistry,
+                                    this.contextKeyService, this.contextMenuRenderer, child, undefined));
                             }
-                        } else if (child.command) {
-                            const menuPath = this.menuRegistry.getPath(child);
-                            result.push(new ToolbarMenuNodeWrapper(child, undefined, delegate.menuPath, menuPath));
                         }
                     }
                 }
@@ -131,76 +181,68 @@ export class TabBarToolbarRegistry implements FrontendApplicationContribution {
     }
 
     /**
-     * Query whether a toolbar `item` should be shown in the toolbar.
-     * This implementation delegates to item-specific checks according to their type.
-     *
-     * @param item a menu toolbar item
-     * @param widget the widget that is updating the toolbar
-     * @returns `false` if the `item` should be suppressed, otherwise `true`
+     * A matcher that evaluates `when` clauses against the given widget rather than against whichever widget
+     * currently holds the focus. Keys that describe no aspect of the widget keep their ambient value, and the
+     * context scoped to the widget's DOM node is still consulted for the keys the overlay does not define.
      */
-    protected isItemVisible(item: TabBarToolbarItem | ReactTabBarToolbarItem, widget: Widget): boolean {
-        if (!this.isConditionalItemVisible(item, widget)) {
-            return false;
+    contextMatcherFor(widget: Widget): ContextMatcher {
+        const overlay = new Map<string, unknown>();
+        if (Navigatable.is(widget)) {
+            for (const [key, value] of Object.entries(this.resourceContextKey.toValues(widget.getResourceUri()))) {
+                overlay.set(key, value);
+            }
         }
-
-        if (item.command && !this.commandRegistry.isVisible(item.command, widget)) {
-            return false;
+        for (const contribution of this.contextKeyContributionProvider.getContributions()) {
+            const entries = contribution.getContextKeyValues(widget);
+            if (entries) {
+                for (const [key, value] of entries) {
+                    overlay.set(key, value);
+                }
+            }
         }
-        if (item.menuPath && !this.isNonEmptyMenu(item, widget)) {
-            return false;
-        }
-
-        // The item is not vetoed. Accept it
-        return true;
+        return overlay.size ? this.contextKeyService.createOverlay(overlay) : this.contextKeyService;
     }
 
     /**
-     * Query whether a conditional toolbar `item` should be shown in the toolbar.
-     * This implementation delegates to the `item`'s own intrinsic conditionality.
-     *
-     * @param item a menu toolbar item
-     * @param widget the widget that is updating the toolbar
-     * @returns `false` if the `item` should be suppressed, otherwise `true`
+     * Collects all context keys referenced by toolbar items and delegated menu nodes
+     * that may participate in rendering for the given widget.
      */
-    protected isConditionalItemVisible(item: TabBarToolbarItem, widget: Widget): boolean {
-        if (item.isVisible && !item.isVisible(widget)) {
-            return false;
+    collectContextKeys(widget: Widget): Set<string> {
+        const contextKeys = new Set<string>();
+        if (widget.isDisposed) {
+            return contextKeys;
         }
-        if (item.when && !this.contextKeyService.match(item.when, widget.node)) {
-            return false;
+
+        for (const item of this.items.values()) {
+            if (item.when) {
+                this.contextKeyService.parseKeys(item.when)?.forEach(key => contextKeys.add(key));
+            }
         }
-        return true;
+
+        for (const delegate of this.menuDelegates.values()) {
+            if (!delegate.isVisible(widget)) {
+                continue;
+            }
+            const menu = this.menuRegistry.getMenu(delegate.menuPath);
+            if (menu) {
+                this.collectMenuContextKeys(menu, contextKeys);
+            }
+        }
+        return contextKeys;
     }
 
-    /**
-     * Query whether a menu toolbar `item` should be shown in the toolbar.
-     * This implementation returns `false` if the `item` does not have any actual menu to show.
-     *
-     * @param item a menu toolbar item
-     * @param widget the widget that is updating the toolbar
-     * @returns `false` if the `item` should be suppressed, otherwise `true`
-     */
-    isNonEmptyMenu(item: TabBarToolbarItem, widget: Widget | undefined): boolean {
-        if (!item.menuPath) {
-            return false;
+    protected collectMenuContextKeys(menuNode: MenuNode, contextKeys: Set<string>): void {
+        if (menuNode.when) {
+            this.contextKeyService.parseKeys(menuNode.when)?.forEach(key => contextKeys.add(key));
         }
-        const menu = this.menuRegistry.getMenu(item.menuPath);
-        const isVisible: (node: MenuNode) => boolean = node =>
-            node.children?.length
-                // Either the node is a sub-menu that has some visible child ...
-                ? node.children?.some(isVisible)
-                // ... or there is a command ...
-                : !!node.command
-                // ... that is visible ...
-                && this.commandRegistry.isVisible(node.command, widget)
-                // ... and a "when" clause does not suppress the menu node.
-                && (!node.when || this.contextKeyService.match(node.when, widget?.node));
-
-        return isVisible(menu);
+        if (CompoundMenuNode.is(menuNode)) {
+            for (const child of menuNode.children) {
+                this.collectMenuContextKeys(child, contextKeys);
+            }
+        }
     }
 
-    unregisterItem(itemOrId: TabBarToolbarItem | ReactTabBarToolbarItem | string): void {
-        const id = typeof itemOrId === 'string' ? itemOrId : itemOrId.id;
+    unregisterItem(id: string): void {
         if (this.items.delete(id)) {
             this.fireOnDidChange();
         }
@@ -209,16 +251,14 @@ export class TabBarToolbarRegistry implements FrontendApplicationContribution {
     registerMenuDelegate(menuPath: MenuPath, when?: ((widget: Widget) => boolean)): Disposable {
         const id = this.toElementId(menuPath);
         if (!this.menuDelegates.has(id)) {
-            const isVisible: MenuDelegate['isVisible'] = !when
-                ? yes
-                : typeof when === 'function'
-                    ? when
-                    : widget => this.contextKeyService.match(when, widget?.node);
-            this.menuDelegates.set(id, { menuPath, isVisible });
+
+            this.menuDelegates.set(id, {
+                menuPath, isVisible: (widget: Widget) => !when || when(widget)
+            });
             this.fireOnDidChange();
             return { dispose: () => this.unregisterMenuDelegate(menuPath) };
         }
-        console.warn('Unable to register menu delegate. Delegate has already been registered', menuPath);
+        this.logger.warn('Unable to register menu delegate. Delegate has already been registered', menuPath);
         return Disposable.NULL;
     }
 

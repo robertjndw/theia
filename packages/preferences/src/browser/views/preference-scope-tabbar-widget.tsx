@@ -15,14 +15,14 @@
 // *****************************************************************************
 
 import { inject, injectable, postConstruct } from '@theia/core/shared/inversify';
-import { TabBar, Widget, Title } from '@theia/core/shared/@phosphor/widgets';
-import { PreferenceScope, Message, ContextMenuRenderer, LabelProvider, StatefulWidget, codicon } from '@theia/core/lib/browser';
+import { TabBar, Widget, Title } from '@theia/core/shared/@lumino/widgets';
+import { Message, ContextMenuRenderer, LabelProvider, StatefulWidget, codicon } from '@theia/core/lib/browser';
 import { WorkspaceService } from '@theia/workspace/lib/browser/workspace-service';
 import URI from '@theia/core/lib/common/uri';
 import { FileStat } from '@theia/filesystem/lib/common/files';
 import { PreferenceScopeCommandManager } from '../util/preference-scope-command-manager';
 import { Preference, PreferenceMenus } from '../util/preference-types';
-import { CommandRegistry, DisposableCollection, Emitter, MenuModelRegistry } from '@theia/core/lib/common';
+import { CommandRegistry, DisposableCollection, Emitter, MenuModelRegistry, PreferenceScope } from '@theia/core/lib/common';
 import { nls } from '@theia/core/lib/common/nls';
 
 const USER_TAB_LABEL = nls.localizeByDefault('User');
@@ -260,6 +260,7 @@ export class PreferencesScopeTabBar extends TabBar<Widget> implements StatefulWi
         this.contextMenuRenderer.render({
             menuPath: PreferenceMenus.FOLDER_SCOPE_MENU_PATH,
             anchor: { x: tabRect.left, y: tabRect.bottom },
+            context: folderTabNode,
             onHide: () => {
                 setTimeout(() => toDisposeOnHide.dispose());
                 if (source === 'click') { folderTabNode.blur(); }

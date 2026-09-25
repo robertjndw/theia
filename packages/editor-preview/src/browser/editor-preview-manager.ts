@@ -16,12 +16,14 @@
 
 import { EditorManager, EditorOpenerOptions, EditorWidget } from '@theia/editor/lib/browser';
 import { inject, injectable, postConstruct } from '@theia/core/shared/inversify';
-import { EditorPreviewPreferences } from './editor-preview-preferences';
+import { EditorPreviewPreferences, ENABLE_PREVIEW_PREFERENCE } from '../common/editor-preview-preferences';
 import { MaybePromise } from '@theia/core/lib/common';
 import URI from '@theia/core/lib/common/uri';
 import { EditorPreviewWidgetFactory, EditorPreviewOptions } from './editor-preview-widget-factory';
 import { EditorPreviewWidget } from './editor-preview-widget';
+import { PreviewTabWidget } from './preview-tab-widget';
 import { FrontendApplicationStateService } from '@theia/core/lib/browser/frontend-application-state';
+import { WidgetOpenerOptions } from '@theia/core/lib/browser';
 
 @injectable()
 export class EditorPreviewManager extends EditorManager {
@@ -49,13 +51,13 @@ export class EditorPreviewManager extends EditorManager {
         });
 
         this.preferences.onPreferenceChanged(change => {
-            if (change.preferenceName === 'editor.enablePreview' && !change.newValue) {
-                this.all.forEach((editor: EditorPreviewWidget) => {
-                    if (editor.isPreview) {
-                        editor.convertToNonPreview();
+            if (change.preferenceName === ENABLE_PREVIEW_PREFERENCE && !this.preferences[ENABLE_PREVIEW_PREFERENCE]) {
+                this.shell.widgets.forEach(widget => {
+                    if (PreviewTabWidget.is(widget) && widget.isPreview) {
+                        widget.convertToNonPreview();
                     }
                 });
-            };
+            }
         });
 
         this.stateService.reachedState('initialized_layout').then(() => {
@@ -70,10 +72,10 @@ export class EditorPreviewManager extends EditorManager {
         document.addEventListener('dblclick', this.convertEditorOnDoubleClick.bind(this));
     }
 
-    protected override async doOpen(widget: EditorPreviewWidget, options?: EditorOpenerOptions): Promise<void> {
+    protected override async doOpen(widget: EditorPreviewWidget, uri: URI, options?: EditorOpenerOptions): Promise<void> {
         const { preview, widgetOptions = { area: 'main' }, mode = 'activate' } = options ?? {};
         if (!widget.isAttached) {
-            this.shell.addWidget(widget, widgetOptions);
+            await this.shell.addWidget(widget, widgetOptions);
         } else if (!preview && widget.isPreview) {
             widget.convertToNonPreview();
         }
@@ -83,27 +85,20 @@ export class EditorPreviewManager extends EditorManager {
         } else if (mode === 'reveal') {
             await this.shell.revealWidget(widget.id);
         }
+        await this.revealSelection(widget, uri, options);
     }
 
     protected handleNewPreview(newPreviewWidget: EditorPreviewWidget): void {
-        if (newPreviewWidget.isPreview) {
-            const tabbar = this.shell.getTabBarFor(newPreviewWidget);
-            if (tabbar) {
-                for (const title of tabbar.titles) {
-                    if (title.owner !== newPreviewWidget && title.owner instanceof EditorPreviewWidget && title.owner.isPreview) {
-                        title.owner.dispose();
-                    }
-                }
-            }
-        }
+        PreviewTabWidget.disposeOtherPreviews(this.shell, newPreviewWidget);
     }
 
     protected override tryGetPendingWidget(uri: URI, options?: EditorOpenerOptions): MaybePromise<EditorWidget> | undefined {
-        return super.tryGetPendingWidget(uri, { ...options, preview: true }) ?? super.tryGetPendingWidget(uri, { ...options, preview: false });
+        return super.tryGetPendingWidget(uri, { ...options, preview: true } as WidgetOpenerOptions) ??
+            super.tryGetPendingWidget(uri, { ...options, preview: false } as WidgetOpenerOptions);
     }
 
     protected override async getWidget(uri: URI, options?: EditorOpenerOptions): Promise<EditorWidget | undefined> {
-        return (await super.getWidget(uri, { ...options, preview: true })) ?? super.getWidget(uri, { ...options, preview: false });
+        return (await super.getWidget(uri, { ...options, preview: true } as WidgetOpenerOptions)) ?? super.getWidget(uri, { ...options, preview: false } as WidgetOpenerOptions);
     }
 
     protected override async getOrCreateWidget(uri: URI, options?: EditorOpenerOptions): Promise<EditorWidget> {
@@ -112,13 +107,13 @@ export class EditorPreviewManager extends EditorManager {
 
     protected override createWidgetOptions(uri: URI, options?: EditorOpenerOptions): EditorPreviewOptions {
         const navigatableOptions = super.createWidgetOptions(uri, options) as EditorPreviewOptions;
-        navigatableOptions.preview = !!(options?.preview && this.preferences['editor.enablePreview']);
+        navigatableOptions.preview = !!(options?.preview && this.preferences[ENABLE_PREVIEW_PREFERENCE]);
         return navigatableOptions;
     }
 
     protected convertEditorOnDoubleClick(event: Event): void {
         const widget = this.shell.findTargetedWidget(event);
-        if (widget instanceof EditorPreviewWidget && widget.isPreview) {
+        if (PreviewTabWidget.is(widget) && widget.isPreview) {
             widget.convertToNonPreview();
         }
     }

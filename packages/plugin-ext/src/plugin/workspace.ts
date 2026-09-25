@@ -38,12 +38,15 @@ import { EditorsAndDocumentsExtImpl } from './editors-and-documents';
 import { Disposable, URI } from './types-impl';
 import { normalize } from '@theia/core/lib/common/paths';
 import { relative } from '../common/paths-util';
-import { Schemes } from '../common/uri-components';
-import { toWorkspaceFolder } from './type-converters';
+import { Schemes, UriComponents } from '../common/uri-components';
 import { MessageRegistryExt } from './message-registry';
 import * as Converter from './type-converters';
 import { FileStat } from '@theia/filesystem/lib/common/files';
 import { isUndefinedOrNull, isUndefined } from '../common/types';
+import { PluginLogger } from './logger';
+import { consumeStream } from '@theia/core/lib/common/stream';
+import { EncodingService } from '@theia/core/lib/common/encoding-service';
+import { BinaryBuffer, BinaryBufferReadableStream } from '@theia/core/lib/common/buffer';
 
 @injectable()
 export class WorkspaceExtImpl implements WorkspaceExt {
@@ -58,6 +61,10 @@ export class WorkspaceExtImpl implements WorkspaceExt {
     protected messageService: MessageRegistryExt;
 
     private proxy: WorkspaceMain;
+    private logger: PluginLogger;
+
+    @inject(EncodingService)
+    protected encodingService: EncodingService;
 
     private workspaceFoldersChangedEmitter = new Emitter<theia.WorkspaceFoldersChangeEvent>();
     public readonly onDidChangeWorkspaceFolders: Event<theia.WorkspaceFoldersChangeEvent> = this.workspaceFoldersChangedEmitter.event;
@@ -71,12 +78,15 @@ export class WorkspaceExtImpl implements WorkspaceExt {
     private _trusted?: boolean = undefined;
     private didGrantWorkspaceTrustEmitter = new Emitter<void>();
     public readonly onDidGrantWorkspaceTrust: Event<void> = this.didGrantWorkspaceTrustEmitter.event;
+    private didChangeWorkspaceTrustEmitter = new Emitter<boolean>();
+    public readonly onDidChangeWorkspaceTrust: Event<boolean> = this.didChangeWorkspaceTrustEmitter.event;
 
     private canonicalUriProviders = new Map<string, theia.CanonicalUriProvider>();
 
     @postConstruct()
     initialize(): void {
         this.proxy = this.rpc.getProxy(Ext.WORKSPACE_MAIN);
+        this.logger = new PluginLogger(this.rpc, 'workspace');
     }
 
     get rootPath(): string | undefined {
@@ -109,7 +119,22 @@ export class WorkspaceExtImpl implements WorkspaceExt {
 
     $onWorkspaceFoldersChanged(event: WorkspaceRootsChangeEvent): void {
         const newRoots = event.roots || [];
-        const newFolders = newRoots.map((root, index) => this.toWorkspaceFolder(root, index));
+        const oldFoldersByUri = new Map<string, theia.WorkspaceFolder>();
+        if (this.folders) {
+            for (const folder of this.folders) {
+                oldFoldersByUri.set(folder.uri.toString(), folder);
+            }
+        }
+        const newFolders = newRoots.map((root, index) => {
+            const existing = oldFoldersByUri.get(root);
+            if (existing) {
+                // Preserve object identity even if the index changed,
+                // since extensions may use folder objects as Map keys.
+                Object.assign(existing, { index });
+                return existing;
+            }
+            return this.toWorkspaceFolder(root, index);
+        });
         const delta = this.deltaFolders(this.folders, newFolders);
 
         this.folders = newFolders;
@@ -267,7 +292,7 @@ export class WorkspaceExtImpl implements WorkspaceExt {
             throw new Error(`Text Content Document Provider for scheme '${scheme}' is already registered`);
         } else if (this.documentContentProviders.has(scheme)) {
             // TODO: we should be able to handle multiple registrations, but for now we should ensure that it doesn't crash plugin activation.
-            console.warn(`Repeat registration of TextContentDocumentProvider for scheme '${scheme}'. This registration will be ignored.`);
+            this.logger.warn(`Repeat registration of TextContentDocumentProvider for scheme '${scheme}'. This registration will be ignored.`);
             return { dispose: () => { } };
         }
 
@@ -336,7 +361,7 @@ export class WorkspaceExtImpl implements WorkspaceExt {
             const folderPath = folder.uri.toString();
 
             if (resourcePath === folderPath) {
-                return toWorkspaceFolder(folder);
+                return folder;
             }
 
             if (resourcePath.startsWith(folderPath)
@@ -459,8 +484,16 @@ export class WorkspaceExtImpl implements WorkspaceExt {
     }
 
     $onWorkspaceTrustChanged(trust: boolean | undefined): void {
-        if (!this._trusted && trust) {
-            this._trusted = trust;
+        const wasTrusted = this._trusted;
+        this._trusted = trust;
+
+        // Fire onDidChangeWorkspaceTrust if value actually changed
+        if (wasTrusted !== trust && trust !== undefined) {
+            this.didChangeWorkspaceTrustEmitter.fire(trust);
+        }
+
+        // Fire onDidGrantWorkspaceTrust when transitioning from untrusted to trusted
+        if (!wasTrusted && trust) {
             this.didGrantWorkspaceTrustEmitter.fire();
         }
     }
@@ -472,7 +505,7 @@ export class WorkspaceExtImpl implements WorkspaceExt {
 
         this.canonicalUriProviders.set(scheme, provider);
         this.proxy.$registerCanonicalUriProvider(scheme).catch(e => {
-            console.error(`Canonical URI provider for scheme: '${scheme}' already exists globally`);
+            this.logger.error(`Canonical URI provider for scheme: '${scheme}' already exists globally`);
             this.canonicalUriProviders.delete(scheme);
         });
         const result = Disposable.create(() => { this.proxy.$unregisterCanonicalUriProvider(scheme); });
@@ -481,7 +514,7 @@ export class WorkspaceExtImpl implements WorkspaceExt {
 
     $disposeCanonicalUriProvider(scheme: string): void {
         if (!this.canonicalUriProviders.delete(scheme)) {
-            console.warn(`No canonical uri provider registered for '${scheme}'`);
+            this.logger.warn(`diposeCanonicalUriProvider: No canonical uri provider registered for '${scheme}'`);
         }
     }
 
@@ -494,7 +527,7 @@ export class WorkspaceExtImpl implements WorkspaceExt {
         const parsed = URI.parse(uri);
         const provider = this.canonicalUriProviders.get(parsed.scheme);
         if (!provider) {
-            console.warn(`No canonical uri provider registered for '${parsed.scheme}'`);
+            this.logger.warn(`provideCanonicalUri: No canonical uri provider registered for '${parsed.scheme}'`);
             return undefined;
         }
         const result = await provider.provideCanonicalUri(parsed, { targetScheme: targetScheme }, token);
@@ -504,5 +537,37 @@ export class WorkspaceExtImpl implements WorkspaceExt {
     /** @stubbed */
     $registerEditSessionIdentityProvider(scheme: string, provider: theia.EditSessionIdentityProvider): theia.Disposable {
         return Disposable.NULL;
+    }
+
+    async decode(content: Uint8Array, args?: { uri?: theia.Uri; encoding?: string }): Promise<string> {
+        const [uri, opts] = this.asEncodeDecodeParameters(args);
+        const { preferredEncoding, guessEncoding } = await this.proxy.$resolveDecoding(uri, opts);
+        const decodeStreamOptions = {
+            guessEncoding,
+            overwriteEncoding: (detectedEncoding: string | undefined) => {
+                if (detectedEncoding === null || detectedEncoding === preferredEncoding) {
+                    return Promise.resolve(preferredEncoding);
+                }
+
+                return this.proxy.$getValidEncoding(uri, detectedEncoding, opts);
+            }
+        };
+        const stream = (await this.encodingService.decodeStream(BinaryBufferReadableStream.fromBuffer(BinaryBuffer.wrap(content)), decodeStreamOptions)).stream;
+        return consumeStream(stream, s => s.join(''));
+
+    }
+
+    async encode(content: string, args?: { uri?: theia.Uri; encoding?: string }): Promise<Uint8Array> {
+        const [uri, options] = this.asEncodeDecodeParameters(args);
+        const { encoding, hasBOM } = await this.proxy.$resolveEncoding(uri, options);
+        const buffer = this.encodingService.encode(content, { encoding, hasBOM });
+        return buffer.buffer;
+    }
+
+    private asEncodeDecodeParameters(opts?: { uri?: theia.Uri; encoding?: string }): [UriComponents | undefined, { encoding: string } | undefined] {
+        const uri = Converter.isUriComponents(opts?.uri) ? opts.uri : undefined;
+        const encoding = typeof opts?.encoding === 'string' ? opts.encoding : undefined;
+
+        return [uri, encoding ? { encoding } : undefined];
     }
 }

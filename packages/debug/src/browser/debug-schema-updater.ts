@@ -15,28 +15,29 @@
 // *****************************************************************************
 
 import { injectable, inject, postConstruct } from '@theia/core/shared/inversify';
-import { JsonSchemaRegisterContext, JsonSchemaContribution } from '@theia/core/lib/browser/json-schema-store';
-import { InMemoryResources, deepClone, nls } from '@theia/core/lib/common';
+import { JsonSchemaRegisterContext, JsonSchemaContribution, JsonSchemaDataStore } from '@theia/core/lib/browser/json-schema-store';
+import { deepClone, nls } from '@theia/core/lib/common';
 import { IJSONSchema } from '@theia/core/lib/common/json-schema';
 import URI from '@theia/core/lib/common/uri';
 import { DebugService } from '../common/debug-service';
-import { debugPreferencesSchema } from './debug-preferences';
+import { debugPreferencesSchema } from '../common/debug-preferences';
 import { inputsSchema } from '@theia/variable-resolver/lib/browser/variable-input-schema';
 import { WorkspaceService } from '@theia/workspace/lib/browser';
 import { defaultCompound } from '../common/debug-compound';
+import { launchSchemaId } from '../common/launch-preferences';
 
 @injectable()
 export class DebugSchemaUpdater implements JsonSchemaContribution {
 
     protected readonly uri = new URI(launchSchemaId);
 
-    @inject(InMemoryResources) protected readonly inmemoryResources: InMemoryResources;
+    @inject(JsonSchemaDataStore) protected readonly jsonStorage: JsonSchemaDataStore;
     @inject(WorkspaceService) protected readonly workspaceService: WorkspaceService;
     @inject(DebugService) protected readonly debug: DebugService;
 
     @postConstruct()
     protected init(): void {
-        this.inmemoryResources.add(this.uri, '');
+        this.jsonStorage.setSchema(this.uri, '');
     }
 
     registerSchemas(context: JsonSchemaRegisterContext): void {
@@ -64,13 +65,10 @@ export class DebugSchemaUpdater implements JsonSchemaContribution {
             }
         }
         items.defaultSnippets!.push(...await this.debug.getConfigurationSnippets());
-
-        const contents = JSON.stringify(schema);
-        this.inmemoryResources.update(this.uri, contents);
+        this.jsonStorage.setSchema(this.uri, schema);
     }
 }
 
-export const launchSchemaId = 'vscode://schemas/launch';
 const launchSchema: IJSONSchema = {
     $id: launchSchemaId,
     type: 'object',

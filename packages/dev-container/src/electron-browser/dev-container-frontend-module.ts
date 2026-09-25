@@ -13,16 +13,21 @@
 //
 // SPDX-License-Identifier: EPL-2.0 OR GPL-2.0-only WITH Classpath-exception-2.0
 // *****************************************************************************
+import '../../src/electron-browser/style/dev-container-attach-screen.css';
 import { ContainerModule } from '@theia/core/shared/inversify';
 import { RemoteRegistryContribution } from '@theia/remote/lib/electron-browser/remote-registry-contribution';
+import { DevContainerAttachScreen } from './dev-container-attach-screen';
 import { RemoteContainerConnectionProvider, RemoteContainerConnectionProviderPath } from '../electron-common/remote-container-connection-provider';
 import { ContainerConnectionContribution } from './container-connection-contribution';
 import { ServiceConnectionProvider } from '@theia/core/lib/browser/messaging/service-connection-provider';
 import { ContainerOutputProvider } from './container-output-provider';
 import { ContainerInfoContribution } from './container-info-contribution';
-import { FrontendApplicationContribution } from '@theia/core/lib/browser';
+import { FrontendApplicationContribution, LabelProviderContribution } from '@theia/core/lib/browser';
 import { WorkspaceOpenHandlerContribution } from '@theia/workspace/lib/browser/workspace-service';
 import { WindowTitleContribution } from '@theia/core/lib/browser/window/window-title-service';
+import { DevContainerSuggestionContribution } from './dev-container-suggestion-contribution';
+import { bindDevContainerPreferences } from '../electron-common/dev-container-preferences';
+import { DevContainerStartupContribution } from './dev-container-startup-contribution';
 
 export default new ContainerModule(bind => {
     bind(ContainerConnectionContribution).toSelf().inSingletonScope();
@@ -30,6 +35,7 @@ export default new ContainerModule(bind => {
     bind(WorkspaceOpenHandlerContribution).toService(ContainerConnectionContribution);
 
     bind(ContainerOutputProvider).toSelf().inSingletonScope();
+    bindDevContainerPreferences(bind);
 
     bind(RemoteContainerConnectionProvider).toDynamicValue(ctx => {
         const outputProvider = ctx.container.get(ContainerOutputProvider);
@@ -39,4 +45,12 @@ export default new ContainerModule(bind => {
     bind(ContainerInfoContribution).toSelf().inSingletonScope();
     bind(FrontendApplicationContribution).toService(ContainerInfoContribution);
     bind(WindowTitleContribution).toService(ContainerInfoContribution);
+    bind(LabelProviderContribution).toService(ContainerInfoContribution);
+
+    bind(DevContainerSuggestionContribution).toSelf().inSingletonScope();
+    bind(FrontendApplicationContribution).toService(DevContainerSuggestionContribution);
+
+    bind(DevContainerAttachScreen).toSelf().inSingletonScope();
+    bind(DevContainerStartupContribution).toSelf().inSingletonScope();
+    bind(FrontendApplicationContribution).toService(DevContainerStartupContribution);
 });

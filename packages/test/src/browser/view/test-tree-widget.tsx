@@ -14,7 +14,7 @@
 // SPDX-License-Identifier: EPL-2.0 OR GPL-2.0-only WITH Classpath-exception-2.0
 // *****************************************************************************
 
-import { injectable, inject, postConstruct } from '@theia/core/shared/inversify';
+import { injectable, inject, postConstruct, named } from '@theia/core/shared/inversify';
 import {
     TreeWidget, TreeModel, TreeProps, CompositeTreeNode, ExpandableTreeNode, TreeNode, TreeImpl, NodeProps,
     TREE_NODE_SEGMENT_CLASS, TREE_NODE_TAIL_CLASS, SelectableTreeNode
@@ -26,7 +26,7 @@ import { ContextKeyService } from '@theia/core/lib/browser/context-key-service';
 import { TestController, TestExecutionState, TestItem, TestService } from '../test-service';
 import * as React from '@theia/core/shared/react';
 import { DeltaKind, TreeDelta } from '../../common/tree-delta';
-import { ActionMenuNode, CommandRegistry, Disposable, DisposableCollection, Event, MenuModelRegistry, nls } from '@theia/core';
+import { AcceleratorSource, CommandMenu, CommandRegistry, Disposable, DisposableCollection, Event, MenuModelRegistry, nls, ILogger } from '@theia/core';
 import { TestExecutionStateManager } from './test-execution-state-manager';
 import { TestOutputUIModel } from './test-output-ui-model';
 import { TEST_VIEW_INLINE_MENU } from './test-view-contribution';
@@ -65,6 +65,9 @@ export namespace TestItemNode {
 @injectable()
 export class TestTree extends TreeImpl {
     @inject(TestService) protected readonly testService: TestService;
+
+    @inject(ILogger) @named('test:TestTree')
+    protected override readonly logger: ILogger;
 
     private controllerListeners = new Map<string, Disposable>();
 
@@ -134,7 +137,7 @@ export class TestTree extends TreeImpl {
             if (node) {
                 this.refresh(node as CompositeTreeNode); // we only have composite tree nodes in this tree
             } else {
-                console.warn('delta for unknown test item');
+                this.logger.warn('delta for unknown test item');
             }
         } else {
             const item = this.findInParent(parent, delta.path, 0);
@@ -146,7 +149,7 @@ export class TestTree extends TreeImpl {
                     this.processDeltas(controller, item, delta.childDeltas);
                 }
             } else {
-                console.warn('delta for unknown test item');
+                this.logger.warn('delta for unknown test item');
             }
         }
     }
@@ -274,7 +277,6 @@ export class TestTreeWidget extends TreeWidget {
             case TestExecutionState.Failed: return `${codicon('error')} failed`;
             case TestExecutionState.Errored: return `${codicon('issues')} errored`;
             case TestExecutionState.Passed: return `${codicon('pass')} passed`;
-            case TestExecutionState.Running: return `${codicon('sync-spin')} running`;
             default: return codicon('circle');
         }
     }
@@ -299,9 +301,9 @@ export class TestTreeWidget extends TreeWidget {
         if (TestItemNode.is(node)) {
             const testItem = node.testItem;
             return this.contextKeys.with({ view: this.id, controllerId: node.controller.id, testId: testItem.id, testItemHasUri: !!testItem.uri }, () => {
-                const menu = this.menus.getMenu(TEST_VIEW_INLINE_MENU);
+                const menu = this.menus.getMenu(TEST_VIEW_INLINE_MENU)!; // we register items into this menu, so we know it exists
                 const args = [node.testItem];
-                const inlineCommands = menu.children.filter((item): item is ActionMenuNode => item instanceof ActionMenuNode);
+                const inlineCommands = menu.children.filter((item): item is CommandMenu => CommandMenu.is(item));
                 const tailDecorations = super.renderTailDecorations(node, props);
                 return <React.Fragment>
                     {inlineCommands.length > 0 && <div className={TREE_NODE_SEGMENT_CLASS + ' flex'}>
@@ -316,17 +318,17 @@ export class TestTreeWidget extends TreeWidget {
     }
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    protected renderInlineCommand(actionMenuNode: ActionMenuNode, index: number, tabbable: boolean, args: any[]): React.ReactNode {
-        if (!actionMenuNode.icon || !this.commands.isVisible(actionMenuNode.command, ...args) || (actionMenuNode.when && !this.contextKeys.match(actionMenuNode.when))) {
+    protected renderInlineCommand(actionMenuNode: CommandMenu, index: number, tabbable: boolean, args: any[]): React.ReactNode {
+        if (!actionMenuNode.icon || !actionMenuNode.isVisible(TEST_VIEW_INLINE_MENU, this.contextKeys, this.node, ...args)) {
             return false;
         }
         const className = [TREE_NODE_SEGMENT_CLASS, TREE_NODE_TAIL_CLASS, actionMenuNode.icon, ACTION_ITEM, 'theia-test-tree-inline-action'].join(' ');
         const tabIndex = tabbable ? 0 : undefined;
-        const titleString = actionMenuNode.label + this.resolveKeybindingForCommand(actionMenuNode.command);
+        const titleString = actionMenuNode.label + (AcceleratorSource.is(actionMenuNode) ? actionMenuNode.getAccelerator(undefined).join(' ') : '');
 
         return <div key={index} className={className} title={titleString} tabIndex={tabIndex} onClick={e => {
             e.stopPropagation();
-            this.commands.executeCommand(actionMenuNode.command, ...args);
+            actionMenuNode.run(TEST_VIEW_INLINE_MENU, ...args);
         }} />;
     }
 

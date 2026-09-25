@@ -13,6 +13,7 @@
 //
 // SPDX-License-Identifier: EPL-2.0 OR GPL-2.0-only WITH Classpath-exception-2.0
 // *****************************************************************************
+
 import '@theia/core/shared/reflect-metadata';
 import { ContainerModule } from '@theia/core/shared/inversify';
 import { RPCProtocol, RPCProtocolImpl } from '../../common/rpc-protocol';
@@ -34,10 +35,17 @@ import { KeyValueStorageProxy, InternalStorageExt } from '../../plugin/plugin-st
 import { WebviewsExtImpl } from '../../plugin/webviews';
 import { TerminalServiceExtImpl } from '../../plugin/terminal-ext';
 import { InternalSecretsExt, SecretsExtImpl } from '../../plugin/secrets-ext';
+import { setupPluginHostLogger } from './plugin-host-logger';
+import { LmExtImpl } from '../../plugin/lm-ext';
+import { LanguageModelToolsExtImpl } from '../../plugin/lm-tool-ext';
+import { EncodingService } from '@theia/core/lib/common/encoding-service';
+import { TelemetryExtImpl } from '../../plugin/telemetry-ext';
 
 export default new ContainerModule(bind => {
     const channel = new IPCChannel();
-    bind(RPCProtocol).toConstantValue(new RPCProtocolImpl(channel));
+    const rpc = new RPCProtocolImpl(channel);
+    setupPluginHostLogger(rpc);
+    bind(RPCProtocol).toConstantValue(rpc);
 
     bind(PluginContainerModuleLoader).toDynamicValue(({ container }) =>
         (module: ContainerModule) => {
@@ -59,6 +67,9 @@ export default new ContainerModule(bind => {
     bind(SecretsExtImpl).toSelf().inSingletonScope();
     bind(PreferenceRegistryExtImpl).toSelf().inSingletonScope();
     bind(DebugExtImpl).toSelf().inSingletonScope();
+    bind(LmExtImpl).toSelf().inSingletonScope();
+    bind(LanguageModelToolsExtImpl).toSelf().inSingletonScope();
+    bind(EncodingService).toSelf().inSingletonScope();
     bind(EditorsAndDocumentsExtImpl).toSelf().inSingletonScope();
     bind(WorkspaceExtImpl).toSelf().inSingletonScope();
     bind(MessageRegistryExt).toSelf().inSingletonScope();
@@ -66,4 +77,5 @@ export default new ContainerModule(bind => {
     bind(WebviewsExtImpl).toSelf().inSingletonScope();
     bind(MinimalTerminalServiceExt).toService(TerminalServiceExtImpl);
     bind(TerminalServiceExtImpl).toSelf().inSingletonScope();
+    bind(TelemetryExtImpl).toSelf().inSingletonScope();
 });

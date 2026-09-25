@@ -27,7 +27,7 @@ import { FileNavigatorWidget, FILE_NAVIGATOR_ID } from './navigator-widget';
 import { FileNavigatorContribution } from './navigator-contribution';
 import { createFileNavigatorWidget } from './navigator-container';
 import { WidgetFactory } from '@theia/core/lib/browser/widget-manager';
-import { bindFileNavigatorPreferences } from './navigator-preferences';
+import { bindFileNavigatorPreferences } from '../common/navigator-preferences';
 import { FileNavigatorFilter } from './navigator-filter';
 import { NavigatorContextKeyService } from './navigator-context-key-service';
 import { TabBarToolbarContribution } from '@theia/core/lib/browser/shell/tab-bar-toolbar';
@@ -36,12 +36,13 @@ import { NavigatorLayoutVersion3Migration, NavigatorLayoutVersion5Migration } fr
 import { NavigatorTabBarDecorator } from './navigator-tab-bar-decorator';
 import { TabBarDecorator } from '@theia/core/lib/browser/shell/tab-bar-decorator';
 import { NavigatorWidgetFactory } from './navigator-widget-factory';
-import { bindContributionProvider } from '@theia/core/lib/common';
+import { bindRootContributionProvider } from '@theia/core/lib/common';
 import { OpenEditorsTreeDecorator } from './open-editors-widget/navigator-open-editors-decorator-service';
 import { OpenEditorsWidget } from './open-editors-widget/navigator-open-editors-widget';
 import { NavigatorTreeDecorator } from './navigator-decorator-service';
 import { NavigatorDeletedEditorDecorator } from './open-editors-widget/navigator-deleted-editor-decorator';
 import { NavigatorSymlinkDecorator } from './navigator-symlink-decorator';
+import { NavigatorFileClipboard } from './navigator-file-clipboard';
 import { FileTreeDecoratorAdapter } from '@theia/filesystem/lib/browser';
 
 export default new ContainerModule(bind => {
@@ -49,6 +50,7 @@ export default new ContainerModule(bind => {
     bind(FileNavigatorFilter).toSelf().inSingletonScope();
 
     bind(NavigatorContextKeyService).toSelf().inSingletonScope();
+    bind(NavigatorFileClipboard).toSelf().inSingletonScope();
 
     bindViewContribution(bind, FileNavigatorContribution);
     bind(FrontendApplicationContribution).toService(FileNavigatorContribution);
@@ -61,8 +63,8 @@ export default new ContainerModule(bind => {
         id: FILE_NAVIGATOR_ID,
         createWidget: () => container.get(FileNavigatorWidget)
     })).inSingletonScope();
-    bindContributionProvider(bind, NavigatorTreeDecorator);
-    bindContributionProvider(bind, OpenEditorsTreeDecorator);
+    bindRootContributionProvider(bind, NavigatorTreeDecorator);
+    bindRootContributionProvider(bind, OpenEditorsTreeDecorator);
     bind(NavigatorTreeDecorator).toService(FileTreeDecoratorAdapter);
     bind(OpenEditorsTreeDecorator).toService(FileTreeDecoratorAdapter);
     bind(NavigatorDeletedEditorDecorator).toSelf().inSingletonScope();

@@ -14,7 +14,7 @@
 // SPDX-License-Identifier: EPL-2.0 OR GPL-2.0-only WITH Classpath-exception-2.0
 // *****************************************************************************
 import { createTreeContainer, LabelProviderContribution, WidgetFactory } from '@theia/core/lib/browser';
-import { bindContributionProvider } from '@theia/core/lib/common/contribution-provider';
+import { bindRootContributionProvider } from '@theia/core/lib/common/contribution-provider';
 import { Container, interfaces } from '@theia/core/shared/inversify';
 import { PreferenceTreeModel } from '../preference-tree-model';
 import { PreferenceTreeLabelProvider } from '../util/preference-tree-label-provider';
@@ -36,6 +36,7 @@ import { PreferencesScopeTabBar } from './preference-scope-tabbar-widget';
 import { PreferencesSearchbarWidget } from './preference-searchbar-widget';
 import { PreferencesTreeWidget } from './preference-tree-widget';
 import { PreferencesWidget } from './preference-widget';
+import { PreferenceNullInputRenderer, PreferenceNullRendererContribution } from './components/preference-null-input';
 
 export function bindPreferencesWidgets(bind: interfaces.Bind): void {
     bind(PreferenceTreeLabelProvider).toSelf().inSingletonScope();
@@ -48,7 +49,7 @@ export function bindPreferencesWidgets(bind: interfaces.Bind): void {
         createWidget: () => container.get(PreferencesWidget)
     })).inSingletonScope();
 
-    bindContributionProvider(bind, PreferenceNodeRendererContribution);
+    bindRootContributionProvider(bind, PreferenceNodeRendererContribution);
 
     bind(PreferenceSelectInputRenderer).toSelf();
     bind(PreferenceNodeRendererContribution).to(PreferenceSelectInputRendererContribution).inSingletonScope();
@@ -58,6 +59,8 @@ export function bindPreferencesWidgets(bind: interfaces.Bind): void {
 
     bind(PreferenceStringInputRenderer).toSelf();
     bind(PreferenceNodeRendererContribution).to(PreferenceStringInputRendererContribution).inSingletonScope();
+    bind(PreferenceNullInputRenderer).toSelf();
+    bind(PreferenceNodeRendererContribution).to(PreferenceNullRendererContribution).inSingletonScope();
 
     bind(PreferenceBooleanInputRenderer).toSelf();
     bind(PreferenceNodeRendererContribution).to(PreferenceBooleanInputRendererContribution).inSingletonScope();

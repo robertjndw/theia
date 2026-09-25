@@ -14,7 +14,7 @@
 // SPDX-License-Identifier: EPL-2.0 OR GPL-2.0-only WITH Classpath-exception-2.0
 // *****************************************************************************
 
-import { UUID } from '@theia/core/shared/@phosphor/coreutils';
+import { UUID } from '@theia/core/shared/@lumino/coreutils';
 import { inject, injectable } from '@theia/core/shared/inversify';
 import { TerminalServiceExt, TerminalServiceMain, PLUGIN_RPC_CONTEXT, Plugin, TerminalOptions } from '../common/plugin-api-rpc';
 import { RPCProtocol } from '../common/rpc-protocol';
@@ -37,6 +37,13 @@ export class TerminalServiceExtImpl implements TerminalServiceExt {
     private readonly proxy: TerminalServiceMain;
 
     private readonly _terminals = new Map<string, TerminalExtImpl>();
+
+    /**
+     * Stores the API objects (Proxies) returned to plugins for each terminal.
+     * This ensures that events fire with the same object instance that plugins received,
+     * allowing strict equality checks (===) to work correctly.
+     */
+    private readonly _terminalApiObjects = new Map<string, theia.Terminal>();
 
     private readonly _pseudoTerminals = new Map<string, PseudoTerminal>();
 
@@ -66,8 +73,8 @@ export class TerminalServiceExtImpl implements TerminalServiceExt {
         this.proxy = rpc.getProxy(PLUGIN_RPC_CONTEXT.TERMINAL_MAIN);
     }
 
-    get terminals(): TerminalExtImpl[] {
-        return [...this._terminals.values()];
+    get terminals(): theia.Terminal[] {
+        return [...this._terminals.keys()].map(id => this.getApiObject(id)).filter((t): t is theia.Terminal => t !== undefined);
     }
 
     get defaultShell(): string {
@@ -84,7 +91,9 @@ export class TerminalServiceExtImpl implements TerminalServiceExt {
     createTerminal(
         plugin: Plugin,
         nameOrOptions: theia.TerminalOptions | theia.PseudoTerminalOptions | theia.ExtensionTerminalOptions | string | undefined,
-        shellPath?: string, shellArgs?: string[] | string
+        shellPath?: string,
+        shellArgs?: string[] | string,
+        apiObjectWrapper?: (terminal: TerminalExtImpl) => theia.Terminal
     ): theia.Terminal {
         const id = `plugin-terminal-${UUID.uuid4()}`;
         let options: TerminalOptions;
@@ -110,7 +119,15 @@ export class TerminalServiceExtImpl implements TerminalServiceExt {
         let parentId;
         if (options.location && typeof options.location === 'object' && 'parentTerminal' in options.location) {
             const parentTerminal = options.location.parentTerminal;
-            if (parentTerminal instanceof TerminalExtImpl) {
+            // Check both the API proxy objects and the raw terminals, since
+            // plugins receive the proxy but _terminals stores the raw object.
+            for (const [k, v] of this._terminalApiObjects) {
+                if (v === parentTerminal) {
+                    parentId = k;
+                    break;
+                }
+            }
+            if (!parentId) {
                 for (const [k, v] of this._terminals) {
                     if (v === parentTerminal) {
                         parentId = k;
@@ -136,7 +153,16 @@ export class TerminalServiceExtImpl implements TerminalServiceExt {
         if (typeof nameOrOptions === 'object' && 'pty' in nameOrOptions) {
             creationOptions = nameOrOptions;
         }
-        return this.obtainTerminal(id, options.name || 'Terminal', creationOptions);
+        const terminal = this.obtainTerminal(id, options.name || 'Terminal', creationOptions);
+
+        // If a wrapper function is provided, wrap the terminal and register the API object
+        // This ensures events fire with the same object instance that plugins received
+        if (apiObjectWrapper) {
+            const apiObject = apiObjectWrapper(terminal);
+            this._terminalApiObjects.set(id, apiObject);
+            return apiObject;
+        }
+        return terminal;
     }
 
     attachPtyToTerminal(terminalId: number, pty: theia.Pseudoterminal): void {
@@ -153,6 +179,13 @@ export class TerminalServiceExtImpl implements TerminalServiceExt {
         return terminal;
     }
 
+    /**
+     * Gets the API object for a terminal by ID, falling back to the raw terminal if not set.
+     */
+    protected getApiObject(id: string): theia.Terminal | undefined {
+        return this._terminalApiObjects.get(id) ?? this._terminals.get(id);
+    }
+
     $terminalOnInput(id: string, data: string): void {
         const terminal = this._pseudoTerminals.get(id);
         if (!terminal) {
@@ -161,14 +194,31 @@ export class TerminalServiceExtImpl implements TerminalServiceExt {
         terminal.emitOnInput(data);
     }
 
-    $terminalStateChanged(id: string): void {
+    $terminalOnInteraction(id: string): void {
         const terminal = this._terminals.get(id);
         if (!terminal) {
             return;
         }
         if (!terminal.state.isInteractedWith) {
-            terminal.state = { isInteractedWith: true };
-            this.onDidChangeTerminalStateEmitter.fire(terminal);
+            terminal.state = { ...terminal.state, isInteractedWith: true };
+            const apiObject = this.getApiObject(id);
+            if (apiObject) {
+                this.onDidChangeTerminalStateEmitter.fire(apiObject);
+            }
+        }
+    }
+
+    $terminalShellTypeChanged(id: string, shellType: string): void {
+        const terminal = this._terminals.get(id);
+        if (!terminal) {
+            return;
+        }
+        if (terminal.state.shell !== shellType) {
+            terminal.state = { ...terminal.state, shell: shellType };
+            const apiObject = this.getApiObject(id);
+            if (apiObject) {
+                this.onDidChangeTerminalStateEmitter.fire(apiObject);
+            }
         }
     }
 
@@ -183,7 +233,10 @@ export class TerminalServiceExtImpl implements TerminalServiceExt {
     $terminalCreated(id: string, name: string): void {
         const terminal = this.obtainTerminal(id, name);
         terminal.id.resolve(id);
-        this.onDidOpenTerminalEmitter.fire(terminal);
+        const apiObject = this.getApiObject(id);
+        if (apiObject) {
+            this.onDidOpenTerminalEmitter.fire(apiObject);
+        }
     }
 
     $terminalNameChanged(id: string, name: string): void {
@@ -223,8 +276,12 @@ export class TerminalServiceExtImpl implements TerminalServiceExt {
         const terminal = this._terminals.get(id);
         if (terminal) {
             terminal.exitStatus = exitStatus ?? { code: undefined, reason: TerminalExitReason.Unknown };
-            this.onDidCloseTerminalEmitter.fire(terminal);
+            const apiObject = this.getApiObject(id);
+            if (apiObject) {
+                this.onDidCloseTerminalEmitter.fire(apiObject);
+            }
             this._terminals.delete(id);
+            this._terminalApiObjects.delete(id);
         }
         const pseudoTerminal = this._pseudoTerminals.get(id);
         if (pseudoTerminal) {
@@ -234,8 +291,8 @@ export class TerminalServiceExtImpl implements TerminalServiceExt {
     }
 
     private activeTerminalId: string | undefined;
-    get activeTerminal(): TerminalExtImpl | undefined {
-        return this.activeTerminalId && this._terminals.get(this.activeTerminalId) || undefined;
+    get activeTerminal(): theia.Terminal | undefined {
+        return this.activeTerminalId && this.getApiObject(this.activeTerminalId) || undefined;
     }
     $currentTerminalChanged(id: string | undefined): void {
         this.activeTerminalId = id;
@@ -308,7 +365,7 @@ export class TerminalServiceExtImpl implements TerminalServiceExt {
 
     async $provideTerminalLinks(line: string, terminalId: string, token: theia.CancellationToken): Promise<ProvidedTerminalLink[]> {
         const links: ProvidedTerminalLink[] = [];
-        const terminal = this._terminals.get(terminalId);
+        const terminal = this.getApiObject(terminalId);
         if (terminal) {
             for (const [providerId, provider] of this.terminalLinkProviders) {
                 const providedLinks = await provider.provideTerminalLinks({ line, terminal }, token);
@@ -472,7 +529,7 @@ export class TerminalExtImpl implements theia.Terminal {
 
     readonly creationOptions: Readonly<theia.TerminalOptions | theia.ExtensionTerminalOptions>;
 
-    state: theia.TerminalState = { isInteractedWith: false };
+    state: theia.TerminalState = { isInteractedWith: false, shell: undefined };
 
     constructor(private readonly proxy: TerminalServiceMain, private readonly options: theia.TerminalOptions | theia.ExtensionTerminalOptions) {
         this.creationOptions = this.options;

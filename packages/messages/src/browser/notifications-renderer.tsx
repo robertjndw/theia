@@ -14,13 +14,13 @@
 // SPDX-License-Identifier: EPL-2.0 OR GPL-2.0-only WITH Classpath-exception-2.0
 // *****************************************************************************
 
-import * as React from '@theia/core/shared/react';
 import { createRoot, Root } from '@theia/core/shared/react-dom/client';
 import { injectable, inject, postConstruct } from '@theia/core/shared/inversify';
-import { ApplicationShell, CorePreferences } from '@theia/core/lib/browser';
+import { ApplicationShell, ContextMenuRenderer } from '@theia/core/lib/browser';
 import { NotificationManager } from './notifications-manager';
 import { NotificationCenterComponent } from './notification-center-component';
 import { NotificationToastsComponent } from './notification-toasts-component';
+import { CorePreferences } from '@theia/core';
 
 @injectable()
 export class NotificationsRenderer {
@@ -33,6 +33,10 @@ export class NotificationsRenderer {
 
     @inject(CorePreferences)
     protected readonly corePreferences: CorePreferences;
+
+    @inject(ContextMenuRenderer)
+    protected readonly contextMenuRenderer: ContextMenuRenderer;
+
     protected containerRoot: Root;
 
     @postConstruct()
@@ -53,8 +57,8 @@ export class NotificationsRenderer {
 
     protected render(): void {
         this.containerRoot.render(<div>
-            <NotificationToastsComponent manager={this.manager} corePreferences={this.corePreferences} />
-            <NotificationCenterComponent manager={this.manager} />
+            <NotificationToastsComponent manager={this.manager} corePreferences={this.corePreferences} contextMenuRenderer={this.contextMenuRenderer} />
+            <NotificationCenterComponent manager={this.manager} contextMenuRenderer={this.contextMenuRenderer} />
         </div>);
     }
 

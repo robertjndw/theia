@@ -18,45 +18,65 @@ import { ConfirmDialog, Dialog, QuickInputService } from '@theia/core/lib/browse
 import { ReactDialog } from '@theia/core/lib/browser/dialogs/react-dialog';
 import { SelectComponent } from '@theia/core/lib/browser/widgets/select-component';
 import {
-    Command, CommandContribution, CommandRegistry, MAIN_MENU_BAR,
-    MenuContribution, MenuModelRegistry, MenuNode, MessageService, SubMenuOptions
+    Command, CommandContribution, CommandMenu, CommandRegistry, ContextExpressionMatcher, MAIN_MENU_BAR,
+    MenuContribution, MenuModelRegistry, MenuPath, MessageService
 } from '@theia/core/lib/common';
-import { inject, injectable, interfaces } from '@theia/core/shared/inversify';
+import { ILogger } from '@theia/core/lib/common/logger';
+import { inject, injectable, interfaces, named } from '@theia/core/shared/inversify';
 import * as React from '@theia/core/shared/react';
 import { ReactNode } from '@theia/core/shared/react';
 
+const API_SAMPLES_CATEGORY = 'API Samples';
+
 const SampleCommand: Command = {
     id: 'sample-command',
-    label: 'Sample Command'
+    label: 'Command',
+    category: API_SAMPLES_CATEGORY
 };
 const SampleCommand2: Command = {
     id: 'sample-command2',
-    label: 'Sample Command2'
+    label: 'Command 2',
+    category: API_SAMPLES_CATEGORY
 };
 const SampleCommandConfirmDialog: Command = {
     id: 'sample-command-confirm-dialog',
-    label: 'Sample Confirm Dialog'
+    label: 'Confirm Dialog',
+    category: API_SAMPLES_CATEGORY
 };
 const SampleComplexCommandConfirmDialog: Command = {
     id: 'sample-command-complex-confirm-dialog',
-    label: 'Sample Complex Confirm Dialog'
+    label: 'Complex Confirm Dialog',
+    category: API_SAMPLES_CATEGORY
 };
 const SampleCommandWithProgressMessage: Command = {
     id: 'sample-command-with-progress',
-    label: 'Sample Command With Progress Message'
+    label: 'Command With Progress Message',
+    category: API_SAMPLES_CATEGORY
 };
 const SampleCommandWithIndeterminateProgressMessage: Command = {
     id: 'sample-command-with-indeterminate-progress',
-    label: 'Sample Command With Indeterminate Progress Message'
+    label: 'Command With Indeterminate Progress Message',
+    category: API_SAMPLES_CATEGORY
 };
 const SampleQuickInputCommand: Command = {
     id: 'sample-quick-input-command',
-    category: 'Quick Input',
-    label: 'Test Positive Integer'
+    label: 'Test Positive Integer',
+    category: API_SAMPLES_CATEGORY
 };
 const SampleSelectDialog: Command = {
     id: 'sample-command-select-dialog',
-    label: 'Sample Select Component Dialog'
+    label: 'Select Component Dialog',
+    category: API_SAMPLES_CATEGORY
+};
+const SamplePersistentNotification: Command = {
+    id: 'sample-persistent-notification',
+    label: 'Persistent Notification (No Timeout)',
+    category: API_SAMPLES_CATEGORY
+};
+const SampleVanishingNotification: Command = {
+    id: 'sample-vanishing-notification',
+    label: 'Vanishing Notification (500ms Timeout)',
+    category: API_SAMPLES_CATEGORY
 };
 
 @injectable()
@@ -68,13 +88,16 @@ export class SampleCommandContribution implements CommandContribution {
     @inject(MessageService)
     protected readonly messageService: MessageService;
 
+    @inject(ILogger) @named('api-samples:SampleCommandContribution')
+    protected readonly logger: ILogger;
+
     registerCommands(commands: CommandRegistry): void {
-        commands.registerCommand({ id: 'create-quick-pick-sample', label: 'Internal QuickPick' }, {
+        commands.registerCommand({ id: 'create-quick-pick-sample', label: 'Internal QuickPick', category: API_SAMPLES_CATEGORY }, {
             execute: () => {
                 const pick = this.quickInputService.createQuickPick();
                 pick.items = [{ label: '1' }, { label: '2' }, { label: '3' }];
                 pick.onDidAccept(() => {
-                    console.log(`accepted: ${pick.selectedItems[0]?.label}`);
+                    this.logger.debug(`accepted: ${pick.selectedItems[0]?.label}`);
                     pick.hide();
                 });
                 pick.show();
@@ -218,6 +241,22 @@ export class SampleCommandContribution implements CommandContribution {
                     });
             }
         });
+        commands.registerCommand(SamplePersistentNotification, {
+            execute: () => {
+                this.messageService.info(
+                    'This notification will stay visible until you dismiss it manually.',
+                    { timeout: 0 }
+                );
+            }
+        });
+        commands.registerCommand(SampleVanishingNotification, {
+            execute: () => {
+                this.messageService.info(
+                    'This notification will stay visible for 500ms.',
+                    { timeout: 500 }
+                );
+            }
+        });
     }
 
 }
@@ -225,53 +264,67 @@ export class SampleCommandContribution implements CommandContribution {
 @injectable()
 export class SampleMenuContribution implements MenuContribution {
     registerMenus(menus: MenuModelRegistry): void {
-        const subMenuPath = [...MAIN_MENU_BAR, 'sample-menu'];
-        menus.registerSubmenu(subMenuPath, 'Sample Menu', {
-            order: '2' // that should put the menu right next to the File menu
-        });
-        menus.registerMenuAction(subMenuPath, {
-            commandId: SampleCommand.id,
-            order: '0'
-        });
-        menus.registerMenuAction(subMenuPath, {
-            commandId: SampleCommand2.id,
-            order: '2'
-        });
-        const subSubMenuPath = [...subMenuPath, 'sample-sub-menu'];
-        menus.registerSubmenu(subSubMenuPath, 'Sample sub menu', { order: '2' });
-        menus.registerMenuAction(subSubMenuPath, {
-            commandId: SampleCommand.id,
-            order: '1'
-        });
-        menus.registerMenuAction(subSubMenuPath, {
-            commandId: SampleCommand2.id,
-            order: '3'
-        });
-        const placeholder = new PlaceholderMenuNode([...subSubMenuPath, 'placeholder'].join('-'), 'Placeholder', { order: '0' });
-        menus.registerMenuNode(subSubMenuPath, placeholder);
+        setTimeout(() => {
+            const subMenuPath = [...MAIN_MENU_BAR, 'sample-menu'];
+            menus.registerSubmenu(subMenuPath, 'Sample Menu', { sortString: '2' }); // that should put the menu right next to the File menu
 
-        /**
-         * Register an action menu with an invalid command (un-registered and without a label) in order
-         * to determine that menus and the layout does not break on startup.
-         */
-        menus.registerMenuAction(subMenuPath, { commandId: 'invalid-command' });
+            menus.registerMenuAction(subMenuPath, {
+                commandId: SampleCommand.id,
+                order: '0'
+            });
+            menus.registerMenuAction(subMenuPath, {
+                commandId: SampleCommand2.id,
+                order: '2'
+            });
+            const subSubMenuPath = [...subMenuPath, 'sample-sub-menu'];
+            menus.registerSubmenu(subSubMenuPath, 'Sample sub menu', { sortString: '2' });
+            menus.registerMenuAction(subSubMenuPath, {
+                commandId: SampleCommand.id,
+                order: '1'
+            });
+            menus.registerMenuAction(subSubMenuPath, {
+                commandId: SampleCommand2.id,
+                order: '3'
+            });
+            const placeholder = new PlaceholderMenuNode([...subSubMenuPath, 'placeholder'].join('-'), 'Placeholder', '0');
+            menus.registerCommandMenu(subSubMenuPath, placeholder);
+
+            /**
+             * Register an action menu with an invalid command (un-registered and without a label) in order
+             * to determine that menus and the layout does not break on startup.
+             */
+            menus.registerMenuAction(subMenuPath, { commandId: 'invalid-command' });
+        }, 10000);
     }
-
 }
 
 /**
  * Special menu node that is not backed by any commands and is always disabled.
  */
-export class PlaceholderMenuNode implements MenuNode {
+export class PlaceholderMenuNode implements CommandMenu {
 
-    constructor(readonly id: string, public readonly label: string, protected options?: SubMenuOptions) { }
+    constructor(readonly id: string, public readonly label: string, readonly order?: string, readonly icon?: string) { }
 
-    get icon(): string | undefined {
-        return this.options?.iconClass;
+    isEnabled(effectiveMenuPath: MenuPath, ...args: unknown[]): boolean {
+        return false;
+    }
+
+    isToggled(effectiveMenuPath: MenuPath): boolean {
+        return false;
+    }
+    run(effectiveMenuPath: MenuPath, ...args: unknown[]): Promise<void> {
+        throw new Error('Should never happen');
+    }
+    getAccelerator(context: HTMLElement | undefined): string[] {
+        return [];
     }
 
     get sortString(): string {
-        return this.options?.order || this.label;
+        return this.order || this.label;
+    }
+
+    isVisible<T>(effectiveMenuPath: MenuPath, contextMatcher: ContextExpressionMatcher<T>, context: T | undefined, ...args: unknown[]): boolean {
+        return true;
     }
 
 }

@@ -14,14 +14,24 @@
 // SPDX-License-Identifier: EPL-2.0 OR GPL-2.0-only WITH Classpath-exception-2.0
 // *****************************************************************************
 
-import { Agent } from '@theia/ai-core/lib/common';
-import { CommandContribution, MenuContribution } from '@theia/core';
-import { KeybindingContribution } from '@theia/core/lib/browser';
+import { ChatResponsePartRenderer } from '@theia/ai-chat-ui/lib/browser/chat-response-part-renderer';
+import { Agent, AIVariableContribution } from '@theia/ai-core/lib/common';
+import { bindToolProvider } from '@theia/ai-core/lib/common/tool-invocation-registry';
+import { CommandContribution, MenuContribution, PreferenceContribution } from '@theia/core';
+import { KeybindingContribution, WebSocketConnectionProvider } from '@theia/core/lib/browser';
 import { ContainerModule } from '@theia/core/shared/inversify';
 import { AiTerminalAgent } from './ai-terminal-agent';
 import { AiTerminalCommandContribution } from './ai-terminal-contribution';
+import { ShellExecutionTool } from './shell-execution-tool';
+import { ShellExecutionToolRenderer } from './shell-execution-tool-renderer';
+import { ShellExecutionServer, shellExecutionPath } from '../common/shell-execution-server';
+import { ShellCommandPermissionService } from './shell-command-permission-service';
+import { shellCommandPreferences } from '../common/shell-command-preferences';
+import { DefaultShellCommandAnalyzer, ShellCommandAnalyzer } from '../common/shell-command-analyzer';
+import { AiTerminalCommandBlockVariableContribution } from './ai-terminal-command-block-variable';
 
 import '../../src/browser/style/ai-terminal.css';
+import '../../src/browser/style/shell-execution-tool.css';
 
 export default new ContainerModule(bind => {
     bind(AiTerminalCommandContribution).toSelf().inSingletonScope();
@@ -31,4 +41,22 @@ export default new ContainerModule(bind => {
 
     bind(AiTerminalAgent).toSelf().inSingletonScope();
     bind(Agent).toService(AiTerminalAgent);
+
+    bindToolProvider(ShellExecutionTool, bind);
+
+    bind(ShellExecutionServer).toDynamicValue(ctx => {
+        const connection = ctx.container.get(WebSocketConnectionProvider);
+        return connection.createProxy<ShellExecutionServer>(shellExecutionPath);
+    }).inSingletonScope();
+
+    bind(ChatResponsePartRenderer).to(ShellExecutionToolRenderer).inSingletonScope();
+
+    bind(ShellCommandPermissionService).toSelf().inSingletonScope();
+
+    bind(PreferenceContribution).toConstantValue({ schema: shellCommandPreferences });
+
+    bind(ShellCommandAnalyzer).to(DefaultShellCommandAnalyzer).inSingletonScope();
+
+    bind(AiTerminalCommandBlockVariableContribution).toSelf().inSingletonScope();
+    bind(AIVariableContribution).toService(AiTerminalCommandBlockVariableContribution);
 });

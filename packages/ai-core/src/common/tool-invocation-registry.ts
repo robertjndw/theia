@@ -14,9 +14,9 @@
 // SPDX-License-Identifier: EPL-2.0 OR GPL-2.0-only WITH Classpath-exception-2.0
 // *****************************************************************************
 
-import { inject, injectable, named, postConstruct } from '@theia/core/shared/inversify';
+import { inject, injectable, named, postConstruct, interfaces } from '@theia/core/shared/inversify';
 import { ToolRequest } from './language-model';
-import { ContributionProvider } from '@theia/core';
+import { ContributionProvider, Emitter, Event, ILogger } from '@theia/core';
 
 export const ToolInvocationRegistry = Symbol('ToolInvocationRegistry');
 
@@ -57,11 +57,23 @@ export interface ToolInvocationRegistry {
     getAllFunctions(): ToolRequest[];
 
     /**
+     * Unregisters a single tool from the registry.
+     *
+     * @param toolId - The unique identifier of the tool to unregister.
+     */
+    unregisterTool(toolId: string): void;
+
+    /**
      * Unregisters all tools provided by a specific tool provider.
      *
      * @param providerName - The name of the tool provider whose tools should be removed (as specificed in the `ToolRequest`).
      */
     unregisterAllTools(providerName: string): void;
+
+    /**
+     * Event that is fired whenever the registry changes (tool registered or unregistered).
+     */
+    onDidChange: Event<void>;
 }
 
 export const ToolProvider = Symbol('ToolProvider');
@@ -69,20 +81,38 @@ export interface ToolProvider {
     getTool(): ToolRequest;
 }
 
+/** Binds the identifier to self in singleton scope and then binds `ToolProvider` to that service. */
+export function bindToolProvider(identifier: interfaces.Newable<ToolProvider>, bind: interfaces.Bind): void {
+    bind(identifier).toSelf().inSingletonScope();
+    bind(ToolProvider).toService(identifier);
+}
+
 @injectable()
 export class ToolInvocationRegistryImpl implements ToolInvocationRegistry {
 
     private tools: Map<string, ToolRequest> = new Map<string, ToolRequest>();
 
+    private readonly onDidChangeEmitter = new Emitter<void>();
+    readonly onDidChange: Event<void> = this.onDidChangeEmitter.event;
+
     @inject(ContributionProvider)
     @named(ToolProvider)
     private providers: ContributionProvider<ToolProvider>;
+
+    @inject(ILogger) @named('ai-core:ToolInvocationRegistryImpl')
+    protected readonly logger: ILogger;
 
     @postConstruct()
     init(): void {
         this.providers.getContributions().forEach(provider => {
             this.registerTool(provider.getTool());
         });
+    }
+
+    unregisterTool(toolId: string): void {
+        if (this.tools.delete(toolId)) {
+            this.onDidChangeEmitter.fire();
+        }
     }
 
     unregisterAllTools(providerName: string): void {
@@ -92,7 +122,15 @@ export class ToolInvocationRegistryImpl implements ToolInvocationRegistry {
                 toolsToRemove.push(id);
             }
         }
-        toolsToRemove.forEach(id => this.tools.delete(id));
+        let changed = false;
+        toolsToRemove.forEach(id => {
+            if (this.tools.delete(id)) {
+                changed = true;
+            }
+        });
+        if (changed) {
+            this.onDidChangeEmitter.fire();
+        }
     }
     getAllFunctions(): ToolRequest[] {
         return Array.from(this.tools.values());
@@ -100,9 +138,10 @@ export class ToolInvocationRegistryImpl implements ToolInvocationRegistry {
 
     registerTool(tool: ToolRequest): void {
         if (this.tools.has(tool.id)) {
-            console.warn(`Function with id ${tool.id} is already registered.`);
+            this.logger.warn(`Function with id ${tool.id} is already registered.`);
         } else {
             this.tools.set(tool.id, tool);
+            this.onDidChangeEmitter.fire();
         }
     }
 

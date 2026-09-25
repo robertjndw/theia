@@ -21,7 +21,7 @@ import { ReactDialog } from './dialogs/react-dialog';
 import { ApplicationServer, ApplicationInfo, ExtensionInfo } from '../common/application-protocol';
 import { Message } from './widgets/widget';
 import { FrontendApplicationConfigProvider } from './frontend-application-config-provider';
-import { DEFAULT_SUPPORTED_API_VERSION } from '@theia/application-package/lib/api';
+import { DEFAULT_SUPPORTED_API_VERSION, DEFAULT_SUPPORTED_MONACO_VERSION } from '@theia/application-package/lib/api';
 import { WindowService } from './window/window-service';
 import { Key, KeyCode } from './keys';
 import { nls } from '../common/nls';
@@ -70,9 +70,10 @@ export class AboutDialog extends ReactDialog<void> {
         const compatibilityUrl = 'https://eclipse-theia.github.io/vscode-theia-comparator/status.html';
 
         const detailsLabel = nls.localizeByDefault('Details');
-        const versionLabel = nls.localize('theia/core/about/version', 'Version');
+        const versionLabel = nls.localizeByDefault('Version');
         const defaultApiLabel = nls.localize('theia/core/about/defaultApi', 'Default {0} API', 'VS Code');
         const compatibilityLabel = nls.localize('theia/core/about/compatibility', '{0} Compatibility', 'VS Code');
+        const monacoLabel = nls.localize('theia/core/about/monacoEditor', 'Monaco Editor Version');
 
         return <>
             <h3>{detailsLabel}</h3>
@@ -88,14 +89,16 @@ export class AboutDialog extends ReactDialog<void> {
                         {compatibilityLabel}
                     </a>
                 </p>
+                <p>{`${monacoLabel}: ${DEFAULT_SUPPORTED_MONACO_VERSION}`}</p>
             </div>
         </>;
     }
 
     protected renderExtensions(): React.ReactNode {
         const extensionsInfos = this.extensionsInfos;
+        const listOfExtensions = nls.localize('theia/core/about/listOfExtensions', 'List of extensions');
         return <>
-            <h3>List of extensions</h3>
+            <h3>{listOfExtensions}</h3>
             <ul className={ABOUT_EXTENSIONS_CLASS}>
                 {
                     extensionsInfos

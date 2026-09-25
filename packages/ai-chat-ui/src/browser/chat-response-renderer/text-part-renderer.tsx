@@ -18,7 +18,7 @@ import { ChatResponsePartRenderer } from '../chat-response-part-renderer';
 import { injectable } from '@theia/core/shared/inversify';
 import { ChatResponseContent } from '@theia/ai-chat/lib/common';
 import { ReactNode } from '@theia/core/shared/react';
-import * as React from '@theia/core/shared/react';
+import { nls } from '@theia/core/lib/common/nls';
 
 @injectable()
 export class TextPartRenderer implements ChatResponsePartRenderer<ChatResponseContent> {
@@ -30,6 +30,8 @@ export class TextPartRenderer implements ChatResponsePartRenderer<ChatResponseCo
         if (response && ChatResponseContent.hasAsString(response)) {
             return <span>{response.asString()}</span>;
         }
-        return <span>Can't display response, please check your ChatResponsePartRenderers! {JSON.stringify(response)}</span>;
+        return <span>
+            {nls.localize('theia/ai/chat-ui/text-part-renderer/cantDisplay',
+                "Can't display response, please check your ChatResponsePartRenderers!")} {JSON.stringify(response)}</span>;
     }
 }

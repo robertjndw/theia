@@ -28,7 +28,7 @@ export interface FrontendApplicationContribution {
     /**
      * Called on application startup before configure is called.
      */
-    initialize?(): void;
+    initialize?(): MaybePromise<void>;
 
     /**
      * Called before commands, key bindings and menus are initialized.
@@ -52,7 +52,7 @@ export interface FrontendApplicationContribution {
     /**
      * Called when an application is stopped or unloaded.
      *
-     * Note that this is implemented using `window.beforeunload` which doesn't allow any asynchronous code anymore.
+     * Note that this is implemented using `window.pagehide` which doesn't allow any asynchronous code anymore.
      * I.e. this is the last tick.
      */
     onStop?(app: FrontendApplication): void;
@@ -103,7 +103,7 @@ export namespace OnWillStopAction {
 @injectable()
 export abstract class DefaultFrontendApplicationContribution implements FrontendApplicationContribution {
 
-    initialize(): void {
+    initialize(): MaybePromise<void> {
         // NOOP
     }
 

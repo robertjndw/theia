@@ -13,7 +13,7 @@
 //
 // SPDX-License-Identifier: EPL-2.0 OR GPL-2.0-only WITH Classpath-exception-2.0
 // *****************************************************************************
-import { MaybePromise } from '@theia/core';
+import { MaybePromise, nls } from '@theia/core';
 import { injectable } from '@theia/core/shared/inversify';
 import { AIVariable, ResolvedAIVariable, AIVariableContribution, AIVariableResolver, AIVariableService, AIVariableResolutionRequest, AIVariableContext } from './variable-service';
 
@@ -24,11 +24,16 @@ export namespace TodayVariableArgs {
 
 export const TODAY_VARIABLE: AIVariable = {
     id: 'today-provider',
-    description: 'Does something for today',
+    description: nls.localize('theia/ai/core/todayVariable/dateDescription',
+        'The current date. Resolves to a human-readable date string by default, or to ISO 8601 or Unix seconds via the format argument.'),
     name: 'today',
     args: [
-        { name: TodayVariableArgs.IN_ISO_8601, description: 'Returns the current date in ISO 8601 format' },
-        { name: TodayVariableArgs.IN_UNIX_SECONDS, description: 'Returns the current date in unix seconds format' }
+        {
+            name: 'Format',
+            description: nls.localize('theia/ai/core/todayVariable/format/description', 'The format of the date'),
+            enum: [TodayVariableArgs.IN_ISO_8601, TodayVariableArgs.IN_UNIX_SECONDS],
+            isOptional: true
+        }
     ]
 };
 

@@ -35,13 +35,9 @@ export class BackendGenerator extends AbstractGenerator {
     protected compileElectronMain(electronMainModules?: Map<string, string>): string {
         return `// @ts-check
 
-require('reflect-metadata');
-
-// Useful for Electron/NW.js apps as GUI apps on macOS doesn't inherit the \`$PATH\` define
-// in your dotfiles (.bashrc/.bash_profile/.zshrc/etc).
-// https://github.com/electron/electron/issues/550#issuecomment-162037357
-// https://github.com/eclipse-theia/theia/pull/3534#issuecomment-439689082
-require('fix-path')();
+require('@theia/core/shared/reflect-metadata');
+${this.emitStartupLogger('Electron main', 'electron main start', { requirePerformance: true })}
+${this.emitStartupLog('loading modules...')}
 
 // Workaround for https://github.com/electron/electron/issues/9225. Chrome has an issue where
 // in certain locales (e.g. PL), image metrics are wrongly computed. We explicitly set the
@@ -52,24 +48,30 @@ if (process.env.LC_ALL) {
 }
 process.env.LC_NUMERIC = 'C';
 
-const { resolve } = require('path');
-const theiaAppProjectPath = resolve(__dirname, '..', '..');
-process.env.THEIA_APP_PROJECT_PATH = theiaAppProjectPath;
-const { default: electronMainApplicationModule } = require('@theia/core/lib/electron-main/electron-main-application-module');
-const { ElectronMainApplication, ElectronMainApplicationGlobals } = require('@theia/core/lib/electron-main/electron-main-application');
-const { Container } = require('inversify');
-const { app } = require('electron');
-
-const config = ${this.prettyStringify(this.pck.props.frontend.config)};
-const isSingleInstance = ${this.pck.props.backend.config.singleInstance === true ? 'true' : 'false'};
-
 (async () => {
-    if (isSingleInstance && !app.requestSingleInstanceLock()) {
+    // Useful for Electron/NW.js apps as GUI apps on macOS doesn't inherit the \`$PATH\` define
+    // in your dotfiles (.bashrc/.bash_profile/.zshrc/etc).
+    // https://github.com/electron/electron/issues/550#issuecomment-162037357
+    // https://github.com/eclipse-theia/theia/pull/3534#issuecomment-439689082
+    (await require('@theia/core/electron-shared/fix-path')).default();
+
+    const { resolve } = require('path');
+    const theiaAppProjectPath = resolve(__dirname, '..', '..');
+    process.env.THEIA_APP_PROJECT_PATH = theiaAppProjectPath;
+    const { default: electronMainApplicationModule } = require('@theia/core/lib/electron-main/electron-main-application-module');
+    const { ElectronMainApplication, ElectronMainApplicationGlobals } = require('@theia/core/lib/electron-main/electron-main-application');
+    const { Container } = require('@theia/core/shared/inversify');
+    const { app } = require('electron');
+
+    const config = ${this.prettyStringify(this.pck.props.frontend.config)};
+    const isSingleInstance = ${this.pck.props.backend.config.singleInstance === true ? 'true' : 'false'};
+
+    if (isSingleInstance && !app.requestSingleInstanceLock(process.argv)) {
         // There is another instance running, exit now. The other instance will request focus.
         app.quit();
         return;
     }
-    
+
     const container = new Container();
     container.load(electronMainApplicationModule);
     container.bind(ElectronMainApplicationGlobals).toConstantValue({
@@ -78,21 +80,25 @@ const isSingleInstance = ${this.pck.props.backend.config.singleInstance === true
         THEIA_FRONTEND_HTML_PATH: resolve(__dirname, '..', '..', 'lib', 'frontend', 'index.html'),
         THEIA_SECONDARY_WINDOW_HTML_PATH: resolve(__dirname, '..', '..', 'lib', 'frontend', 'secondary-window.html')
     });
-    
+    ${this.emitStartupLog('container created')}
+
     function load(raw) {
         return Promise.resolve(raw.default).then(module =>
             container.load(module)
         );
     }
-    
+
     async function start() {
+        ${this.emitStartupLog('resolving application')}
         const application = container.get(ElectronMainApplication);
+        ${this.emitStartupLog('application resolved')}
         await application.start(config);
     }
 
     try {
 ${Array.from(electronMainModules?.values() ?? [], jsModulePath => `\
         await load(require('${jsModulePath}'));`).join(EOL)}
+        ${this.emitStartupLog('modules loaded')}
         await start();
     } catch (reason) {
         if (typeof reason !== 'number') {
@@ -109,7 +115,9 @@ ${Array.from(electronMainModules?.values() ?? [], jsModulePath => `\
 
     protected compileServer(backendModules: Map<string, string>): string {
         return `// @ts-check
-require('reflect-metadata');${this.ifElectron(`
+require('reflect-metadata');
+${this.emitStartupLogger('Backend server', 'backend process start', { requirePerformance: true })}
+${this.emitStartupLog('loading modules...')}${this.ifElectron(`
 
 // Patch electron version if missing, see https://github.com/eclipse-theia/theia/pull/7361#pullrequestreview-377065146
 if (typeof process.versions.electron === 'undefined' && typeof process.env.THEIA_ELECTRON_VERSION === 'string') {
@@ -123,8 +131,8 @@ if ('ELECTRON_RUN_AS_NODE' in process.env) {
 
 const path = require('path');
 process.env.THEIA_APP_PROJECT_PATH = path.resolve(__dirname, '..', '..')
-const express = require('express');
-const { Container } = require('inversify');
+const express = require('@theia/core/shared/express');
+const { Container } = require('@theia/core/shared/inversify');
 const { BackendApplication, BackendApplicationServer, CliManager } = require('@theia/core/lib/node');
 const { backendApplicationModule } = require('@theia/core/lib/node/backend-application-module');
 const { messagingBackendModule } = require('@theia/core/lib/node/messaging/messaging-backend-module');
@@ -134,6 +142,7 @@ const container = new Container();
 container.load(backendApplicationModule);
 container.load(messagingBackendModule);
 container.load(loggerBackendModule);
+${this.emitStartupLog('container created')}
 
 function defaultServeStatic(app) {
     app.use(express.static(path.resolve(__dirname, '../../lib/frontend')))
@@ -150,8 +159,13 @@ async function start(port, host, argv = process.argv) {
         container.bind(BackendApplicationServer).toConstantValue({ configure: defaultServeStatic });
     }
     let result = undefined;
-    await container.get(CliManager).initializeCli(argv.slice(2), 
-        () => container.get(BackendApplication).configured,
+    await container.get(CliManager).initializeCli(argv.slice(2),
+        () => {
+            ${this.emitStartupLog('resolving application')}
+            const application = container.get(BackendApplication);
+            ${this.emitStartupLog('application resolved')}
+            return application.configured;
+        },
         async () => {
             result = container.get(BackendApplication).start(port, host);
         });
@@ -166,11 +180,12 @@ module.exports = async (port, host, argv) => {
     try {
 ${Array.from(backendModules.values(), jsModulePath => `\
         await load(require('${jsModulePath}'));`).join(EOL)}
+        ${this.emitStartupLog('modules loaded')}
         return await start(port, host, argv);
     } catch (error) {
         if (typeof error !== 'number') {
             console.error('Failed to start the backend application:');
-            console.error(error); 
+            console.error(error);
             process.exitCode = 1;
         }
         throw error;
@@ -181,12 +196,14 @@ ${Array.from(backendModules.values(), jsModulePath => `\
 
     protected compileMain(backendModules: Map<string, string>): string {
         return `// @ts-check
+${this.emitStartupLogger('Backend main', 'backend process start', { requirePerformance: true })}
+${this.emitStartupLog('entry point loaded')}
 const { BackendApplicationConfigProvider } = require('@theia/core/lib/node/backend-application-config-provider');
 const main = require('@theia/core/lib/node/main');
 
 BackendApplicationConfigProvider.set(${this.prettyStringify(this.pck.props.backend.config)});
 
-globalThis.extensionInfo = ${this.prettyStringify(this.pck.extensionPackages.map(({ name, version }) => ({ name, version }))) };
+globalThis.extensionInfo = ${this.prettyStringify(this.pck.extensionPackages.map(({ name, version }) => ({ name, version })))};
 
 const serverModule = require('./server');
 const serverAddress = main.start(serverModule());

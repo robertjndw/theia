@@ -15,7 +15,7 @@
 // *****************************************************************************
 
 import { injectable, inject, postConstruct } from '@theia/core/shared/inversify';
-import { Message } from '@theia/core/shared/@phosphor/messaging';
+import { Message } from '@theia/core/shared/@lumino/messaging';
 import { Disposable, MaybeArray, nls } from '@theia/core/lib/common';
 import { AbstractDialog, DialogProps, setEnabled, createIconButton, Widget, codiconArray, Key, LabelProvider } from '@theia/core/lib/browser';
 import { FileStatNode } from '../file-tree';
@@ -24,7 +24,7 @@ import { FileDialogModel } from './file-dialog-model';
 import { FileDialogWidget } from './file-dialog-widget';
 import { FileDialogTreeFiltersRenderer, FileDialogTreeFilters, FileDialogTreeFiltersRendererFactory } from './file-dialog-tree-filters-renderer';
 import URI from '@theia/core/lib/common/uri';
-import { Panel } from '@theia/core/shared/@phosphor/widgets';
+import { Panel } from '@theia/core/shared/@lumino/widgets';
 import * as DOMPurify from '@theia/core/shared/dompurify';
 import { FileDialogHiddenFilesToggleRenderer, HiddenFilesToggleRendererFactory } from './file-dialog-hidden-files-renderer';
 
@@ -58,6 +58,10 @@ export const FILENAME_TEXTFIELD_CLASS = 'theia-FileNameTextField';
 export const CONTROL_PANEL_CLASS = 'theia-ControlPanel';
 export const TOOLBAR_ITEM_TRANSFORM_TIMEOUT = 100;
 
+export interface AdditionalButtonDefinition<T> {
+    label: string;
+    onClick: (resolve: (v: T | undefined) => void, reject: (v: unknown) => void) => void;
+}
 export class FileDialogProps extends DialogProps {
 
     /**
@@ -77,6 +81,16 @@ export class FileDialogProps extends DialogProps {
      * Defaults to `true`.
      */
     modal?: boolean;
+
+    /**
+     * scheme of the fileUri. Defaults to `file`.
+     */
+    fileScheme?: string;
+
+    /**
+     * Additional buttons to show beside the close and accept buttons.
+     */
+    additionalButtons?: AdditionalButtonDefinition<unknown>[];
 
 }
 
@@ -179,6 +193,15 @@ export abstract class FileDialog<T> extends AbstractDialog<T> {
 
         this.hiddenFilesToggleRenderer = this.hiddenFilesToggleFactory(this.widget.model.tree);
         this.contentNode.appendChild(this.hiddenFilesToggleRenderer.host);
+
+        this.props.additionalButtons?.forEach(({ label, onClick }) => {
+            const button = this.appendButton(label, false);
+            button.onclick = () => {
+                if (this.resolve && this.reject) {
+                    onClick(this.resolve, this.reject);
+                }
+            };
+        });
 
         if (this.props.filters) {
             this.treeFiltersRenderer = this.treeFiltersFactory({ suppliedFilters: this.props.filters, fileDialogTree: this.widget.model.tree });
@@ -417,7 +440,7 @@ export class SaveFileDialog extends FileDialog<URI | undefined> {
         this.contentNode.appendChild(fileNamePanel);
 
         const titlePanel = document.createElement('div');
-        titlePanel.innerHTML = DOMPurify.sanitize(nls.localize('theia/filesystem/dialog/name', 'Name:'));
+        titlePanel.innerHTML = DOMPurify.sanitize(nls.localizeByDefault('Name:'));
         titlePanel.classList.add(FILENAME_LABEL_CLASS);
         fileNamePanel.appendChild(titlePanel);
 

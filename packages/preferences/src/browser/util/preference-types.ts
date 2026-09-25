@@ -15,16 +15,13 @@
 // *****************************************************************************
 
 import {
-    PreferenceDataProperty,
-    PreferenceScope,
     TreeNode as BaseTreeNode,
     CompositeTreeNode as BaseCompositeTreeNode,
     SelectableTreeNode,
-    PreferenceInspection,
     CommonCommands,
 } from '@theia/core/lib/browser';
-import { Command, MenuPath } from '@theia/core';
-import { JSONValue } from '@theia/core/shared/@phosphor/coreutils';
+import { Command, MenuPath, PreferenceDataProperty, PreferenceInspection, PreferenceScope } from '@theia/core';
+import { JSONValue } from '@theia/core/shared/@lumino/coreutils';
 import { JsonType } from '@theia/core/lib/common/json-schema';
 
 export namespace Preference {

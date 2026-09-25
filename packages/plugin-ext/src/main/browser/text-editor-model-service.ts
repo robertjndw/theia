@@ -13,9 +13,9 @@
 //
 // SPDX-License-Identifier: EPL-2.0 OR GPL-2.0-only WITH Classpath-exception-2.0
 // *****************************************************************************
-import { Event, Emitter } from '@theia/core';
+import { Event, Emitter, ListenerList, Listener, ILogger } from '@theia/core';
 import { MonacoEditorModel, WillSaveMonacoModelEvent } from '@theia/monaco/lib/browser/monaco-editor-model';
-import { injectable, inject } from '@theia/core/shared/inversify';
+import { injectable, inject, named } from '@theia/core/shared/inversify';
 import { MonacoTextModelService } from '@theia/monaco/lib/browser/monaco-text-model-service';
 import { MonacoWorkspace } from '@theia/monaco/lib/browser/monaco-workspace';
 import { Schemes } from '../../common/uri-components';
@@ -29,14 +29,19 @@ export class EditorModelService {
     private modelModeChangedEmitter = new Emitter<{ model: MonacoEditorModel, oldModeId: string }>();
     private onModelRemovedEmitter = new Emitter<MonacoEditorModel>();
     private modelDirtyEmitter = new Emitter<MonacoEditorModel>();
+    private modelEncodingEmitter = new Emitter<{ model: MonacoEditorModel, encoding: string }>();
     private modelSavedEmitter = new Emitter<MonacoEditorModel>();
-    private onModelWillSavedEmitter = new Emitter<WillSaveMonacoModelEvent>();
+    private onModelWillSaveListeners: ListenerList<WillSaveMonacoModelEvent, Promise<void>> = new ListenerList();
 
     readonly onModelDirtyChanged = this.modelDirtyEmitter.event;
+    readonly onModelEncodingChanged = this.modelEncodingEmitter.event;
+    readonly onModelWillSave = this.onModelWillSaveListeners.registration;
     readonly onModelSaved = this.modelSavedEmitter.event;
     readonly onModelModeChanged = this.modelModeChangedEmitter.event;
     readonly onModelRemoved = this.onModelRemovedEmitter.event;
-    readonly onModelWillSave = this.onModelWillSavedEmitter.event;
+
+    @inject(ILogger) @named('plugin-ext:EditorModelService')
+    protected readonly logger: ILogger;
 
     constructor(@inject(MonacoTextModelService) monacoModelService: MonacoTextModelService,
         @inject(MonacoWorkspace) monacoWorkspace: MonacoWorkspace) {
@@ -60,11 +65,16 @@ export class EditorModelService {
             this.modelSavedEmitter.fire(model);
         });
 
+        model.onModelWillSaveModel(async (e: WillSaveMonacoModelEvent) => {
+            await Listener.awaitAll(e, this.onModelWillSaveListeners);
+        });
+
         model.onDirtyChanged(_ => {
             this.modelDirtyEmitter.fire(model);
         });
-        model.onWillSaveModel(willSaveModelEvent => {
-            this.onModelWillSavedEmitter.fire(willSaveModelEvent);
+
+        model.onDidChangeEncoding(encoding => {
+            this.modelEncodingEmitter.fire({ model, encoding });
         });
     }
 
@@ -95,7 +105,7 @@ export class EditorModelService {
                         await model.save();
                         return true;
                     } catch (e) {
-                        console.error('Failed to save ', uri.toString(), e);
+                        this.logger.error('Failed to save ', uri.toString(), e);
                         return false;
                     }
                 })());

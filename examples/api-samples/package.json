@@ -1,24 +1,31 @@
 {
   "private": true,
   "name": "@theia/api-samples",
-  "version": "1.57.0",
+  "version": "1.76.0",
   "description": "Theia - Example code to demonstrate Theia API",
   "dependencies": {
-    "@theia/ai-chat": "1.57.0",
-    "@theia/ai-chat-ui": "1.57.0",
-    "@theia/ai-core": "1.57.0",
-    "@theia/core": "1.57.0",
-    "@theia/file-search": "1.57.0",
-    "@theia/filesystem": "1.57.0",
-    "@theia/monaco": "1.57.0",
-    "@theia/monaco-editor-core": "1.83.101",
-    "@theia/output": "1.57.0",
-    "@theia/ovsx-client": "1.57.0",
-    "@theia/search-in-workspace": "1.57.0",
-    "@theia/test": "1.57.0",
-    "@theia/toolbar": "1.57.0",
-    "@theia/vsx-registry": "1.57.0",
-    "@theia/workspace": "1.57.0"
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "@theia/ai-chat": "1.76.0",
+    "@theia/ai-chat-ui": "1.76.0",
+    "@theia/ai-code-completion": "1.76.0",
+    "@theia/ai-core": "1.76.0",
+    "@theia/ai-core-ui": "1.76.0",
+    "@theia/ai-mcp": "1.76.0",
+    "@theia/ai-mcp-server": "1.76.0",
+    "@theia/core": "1.76.0",
+    "@theia/file-search": "1.76.0",
+    "@theia/filesystem": "1.76.0",
+    "@theia/monaco": "1.76.0",
+    "@theia/monaco-editor-core": "1.108.201",
+    "@theia/output": "1.76.0",
+    "@theia/ovsx-client": "1.76.0",
+    "@theia/search-in-workspace": "1.76.0",
+    "@theia/telemetry": "1.76.0",
+    "@theia/test": "1.76.0",
+    "@theia/toolbar": "1.76.0",
+    "@theia/vsx-registry": "1.76.0",
+    "@theia/workspace": "1.76.0",
+    "zod": "^4.4.3"
   },
   "theiaExtensions": [
     {
@@ -26,15 +33,14 @@
       "backend": "lib/node/api-samples-backend-module"
     },
     {
-      "frontend": "lib/browser/menu/sample-browser-menu-module",
-      "frontendElectron": "lib/electron-browser/menu/sample-electron-menu-module"
-    },
-    {
       "electronMain": "lib/electron-main/update/sample-updater-main-module",
       "frontendElectron": "lib/electron-browser/updater/sample-updater-frontend-module"
     },
     {
       "frontendOnly": "lib/browser-only/api-samples-frontend-only-module"
+    },
+    {
+      "frontendPreload": "lib/browser/api-samples-preload-module"
     }
   ],
   "keywords": [
@@ -60,6 +66,6 @@
     "clean": "theiaext clean"
   },
   "devDependencies": {
-    "@theia/ext-scripts": "1.57.0"
+    "@theia/ext-scripts": "1.76.0"
   }
 }

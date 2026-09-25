@@ -22,8 +22,10 @@ import { ClipboardService } from '../clipboard-service';
 import { BrowserClipboardService } from '../browser-clipboard-service';
 import { SecondaryWindowService } from './secondary-window-service';
 import { DefaultSecondaryWindowService } from './default-secondary-window-service';
-import { bindContributionProvider } from '../../common';
+import { bindRootContributionProvider } from '../../common';
 import { WindowTitleContribution } from './window-title-service';
+import { WindowFocusService } from './window-focus-service';
+import { DefaultWindowLaunchArgs, WindowLaunchArgs } from './window-launch-args';
 
 export default new ContainerModule(bind => {
     bind(DefaultWindowService).toSelf().inSingletonScope();
@@ -31,5 +33,8 @@ export default new ContainerModule(bind => {
     bind(FrontendApplicationContribution).toService(DefaultWindowService);
     bind(ClipboardService).to(BrowserClipboardService).inSingletonScope();
     bind(SecondaryWindowService).to(DefaultSecondaryWindowService).inSingletonScope();
-    bindContributionProvider(bind, WindowTitleContribution);
+    bind(WindowFocusService).toSelf().inSingletonScope();
+    bind(DefaultWindowLaunchArgs).toSelf().inSingletonScope();
+    bind(WindowLaunchArgs).toService(DefaultWindowLaunchArgs);
+    bindRootContributionProvider(bind, WindowTitleContribution);
 });

@@ -37,6 +37,7 @@ import * as theia from '@theia/plugin';
 import * as types from './types-impl';
 import { join } from './path';
 import { EnvExtImpl } from './env';
+import { TelemetryExtImpl } from './telemetry-ext';
 import { PreferenceRegistryExtImpl } from './preference-registry';
 import { InternalStorageExt, Memento, GlobalState } from './plugin-storage';
 import { ExtPluginApi } from '../common/plugin-ext-api-contribution';
@@ -47,6 +48,7 @@ import { URI as Uri } from './types-impl';
 import { InternalSecretsExt, SecretStorageExt } from '../plugin/secrets-ext';
 import { PluginExt } from './plugin-context';
 import { Deferred } from '@theia/core/lib/common/promise-util';
+import { PluginLogger } from './logger';
 
 export interface PluginHost {
 
@@ -120,6 +122,7 @@ export abstract class AbstractPluginManagerExtImpl<P extends Record<string, any>
     private onDidChangeEmitter = new Emitter<void>();
     private messageRegistryProxy: MessageRegistryMain;
     private notificationMain: NotificationMain;
+    private logger: PluginLogger;
 
     protected jsonValidation: PluginJsonValidationContribution[] = [];
     protected pluginKind = ExtensionKind.UI;
@@ -129,6 +132,7 @@ export abstract class AbstractPluginManagerExtImpl<P extends Record<string, any>
     initialize(): void {
         this.messageRegistryProxy = this.rpc.getProxy(PLUGIN_RPC_CONTEXT.MESSAGE_REGISTRY_MAIN);
         this.notificationMain = this.rpc.getProxy(PLUGIN_RPC_CONTEXT.NOTIFICATION_MAIN);
+        this.logger = new PluginLogger(this.rpc, 'plugin-manager');
     }
 
     setPluginHost(pluginHost: PluginHost): void {
@@ -176,7 +180,7 @@ export abstract class AbstractPluginManagerExtImpl<P extends Record<string, any>
                 result = plugin.stopFn();
             } catch (e) {
                 if (!options.terminating) {
-                    console.error(`[${id}]: failed to stop:`, e);
+                    this.logger.error(`[${id}]: failed to stop:`, e);
                 }
             }
         }
@@ -188,7 +192,7 @@ export abstract class AbstractPluginManagerExtImpl<P extends Record<string, any>
                     subscription.dispose();
                 } catch (e) {
                     if (!options.terminating) {
-                        console.error(`[${id}]: failed to dispose subscription:`, e);
+                        this.logger.error(`[${id}]: failed to dispose subscription:`, e);
                     }
                 }
             }
@@ -198,7 +202,7 @@ export abstract class AbstractPluginManagerExtImpl<P extends Record<string, any>
             await result;
         } catch (e) {
             if (!options.terminating) {
-                console.error(`[${id}]: failed to stop:`, e);
+                this.logger.error(`[${id}]: failed to stop:`, e);
             }
         }
     }
@@ -241,14 +245,20 @@ export abstract class AbstractPluginManagerExtImpl<P extends Record<string, any>
             contributes.jsonValidation = (contributes.jsonValidation || []).concat(this.jsonValidation);
         }
         this.registry.set(plugin.model.id, plugin);
+        if (!plugin.pluginPath) {
+            // No entry point at all, so nothing to activate here.
+            return;
+        }
         const activationEvents = this.getActivationEvents(plugin);
-        if (plugin.pluginPath && activationEvents) {
+        if (activationEvents) {
             const activation = () => this.$activatePlugin(plugin.model.id);
             // an internal activation event is a subject to change
             this.setActivation(`onPlugin:${plugin.model.id}`, activation);
             const unsupportedActivationEvents = activationEvents.filter(e => !this.isSupportedActivationEvent(e));
             if (unsupportedActivationEvents.length) {
-                console.warn(`Unsupported activation events: ${unsupportedActivationEvents.join(', ')}, please open an issue: https://github.com/eclipse-theia/theia/issues/new`);
+                this.logger.warn(
+                    `Unsupported activation events: ${unsupportedActivationEvents.join(', ')}, please open an issue: https://github.com/eclipse-theia/theia/issues/new`
+                );
             }
             for (let activationEvent of activationEvents) {
                 if (activationEvent === 'onUri') {
@@ -293,23 +303,23 @@ export abstract class AbstractPluginManagerExtImpl<P extends Record<string, any>
                             if (dependency) {
                                 const loadedSuccessfully = await this.loadPlugin(dependency, configStorage, visited);
                                 if (!loadedSuccessfully) {
-                                    throw new Error(`Dependent extension '${dependency.model.displayName || dependency.model.id}' failed to activate.`);
+                                    throw new Error(`Dependent plugin '${dependency.model.displayName || dependency.model.id}' failed to activate.`);
                                 }
                             } else {
-                                throw new Error(`Dependent extension '${dependencyId}' is not installed.`);
+                                throw new Error(`Dependent plugin '${dependencyId}' is not installed.`);
                             }
                         }
                     }
 
-                    let pluginMain = this.host.loadPlugin(plugin);
+                    let pluginMain = await this.host.loadPlugin(plugin);
                     // see https://github.com/TypeFox/vscode/blob/70b8db24a37fafc77247de7f7cb5bb0195120ed0/src/vs/workbench/api/common/extHostExtensionService.ts#L372-L376
                     pluginMain = pluginMain || {};
                     await this.startPlugin(plugin, configStorage, pluginMain);
                     return true;
                 } catch (err) {
-                    const message = `Activating extension '${plugin.model.displayName || plugin.model.name}' failed:`;
+                    const message = `Activating plugin '${plugin.model.displayName || plugin.model.name}' failed:`;
                     this.messageRegistryProxy.$showMessage(MainMessageType.Error, message + ' ' + err.message, {}, []);
-                    console.error(message, err);
+                    this.logger.error(message, err);
                     return false;
                 } finally {
                     this.notificationMain.$stopProgress(progressId);
@@ -410,11 +420,11 @@ export abstract class AbstractPluginManagerExtImpl<P extends Record<string, any>
         if (typeof pluginMain[plugin.lifecycle.startMethod] === 'function') {
             await this.localization.initializeLocalizedMessages(plugin, this.envExt.language);
             const pluginExport = await pluginMain[plugin.lifecycle.startMethod].apply(getGlobal(), [pluginContext]);
-            console.log(`calling activation function on ${id}`);
+            this.logger.debug(`Calling activation function on plugin ${id}`);
             this.activatedPlugins.set(plugin.model.id, new ActivatedPlugin(pluginContext, pluginExport, stopFn));
         } else {
             // https://github.com/TypeFox/vscode/blob/70b8db24a37fafc77247de7f7cb5bb0195120ed0/src/vs/workbench/api/common/extHostExtensionService.ts#L400-L401
-            console.log(`plugin ${id}, ${plugin.lifecycle.startMethod} method is undefined so the module is the extension's exports`);
+            this.logger.debug(`Plugin ${id}, ${plugin.lifecycle.startMethod} method is undefined so the module is the extension's exports`);
             this.activatedPlugins.set(plugin.model.id, new ActivatedPlugin(pluginContext, pluginMain));
         }
     }
@@ -469,6 +479,9 @@ export class PluginManagerExtImpl extends AbstractPluginManagerExtImpl<PluginMan
     @inject(WebviewsExtImpl)
     protected readonly webview: WebviewsExtImpl;
 
+    @inject(TelemetryExtImpl)
+    protected readonly telemetryExt: TelemetryExtImpl;
+
     private supportedActivationEvents: Set<string>;
 
     async $init(params: PluginManagerInitializeParams): Promise<void> {
@@ -484,6 +497,8 @@ export class PluginManagerExtImpl extends AbstractPluginManagerExtImpl<PluginMan
         this.envExt.setAppUriScheme(params.env.appUriScheme);
 
         this.preferencesManager.init(params.preferences);
+        // must be in place before activation: plugins create their telemetry loggers during `activate()`
+        this.telemetryExt.setLevel(params.telemetryLevel ?? 'off');
 
         if (params.extApi) {
             this.host.initExtApi(params.extApi);

@@ -65,8 +65,15 @@ import { NotebookKernelsMainImpl } from './notebooks/notebook-kernels-main';
 import { NotebooksAndEditorsMain } from './notebooks/notebook-documents-and-editors-main';
 import { TestingMainImpl } from './test-main';
 import { UriMainImpl } from './uri-main';
+import { LoggerMainImpl } from './logger-main';
+import { McpServerDefinitionRegistryMainImpl } from './lm-main';
+import { LanguageModelToolsMainImpl } from './lm-tool-main';
+import { TelemetryMainImpl } from './telemetry-main';
 
 export function setUpPluginApi(rpc: RPCProtocol, container: interfaces.Container): void {
+    const loggerMain = new LoggerMainImpl(container);
+    rpc.set(PLUGIN_RPC_CONTEXT.LOGGER_MAIN, loggerMain);
+
     const authenticationMain = new AuthenticationMainImpl(rpc, container);
     rpc.set(PLUGIN_RPC_CONTEXT.AUTHENTICATION_MAIN, authenticationMain);
 
@@ -118,7 +125,7 @@ export function setUpPluginApi(rpc: RPCProtocol, container: interfaces.Container
     // start listening only after all clients are subscribed to events
     editorsAndDocuments.listen();
 
-    const statusBarMessageRegistryMain = new StatusBarMessageRegistryMainImpl(container);
+    const statusBarMessageRegistryMain = new StatusBarMessageRegistryMainImpl(container, rpc);
     rpc.set(PLUGIN_RPC_CONTEXT.STATUS_BAR_MESSAGE_REGISTRY_MAIN, statusBarMessageRegistryMain);
 
     const envMain = new EnvMainImpl(rpc, container);
@@ -166,14 +173,10 @@ export function setUpPluginApi(rpc: RPCProtocol, container: interfaces.Container
     rpc.set(PLUGIN_RPC_CONTEXT.DEBUG_MAIN, debugMain);
 
     const fs = new FileSystemMainImpl(rpc, container);
-    const fsEventService = new MainFileSystemEventService(rpc, container);
-    const disposeFS = fs.dispose.bind(fs);
-    fs.dispose = () => {
-        fsEventService.dispose();
-        disposeFS();
-    };
-
     rpc.set(PLUGIN_RPC_CONTEXT.FILE_SYSTEM_MAIN, fs);
+
+    const fsEventService = new MainFileSystemEventService(rpc, container);
+    rpc.set(PLUGIN_RPC_CONTEXT.FILE_SYSTEM_EVENT_SERVICE_MAIN, fsEventService);
 
     const scmMain = new ScmMainImpl(rpc, container);
     rpc.set(PLUGIN_RPC_CONTEXT.SCM_MAIN, scmMain);
@@ -207,4 +210,13 @@ export function setUpPluginApi(rpc: RPCProtocol, container: interfaces.Container
 
     const uriMain = new UriMainImpl(rpc, container);
     rpc.set(PLUGIN_RPC_CONTEXT.URI_MAIN, uriMain);
+
+    const mcpServerDefinitionRegistryMain = new McpServerDefinitionRegistryMainImpl(rpc, container);
+    rpc.set(PLUGIN_RPC_CONTEXT.MCP_SERVER_DEFINITION_REGISTRY_MAIN, mcpServerDefinitionRegistryMain);
+
+    const languageModelToolsMain = new LanguageModelToolsMainImpl(rpc, container);
+    rpc.set(PLUGIN_RPC_CONTEXT.LM_TOOLS_MAIN, languageModelToolsMain);
+
+    const telemetryMain = new TelemetryMainImpl(rpc, container);
+    rpc.set(PLUGIN_RPC_CONTEXT.TELEMETRY_MAIN, telemetryMain);
 }

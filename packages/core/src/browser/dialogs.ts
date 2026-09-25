@@ -100,11 +100,7 @@ export class DialogOverlayService implements FrontendApplicationContribution {
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     push(dialog: AbstractDialog<any>): Disposable {
-        if (this.documents.findIndex(document => document === dialog.node.ownerDocument) < 0) {
-            addKeyListener(dialog.node.ownerDocument.body, Key.ENTER, e => this.handleEnter(e));
-            addKeyListener(dialog.node.ownerDocument.body, Key.ESCAPE, e => this.handleEscape(e));
-            this.documents.push(dialog.node.ownerDocument);
-        }
+        this.ensureKeyListeners(dialog.node.ownerDocument);
         this.dialogs.unshift(dialog);
         return Disposable.create(() => {
             const index = this.dialogs.indexOf(dialog);
@@ -112,6 +108,15 @@ export class DialogOverlayService implements FrontendApplicationContribution {
                 this.dialogs.splice(index, 1);
             }
         });
+    }
+
+    /** Add the key listeners for `ownerDocument`, unless they are there already. */
+    protected ensureKeyListeners(ownerDocument: Document): void {
+        if (this.documents.indexOf(ownerDocument) < 0) {
+            addKeyListener(ownerDocument.body, Key.ENTER, e => this.handleEnter(e));
+            addKeyListener(ownerDocument.body, Key.ESCAPE, e => this.handleEscape(e));
+            this.documents.push(ownerDocument);
+        }
     }
 
     protected handleEscape(event: KeyboardEvent): boolean | void {
@@ -241,10 +246,18 @@ export abstract class AbstractDialog<T> extends BaseWidget {
         this.toDisposeOnDetach.push(DialogOverlayService.get().push(this));
     }
 
-    protected preventTabbingOutsideDialog(): Disposable {
-        const nonInertSiblings = Array.from(this.node.ownerDocument.body.children).filter(child => child !== this.node && !(child.hasAttribute('inert')));
-        nonInertSiblings.forEach(child => child.setAttribute('inert', ''));
-        return Disposable.create(() => nonInertSiblings.forEach(child => child.removeAttribute('inert')));
+    /**
+     * This prevents tabbing outside the dialog by marking elements as inert, i.e., non-clickable and non-focussable.
+     *
+     * @param elements the elements for which we disable tabbing. By default all elements within the body element are considered.
+     * Please note that this may also include other popups such as the suggestion overlay, the notification center or quick picks.
+     * @returns a disposable that will restore the previous tabbing behavior
+     */
+    protected preventTabbingOutsideDialog(elements = Array.from(this.node.ownerDocument.body.children)): Disposable { //
+        const inertBlacklist = ['select-component-container']; // IDs of elements that should remain interactive
+        const nonInertElements = elements.filter(child => child !== this.node && !(child.hasAttribute('inert')) && !inertBlacklist.includes(child.id));
+        nonInertElements.forEach(child => child.setAttribute('inert', ''));
+        return Disposable.create(() => nonInertElements.forEach(child => child.removeAttribute('inert')));
     }
 
     protected handleEscape(event: KeyboardEvent): boolean | void {
@@ -397,9 +410,10 @@ export class ConfirmDialog extends AbstractDialog<boolean> {
     protected confirmed = true;
 
     constructor(
-        @inject(ConfirmDialogProps) protected override readonly props: ConfirmDialogProps
+        @inject(ConfirmDialogProps) protected override readonly props: ConfirmDialogProps,
+        @unmanaged() options?: Widget.IOptions
     ) {
-        super(props);
+        super(props, options);
 
         this.contentNode.appendChild(this.createMessageNode(this.props.msg));
         this.appendCloseButton(props.cancel);

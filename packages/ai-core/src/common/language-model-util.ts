@@ -14,7 +14,16 @@
 // SPDX-License-Identifier: EPL-2.0 OR GPL-2.0-only WITH Classpath-exception-2.0
 // *****************************************************************************
 
-import { isLanguageModelParsedResponse, isLanguageModelStreamResponse, isLanguageModelTextResponse, LanguageModelResponse, ToolRequest } from './language-model';
+import {
+    isLanguageModelParsedResponse,
+    isLanguageModelStreamResponse,
+    isLanguageModelTextResponse,
+    isTextResponsePart,
+    LanguageModelMetaData,
+    LanguageModelResponse,
+    ToolRequest
+} from './language-model';
+import { LanguageModelMonitoredStreamResponse } from './language-model-interaction-model';
 
 /**
  * Retrieves the text content from a `LanguageModelResponse` object.
@@ -26,22 +35,29 @@ import { isLanguageModelParsedResponse, isLanguageModelStreamResponse, isLanguag
  * @returns {Promise<string>} - A promise that resolves to the text content of the response.
  * @throws {Error} - Throws an error if the response type is not supported or does not contain valid text content.
  */
-export const getTextOfResponse = async (response: LanguageModelResponse): Promise<string> => {
+export const getTextOfResponse = async (response: LanguageModelResponse | LanguageModelMonitoredStreamResponse): Promise<string> => {
     if (isLanguageModelTextResponse(response)) {
         return response.text;
     } else if (isLanguageModelStreamResponse(response)) {
         let result = '';
         for await (const chunk of response.stream) {
-            result += chunk.content ?? '';
+            result += (isTextResponsePart(chunk) && chunk.content) ? chunk.content : '';
         }
         return result;
     } else if (isLanguageModelParsedResponse(response)) {
         return response.content;
+    } else if ('parts' in response) {
+        // Handle monitored stream response
+        let result = '';
+        for (const chunk of response.parts) {
+            result += (isTextResponsePart(chunk) && chunk.content) ? chunk.content : '';
+        }
+        return result;
     }
     throw new Error(`Invalid response type ${response}`);
 };
 
-export const getJsonOfResponse = async (response: LanguageModelResponse): Promise<unknown> => {
+export const getJsonOfResponse = async (response: LanguageModelResponse | LanguageModelMonitoredStreamResponse): Promise<unknown> => {
     const text = await getTextOfResponse(response);
     return getJsonOfText(text);
 };
@@ -64,21 +80,46 @@ export const getJsonOfText = (text: string): unknown => {
     throw new Error('Invalid response format');
 };
 
-export const toolRequestToPromptText = (toolRequest: ToolRequest): string => {
-    const parameters = toolRequest.parameters;
-    let paramsText = '';
-    // parameters are supposed to be as a JSON schema. Thus, derive the parameters from its properties definition
-    if (parameters) {
-        const properties = parameters.properties;
-        paramsText = Object.keys(properties)
-            .map(key => {
-                const param = properties[key];
-                return `${key}: ${param.type}`;
-            })
-            .join(', ');
+export const toolRequestToPromptText = (toolRequest: ToolRequest): string => `${toolRequest.id}`;
+
+/**
+ * Orders models for the lists a user picks from: newest first, since a provider's newest model is
+ * almost always the one being looked for, with the id as the tie-break so that models whose provider
+ * reports no release date (Gemini reports none) still come out in a stable, readable order.
+ */
+export const compareModelsByRecency = (left: LanguageModelMetaData, right: LanguageModelMetaData): number => {
+    if (left.released !== right.released) {
+        // A model without a reported date sorts after the dated ones rather than to the top.
+        return (right.released ?? 0) - (left.released ?? 0);
     }
-    const descriptionText = toolRequest.description
-        ? `: ${toolRequest.description}`
-        : '';
-    return `You can call function: ${toolRequest.id}(${paramsText})${descriptionText}`;
+    return left.id.localeCompare(right.id);
+};
+
+/**
+ * The provider a model belongs to: its declared vendor, falling back to the `<provider>/` prefix of
+ * its id. Used to group the model lists so that a provider's models stay together.
+ */
+export const providerOf = (model: LanguageModelMetaData): string => {
+    if (model.vendor) {
+        return model.vendor;
+    }
+    const separator = model.id.indexOf('/');
+    return separator > 0 ? model.id.substring(0, separator) : '';
+};
+
+/** Groups models by {@link providerOf}, each group ordered by {@link compareModelsByRecency}, groups by provider name. */
+export const groupModelsByProvider = <T extends LanguageModelMetaData>(models: T[]): Array<{ provider: string; models: T[] }> => {
+    const groups = new Map<string, T[]>();
+    for (const model of models) {
+        const provider = providerOf(model);
+        const group = groups.get(provider);
+        if (group) {
+            group.push(model);
+        } else {
+            groups.set(provider, [model]);
+        }
+    }
+    return [...groups.entries()]
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([provider, grouped]) => ({ provider, models: grouped.slice().sort(compareModelsByRecency) }));
 };

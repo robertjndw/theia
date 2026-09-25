@@ -21,10 +21,11 @@
 
 /* eslint-disable no-null/no-null */
 
-import { UUID } from '@theia/core/shared/@phosphor/coreutils';
+import { UUID } from '@theia/core/shared/@lumino/coreutils';
 import { illegalArgument } from '../common/errors';
 import type * as theia from '@theia/plugin';
-import { URI as CodeURI, UriComponents } from '@theia/core/shared/vscode-uri';
+import { URI as CodeURI } from '@theia/core/shared/vscode-uri';
+import { UriComponents } from '../common/uri-components';
 import { relative } from '../common/paths-util';
 import { startsWithIgnoreCase } from '@theia/core/lib/common/strings';
 import { SymbolKind } from '../common/plugin-api-rpc-model';
@@ -33,6 +34,7 @@ import * as paths from 'path';
 import { es5ClassCompat } from '../common/types';
 import { isObject, isStringArray } from '@theia/core/lib/common';
 import { CellEditType, CellMetadataEdit, NotebookDocumentMetadataEdit } from '@theia/notebook/lib/common';
+import { BinaryBuffer } from '@theia/core/lib/common/buffer';
 
 /**
  * This is an implementation of #theia.Uri based on vscode-uri.
@@ -735,7 +737,7 @@ export class ThemeIcon {
 
     static readonly Folder: ThemeIcon = new ThemeIcon('folder');
 
-    private constructor(public id: string, public color?: ThemeColor) {
+    constructor(public id: string, public color?: ThemeColor) {
     }
 
 }
@@ -814,7 +816,7 @@ export class RelativePattern {
     }
     set baseUri(baseUri: URI) {
         this._baseUri = baseUri;
-        this.base = baseUri.fsPath;
+        this._base = baseUri.fsPath;
     }
 
     constructor(base: theia.WorkspaceFolder | URI | string, public pattern: string) {
@@ -1341,6 +1343,7 @@ export class NotebookRange implements theia.NotebookRange {
 export class SnippetTextEdit implements theia.SnippetTextEdit {
     range: Range;
     snippet: SnippetString;
+    keepWhitespace?: boolean;
 
     static isSnippetTextEdit(thing: unknown): thing is SnippetTextEdit {
         return thing instanceof SnippetTextEdit || isObject<SnippetTextEdit>(thing)
@@ -1487,6 +1490,29 @@ export class Hover {
         }
         this.range = range;
     }
+}
+
+@es5ClassCompat
+export class VerboseHover extends Hover {
+
+    public canIncreaseVerbosity: boolean | undefined;
+    public canDecreaseVerbosity: boolean | undefined;
+
+    constructor(
+        contents: theia.MarkdownString | theia.MarkedString | (theia.MarkdownString | theia.MarkedString)[],
+        range?: Range,
+        canIncreaseVerbosity?: boolean,
+        canDecreaseVerbosity?: boolean,
+    ) {
+        super(contents, range);
+        this.canIncreaseVerbosity = canIncreaseVerbosity;
+        this.canDecreaseVerbosity = canDecreaseVerbosity;
+    }
+}
+
+export enum HoverVerbosityAction {
+    Increase = 0,
+    Decrease = 1
 }
 
 @es5ClassCompat
@@ -1648,6 +1674,7 @@ export class DocumentLink {
 export class DocumentDropOrPasteEditKind {
     static readonly Empty: DocumentDropOrPasteEditKind = new DocumentDropOrPasteEditKind('');
     static readonly Text: DocumentDropOrPasteEditKind = new DocumentDropOrPasteEditKind('text');
+    static readonly TextUpdateImports: DocumentDropOrPasteEditKind = new DocumentDropOrPasteEditKind('updateImports');
 
     private static sep = '.';
 
@@ -1796,8 +1823,6 @@ export interface WorkspaceEditMetadata {
     label: string;
     description?: string;
     iconPath?: {
-        id: string;
-    } | {
         light: URI;
         dark: URI;
     } | ThemeIcon;
@@ -2201,6 +2226,12 @@ export enum CommentThreadState {
 export enum CommentThreadCollapsibleState {
     Collapsed = 0,
     Expanded = 1
+}
+
+export enum QuickInputButtonLocation {
+    Title = 1,
+    Inline = 2,
+    Input = 3
 }
 
 @es5ClassCompat
@@ -3445,9 +3476,10 @@ export class TimelineItem {
     id?: string;
     iconPath?: theia.Uri | { light: theia.Uri; dark: theia.Uri } | ThemeIcon;
     description?: string;
-    detail?: string;
+    tooltip?: string | theia.MarkdownString | undefined;
     command?: theia.Command;
     contextValue?: string;
+    accessibilityInformation?: AccessibilityInformation;
     constructor(label: string, timestamp: number) {
         this.label = label;
         this.timestamp = timestamp;
@@ -3784,6 +3816,8 @@ export class InteractiveWindowInput {
 // #region DocumentPaste
 export class DocumentPasteEditKind {
     static Empty: DocumentPasteEditKind;
+    static Text: DocumentPasteEditKind;
+    static TextUpdateImports: DocumentPasteEditKind;
 
     constructor(public readonly value: string) { }
 
@@ -3803,6 +3837,8 @@ export class DocumentPasteEditKind {
     }
 }
 DocumentPasteEditKind.Empty = new DocumentPasteEditKind('');
+DocumentPasteEditKind.Text = new DocumentDropOrPasteEditKind('text');
+DocumentPasteEditKind.TextUpdateImports = DocumentDropOrPasteEditKind.Text.append('updateImports');
 
 @es5ClassCompat
 export class DocumentPasteEdit {
@@ -3846,7 +3882,7 @@ export enum EditSessionIdentityMatch {
 // #region terminalCompletionProvider
 export class TerminalCompletionList<T extends theia.TerminalCompletionItem> {
 
-    resourceRequestConfig?: theia.TerminalResourceRequestConfig;
+    resourceOptions?: theia.TerminalCompletionResourceOptions;
 
     items: T[];
 
@@ -3854,19 +3890,46 @@ export class TerminalCompletionList<T extends theia.TerminalCompletionItem> {
      * Creates a new completion list.
      *
      * @param items The completion items.
-     * @param resourceRequestConfig Indicates which resources should be shown as completions for the cwd of the terminal.
+     * @param resourceOptions Indicates which resources should be shown as completions for the cwd of the terminal.
+     */
+    constructor(items: T[], resourceOptions?: theia.TerminalCompletionResourceOptions) {
+    }
+}
+
+export class TerminalCompletionItem {
+    label: string | theia.CompletionItemLabel;
+    replacementRange: readonly [number, number];
+    detail?: string;
+    documentation?: string | theia.MarkdownString;
+    kind?: TerminalCompletionItemKind;
+    /**
      * @stubbed
      */
-    constructor(items?: T[], resourceRequestConfig?: theia.TerminalResourceRequestConfig) {
-    }
+    constructor(
+        label: string | theia.CompletionItemLabel,
+        replacementRange: readonly [number, number],
+        kind?: TerminalCompletionItemKind
+    ) { }
 }
 
 export enum TerminalCompletionItemKind {
     File = 0,
     Folder = 1,
-    Flag = 2,
-    Method = 3,
-    Argument = 4
+    Method = 2,
+    Alias = 3,
+    Argument = 4,
+    Option = 5,
+    OptionValue = 6,
+    Flag = 7,
+    SymbolicLinkFile = 8,
+    SymbolicLinkFolder = 9,
+    ScmCommit = 10,
+    ScmBranch = 11,
+    ScmTag = 12,
+    ScmStash = 13,
+    ScmRemote = 14,
+    PullRequest = 15,
+    PullRequestDone = 16,
 }
 // #endregion
 
@@ -4005,17 +4068,27 @@ export enum LanguageModelChatMessageRole {
  * @stubbed
  */
 export class LanguageModelChatMessage {
-    static User(content: string | (LanguageModelTextPart | LanguageModelToolResultPart)[], name?: string): LanguageModelChatMessage {
+    static User(content: string | Array<LanguageModelTextPart | LanguageModelToolResultPart | LanguageModelDataPart>, name?: string): LanguageModelChatMessage {
         return new LanguageModelChatMessage(LanguageModelChatMessageRole.User, content, name);
     }
 
-    static Assistant(content: string | (LanguageModelTextPart | LanguageModelToolResultPart)[], name?: string): LanguageModelChatMessage {
+    static Assistant(content: string | (LanguageModelTextPart | LanguageModelToolResultPart | LanguageModelDataPart)[], name?: string): LanguageModelChatMessage {
         return new LanguageModelChatMessage(LanguageModelChatMessageRole.Assistant, content, name);
     }
 
-    constructor(public role: LanguageModelChatMessageRole, public content: string | (LanguageModelTextPart | LanguageModelToolResultPart | LanguageModelToolCallPart)[],
+    constructor(public role: LanguageModelChatMessageRole, public content: string | LanguageModelInputPart[],
         public name?: string) { }
 }
+
+/**
+ * The various message types which a {@linkcode LanguageModelChatProvider} can emit in the chat response stream
+ */
+export type LanguageModelResponsePart = LanguageModelTextPart | LanguageModelToolResultPart | LanguageModelToolCallPart | LanguageModelDataPart;
+
+/**
+ * The various message types which can be sent via {@linkcode LanguageModelChat.sendRequest } and processed by a {@linkcode LanguageModelChatProvider}
+ */
+export type LanguageModelInputPart = LanguageModelTextPart | LanguageModelToolResultPart | LanguageModelToolCallPart | LanguageModelDataPart;
 
 export class LanguageModelError extends Error {
 
@@ -4053,7 +4126,11 @@ export class LanguageModelToolCallPart {
     name: string;
     input: object;
 
-    constructor(callId: string, name: string, input: object) { }
+    constructor(callId: string, name: string, input: object) {
+        this.callId = callId;
+        this.name = name;
+        this.input = input;
+    }
 }
 
 /**
@@ -4061,26 +4138,27 @@ export class LanguageModelToolCallPart {
  */
 export class LanguageModelToolResultPart {
     callId: string;
-    content: (theia.LanguageModelTextPart | theia.LanguageModelPromptTsxPart | unknown)[];
+    content: Array<LanguageModelTextPart | LanguageModelPromptTsxPart | LanguageModelDataPart | unknown>;
 
-    constructor(callId: string, content: (theia.LanguageModelTextPart | theia.LanguageModelPromptTsxPart | unknown)[]) { }
+    constructor(callId: string, content: Array<LanguageModelTextPart | LanguageModelPromptTsxPart | LanguageModelDataPart | unknown>) {
+        this.callId = callId;
+        this.content = content;
+    }
 }
 
-/**
- * @stubbed
- */
 export class LanguageModelTextPart {
     value: string;
-    constructor(value: string) { }
+    constructor(value: string) {
+        this.value = value;
+    }
 }
 
-/**
- * @stubbed
- */
 export class LanguageModelToolResult {
-    content: (theia.LanguageModelTextPart | theia.LanguageModelPromptTsxPart | unknown)[];
+    content: Array<LanguageModelTextPart | LanguageModelPromptTsxPart | LanguageModelDataPart | unknown>;
 
-    constructor(content: (theia.LanguageModelTextPart | theia.LanguageModelPromptTsxPart)[]) { }
+    constructor(content: Array<LanguageModelTextPart | LanguageModelPromptTsxPart | LanguageModelDataPart | unknown>) {
+        this.content = content;
+    }
 }
 
 /**
@@ -4089,8 +4167,89 @@ export class LanguageModelToolResult {
 export class LanguageModelPromptTsxPart {
     value: unknown;
 
-    constructor(value: unknown) { }
+    constructor(value: unknown) {
+        this.value = value;
+    }
 }
+
+export class LanguageModelDataPart {
+    static image(data: Uint8Array, mime: string): LanguageModelDataPart {
+        return new LanguageModelDataPart(data, mime);
+    }
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    static json(value: any, mime: string = 'text/x-json'): LanguageModelDataPart {
+        const rawStr = JSON.stringify(value, undefined, '\t');
+        return new LanguageModelDataPart(BinaryBuffer.fromString(rawStr).buffer, mime);
+    }
+    static text(value: string, mime: string = 'text/plain'): LanguageModelDataPart {
+        return new LanguageModelDataPart(BinaryBuffer.fromString(value).buffer, mime);
+    }
+    mimeType: string;
+    data: Uint8Array;
+    constructor(data: Uint8Array, mimeType: string) {
+        this.data = data;
+        this.mimeType = mimeType;
+    }
+}
+
+/**
+ * @stubbed
+ */
+export interface ProvideLanguageModelChatResponseOptions {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    readonly modelOptions?: { readonly [name: string]: any };
+    readonly tools?: readonly theia.LanguageModelChatTool[];
+    readonly toolMode: LanguageModelChatToolMode;
+}
+
+/**
+ * @stubbed
+ */
+export interface LanguageModelChatInformation {
+    readonly id: string;
+    readonly name: string;
+    readonly family: string;
+    readonly tooltip?: string;
+    readonly detail?: string;
+    readonly version: string;
+    readonly maxInputTokens: number;
+    readonly maxOutputTokens: number;
+    readonly capabilities: {
+        readonly imageInput?: boolean;
+        readonly toolCalling?: boolean | number;
+    };
+}
+
+/**
+ * @stubbed
+ */
+export interface LanguageModelChatRequestMessage {
+    readonly role: LanguageModelChatMessageRole;
+    readonly content: ReadonlyArray<LanguageModelInputPart | unknown>;
+    readonly name: string | undefined;
+}
+
+/**
+ * @stubbed
+ */
+export interface LanguageModelChatProvider<T extends LanguageModelChatInformation = LanguageModelChatInformation> {
+    readonly onDidChangeLanguageModelChatInformation?: theia.Event<void>;
+
+    provideLanguageModelChatInformation(options: PrepareLanguageModelChatModelOptions, token: theia.CancellationToken): theia.ProviderResult<T[]>;
+
+    provideLanguageModelChatResponse(model: T, messages: readonly theia.LanguageModelChatRequestMessage[],
+        options: ProvideLanguageModelChatResponseOptions, progress: Progress<LanguageModelResponsePart>, token: theia.CancellationToken): Thenable<void>;
+
+    provideTokenCount(model: T, text: string | LanguageModelChatRequestMessage, token: theia.CancellationToken): Thenable<number>;
+}
+
+/**
+ * @stubbed
+ */
+export interface PrepareLanguageModelChatModelOptions {
+    readonly silent: boolean;
+}
+
 // #endregion
 
 // #region Port Attributes
@@ -4128,6 +4287,147 @@ export enum TerminalShellExecutionCommandLineConfidence {
     Low = 0,
     Medium = 1,
     High = 2
+}
+
+// #endregion
+
+/**
+ * McpStdioServerDefinition represents an MCP server available by running
+ * a local process and operating on its stdin and stdout streams. The process
+ * will be spawned as a child process of the extension host and by default
+ * will not run in a shell environment.
+ */
+export class McpStdioServerDefinition {
+    /**
+     * The human-readable name of the server.
+     */
+    readonly label: string;
+
+    /**
+     * The working directory used to start the server.
+     */
+    cwd?: URI;
+
+    /**
+     * The command used to start the server. Node.js-based servers may use
+     * `process.execPath` to use the editor's version of Node.js to run the script.
+     */
+    command: string;
+
+    /**
+     * Additional command-line arguments passed to the server.
+     */
+    args?: string[];
+
+    /**
+     * Optional additional environment information for the server. Variables
+     * in this environment will overwrite or remove (if null) the default
+     * environment variables of the editor's extension host.
+     */
+    env?: Record<string, string | number | null>;
+
+    /**
+     * Optional version identification for the server. If this changes, the
+     * editor will indicate that tools have changed and prompt to refresh them.
+     */
+    version?: string;
+
+    /**
+     * @param label The human-readable name of the server.
+     * @param command The command used to start the server.
+     * @param args Additional command-line arguments passed to the server.
+     * @param env Optional additional environment information for the server.
+     * @param version Optional version identification for the server.
+     */
+    constructor(label: string, command: string, args?: string[], env?: Record<string, string | number | null>, version?: string) {
+        this.label = label;
+        this.command = command;
+        this.args = args;
+        this.env = env;
+        this.version = version;
+    }
+}
+
+/**
+ * McpHttpServerDefinition represents an MCP server available using the
+ * Streamable HTTP transport.
+ */
+export class McpHttpServerDefinition {
+    /**
+     * The human-readable name of the server.
+     */
+    readonly label: string;
+
+    /**
+     * The URI of the server. The editor will make a POST request to this URI
+     * to begin each session.
+     */
+    uri: URI;
+
+    /**
+     * Optional additional heads included with each request to the server.
+     */
+    headers?: Record<string, string>;
+
+    /**
+     * Optional version identification for the server. If this changes, the
+     * editor will indicate that tools have changed and prompt to refresh them.
+     */
+    version?: string;
+
+    /**
+     * @param label The human-readable name of the server.
+     * @param uri The URI of the server.
+     * @param headers Optional additional heads included with each request to the server.
+     */
+    constructor(label: string, uri: URI, headers?: Record<string, string>, version?: string) {
+        this.label = label;
+        this.uri = uri;
+        this.headers = headers;
+        this.version = version;
+    };
+}
+
+/**
+ * Definitions that describe different types of Model Context Protocol servers,
+ * which can be returned from the {@link McpServerDefinitionProvider}.
+ */
+export type McpServerDefinition = McpStdioServerDefinition | McpHttpServerDefinition;
+
+// #region textEditorDiffInformation
+
+export enum TextEditorChangeKind {
+    Addition = 1,
+    Deletion = 2,
+    Modification = 3
+}
+
+export interface TextEditorLineRange {
+    readonly startLineNumber: number;
+    readonly endLineNumberExclusive: number;
+}
+
+export interface TextEditorChange {
+    readonly original: TextEditorLineRange;
+    readonly modified: TextEditorLineRange;
+    readonly kind: TextEditorChangeKind;
+}
+
+export interface TextEditorDiffInformation {
+    readonly documentVersion: number;
+    readonly original: theia.Uri | undefined;
+    readonly modified: theia.Uri;
+    readonly changes: readonly TextEditorChange[];
+    readonly isStale: boolean;
+}
+
+export interface TextEditorDiffInformationChangeEvent {
+    readonly textEditor: TextEditor;
+    readonly diffInformation: TextEditorDiffInformation[] | undefined;
+}
+
+export interface TextEditor {
+    readonly diffInformation: TextEditorDiffInformation[] | undefined;
 }
 
 // #endregion

@@ -24,7 +24,7 @@ import { FileOperation, FileOperationError, FileOperationResult, ETAG_DISABLED, 
 import { FileService, TextFileOperationError, TextFileOperationResult } from './file-service';
 import { ConfirmDialog, Dialog } from '@theia/core/lib/browser/dialogs';
 import { LabelProvider } from '@theia/core/lib/browser/label-provider';
-import { GENERAL_MAX_FILE_SIZE_MB } from './filesystem-preferences';
+import { GENERAL_MAX_FILE_SIZE_MB } from '../common/filesystem-preferences';
 import { FrontendApplicationStateService } from '@theia/core/lib/browser/frontend-application-state';
 import { nls } from '@theia/core';
 import { MarkdownString } from '@theia/core/lib/common/markdown-rendering';
@@ -334,6 +334,8 @@ export class FileResource implements Resource {
 
 @injectable()
 export class FileResourceResolver implements ResourceResolver {
+    /** This resolver interacts with the VSCode plugin system in a way that can cause delays. Most other resource resolvers fail immediately, so this one should be tried late. */
+    readonly priority = -10;
 
     @inject(FileService)
     protected readonly fileService: FileService;

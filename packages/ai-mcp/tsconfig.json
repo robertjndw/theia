@@ -13,7 +13,13 @@
       "path": "../ai-core"
     },
     {
+      "path": "../ai-core-ui"
+    },
+    {
       "path": "../core"
+    },
+    {
+      "path": "../workspace"
     }
   ]
 }

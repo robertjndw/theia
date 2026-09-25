@@ -17,25 +17,29 @@
 /* eslint-disable no-null/no-null, @typescript-eslint/no-explicit-any */
 
 import * as React from '@theia/core/shared/react';
-import { injectable, inject, postConstruct } from '@theia/core/shared/inversify';
+import { injectable, inject, postConstruct, named } from '@theia/core/shared/inversify';
 import URI from '@theia/core/lib/common/uri';
 import { isOSX } from '@theia/core/lib/common/os';
 import { DisposableCollection, Disposable } from '@theia/core/lib/common/disposable';
 import { TreeWidget, TreeNode, SelectableTreeNode, TreeModel, TreeProps, NodeProps, TREE_NODE_SEGMENT_CLASS, TREE_NODE_SEGMENT_GROW_CLASS } from '@theia/core/lib/browser/tree';
+import { TreeViewWelcomeWidget } from '@theia/core/lib/browser/tree/tree-view-welcome-widget';
 import { ScmTreeModel, ScmFileChangeRootNode, ScmFileChangeGroupNode, ScmFileChangeFolderNode, ScmFileChangeNode } from './scm-tree-model';
-import { MenuCommandExecutor, MenuModelRegistry, ActionMenuNode, CompoundMenuNode, MenuPath } from '@theia/core/lib/common/menu';
+import { MenuModelRegistry, CompoundMenuNode, MenuPath, CommandMenu } from '@theia/core/lib/common/menu';
 import { ScmResource } from './scm-provider';
-import { ContextMenuRenderer, LabelProvider, CorePreferences, DiffUris, ACTION_ITEM } from '@theia/core/lib/browser';
+import { ContextMenuRenderer, LabelProvider, DiffUris, ACTION_ITEM } from '@theia/core/lib/browser';
 import { ScmContextKeyService } from './scm-context-key-service';
 import { EditorWidget, EditorManager, DiffNavigatorProvider } from '@theia/editor/lib/browser';
 import { IconThemeService } from '@theia/core/lib/browser/icon-theme-service';
 import { ColorRegistry } from '@theia/core/lib/browser/color-registry';
 import { Decoration, DecorationsService } from '@theia/core/lib/browser/decorations-service';
+import { ScmService } from './scm-service';
 import { FileStat } from '@theia/filesystem/lib/common/files';
 import { ThemeService } from '@theia/core/lib/browser/theming';
+import { CorePreferences } from '@theia/core/lib/common';
+import { ILogger } from '@theia/core';
 
 @injectable()
-export class ScmTreeWidget extends TreeWidget {
+export class ScmTreeWidget extends TreeViewWelcomeWidget {
 
     static ID = 'scm-resource-widget';
 
@@ -48,7 +52,6 @@ export class ScmTreeWidget extends TreeWidget {
     static RESOURCE_CONTEXT_MENU = ['RESOURCE_CONTEXT_MENU'];
     static RESOURCE_INLINE_MENU = ['RESOURCE_CONTEXT_MENU', 'inline'];
 
-    @inject(MenuCommandExecutor) protected readonly menuCommandExecutor: MenuCommandExecutor;
     @inject(MenuModelRegistry) protected readonly menus: MenuModelRegistry;
     @inject(ScmContextKeyService) protected readonly contextKeys: ScmContextKeyService;
     @inject(EditorManager) protected readonly editorManager: EditorManager;
@@ -57,6 +60,9 @@ export class ScmTreeWidget extends TreeWidget {
     @inject(DecorationsService) protected readonly decorationsService: DecorationsService;
     @inject(ColorRegistry) protected readonly colors: ColorRegistry;
     @inject(ThemeService) protected readonly themeService: ThemeService;
+    @inject(ILogger) @named('scm:ScmTreeWidget')
+    protected readonly logger: ILogger;
+    @inject(ScmService) protected readonly scmService: ScmService;
 
     // TODO: Make TreeWidget generic to better type those fields.
     override readonly model: ScmTreeModel;
@@ -75,6 +81,17 @@ export class ScmTreeWidget extends TreeWidget {
     protected override init(): void {
         super.init();
         this.toDispose.push(this.themeService.onDidColorThemeChange(() => this.update()));
+        this.toDispose.push(this.scmService.onDidChangeSelectedRepository(() => this.update()));
+        this.toDispose.push(this.contextService.onDidChange(e => {
+            if (e.affects(new Set(['isWorkspaceTrusted']))) {
+                this.update();
+            }
+        }));
+    }
+
+    protected override shouldShowWelcomeView(): boolean {
+        return this.scmService.selectedRepository === undefined
+            || !this.contextService.match('isWorkspaceTrusted');
     }
 
     set viewMode(id: 'tree' | 'list') {
@@ -109,7 +126,6 @@ export class ScmTreeWidget extends TreeWidget {
                 model={this.model}
                 treeNode={node}
                 renderExpansionToggle={() => this.renderExpansionToggle(node, props)}
-                commandExecutor={this.menuCommandExecutor}
                 contextMenuRenderer={this.contextMenuRenderer}
                 menus={this.menus}
                 contextKeys={this.contextKeys}
@@ -128,7 +144,6 @@ export class ScmTreeWidget extends TreeWidget {
                 treeNode={node}
                 sourceUri={node.sourceUri}
                 renderExpansionToggle={() => this.renderExpansionToggle(node, props)}
-                commandExecutor={this.menuCommandExecutor}
                 contextMenuRenderer={this.contextMenuRenderer}
                 menus={this.menus}
                 contextKeys={this.contextKeys}
@@ -149,7 +164,6 @@ export class ScmTreeWidget extends TreeWidget {
                 model={this.model}
                 treeNode={node}
                 contextMenuRenderer={this.contextMenuRenderer}
-                commandExecutor={this.menuCommandExecutor}
                 menus={this.menus}
                 contextKeys={this.contextKeys}
                 labelProvider={this.labelProvider}
@@ -364,9 +378,15 @@ export class ScmTreeWidget extends TreeWidget {
     }
 
     selectNodeByUri(uri: URI): void {
-        for (const group of this.model.groups) {
-            const sourceUri = new URI(uri.path.toString());
-            const id = `${group.id}:${sourceUri.toString()}`;
+        // Use the URI as-is without coercing the scheme.
+        // Only URIs whose scheme matches the SCM resource sourceUri scheme (typically 'file')
+        // will find a matching node. Diff editors for staged changes (git: scheme) won't match,
+        // which is correct VS Code behavior. See https://github.com/eclipse-theia/theia/issues/16412
+        const uriString = uri.toString();
+        // Iterate backwards (last group first) to match VS Code behavior.
+        const groups = this.model.groups;
+        for (let i = groups.length - 1; i >= 0; i--) {
+            const id = `${groups[i].id}:${uriString}`;
             const node = this.model.getNode(id);
             if (SelectableTreeNode.is(node)) {
                 this.model.selectNode(node);
@@ -409,7 +429,7 @@ export class ScmTreeWidget extends TreeWidget {
         try {
             await resource.open();
         } catch (e) {
-            console.error('Failed to open a SCM resource', e);
+            this.logger.error('Failed to open a SCM resource', e);
             return undefined;
         }
 
@@ -523,7 +543,8 @@ export abstract class ScmElement<P extends ScmElement.Props = ScmElement.Props> 
             contextMenuRenderer.render({
                 menuPath: this.contextMenuPath,
                 anchor: event.nativeEvent,
-                args: this.contextMenuArgs
+                args: this.contextMenuArgs,
+                context: event.currentTarget
             });
         });
     };
@@ -535,7 +556,6 @@ export abstract class ScmElement<P extends ScmElement.Props = ScmElement.Props> 
 export namespace ScmElement {
     export interface Props extends ScmTreeWidget.Props {
         renderExpansionToggle: () => React.ReactNode;
-        commandExecutor: MenuCommandExecutor;
     }
     export interface State {
         hover: boolean
@@ -544,9 +564,9 @@ export namespace ScmElement {
 
 export class ScmResourceComponent extends ScmElement<ScmResourceComponent.Props> {
 
-    override render(): JSX.Element | undefined {
+    override render(): React.JSX.Element | undefined {
         const { hover } = this.state;
-        const { model, treeNode, colors, parentPath, sourceUri, decoration, labelProvider, commandExecutor, menus, contextKeys, caption, isLightTheme } = this.props;
+        const { model, treeNode, colors, parentPath, sourceUri, decoration, labelProvider, menus, contextKeys, caption, isLightTheme } = this.props;
         const resourceUri = new URI(sourceUri);
 
         const decorationIcon = treeNode.decorations;
@@ -583,7 +603,6 @@ export class ScmResourceComponent extends ScmElement<ScmResourceComponent.Props>
                 hover,
                 menu: menus.getMenu(ScmTreeWidget.RESOURCE_INLINE_MENU),
                 menuPath: ScmTreeWidget.RESOURCE_INLINE_MENU,
-                commandExecutor,
                 args: this.contextMenuArgs,
                 contextKeys,
                 model,
@@ -666,9 +685,9 @@ export namespace ScmResourceComponent {
 
 export class ScmResourceGroupElement extends ScmElement<ScmResourceGroupComponent.Props> {
 
-    override render(): JSX.Element {
+    override render(): React.JSX.Element {
         const { hover } = this.state;
-        const { model, treeNode, menus, commandExecutor, contextKeys, caption } = this.props;
+        const { model, treeNode, menus, contextKeys, caption } = this.props;
         return <div className={`theia-header scm-theia-header ${TREE_NODE_SEGMENT_GROW_CLASS}`}
             onContextMenu={this.renderContextMenu}
             onMouseEnter={this.showHover}
@@ -681,7 +700,6 @@ export class ScmResourceGroupElement extends ScmElement<ScmResourceGroupComponen
                 args: this.contextMenuArgs,
                 menu: menus.getMenu(ScmTreeWidget.RESOURCE_GROUP_INLINE_MENU),
                 menuPath: ScmTreeWidget.RESOURCE_GROUP_INLINE_MENU,
-                commandExecutor,
                 contextKeys,
                 model,
                 treeNode
@@ -717,9 +735,9 @@ export namespace ScmResourceGroupComponent {
 
 export class ScmResourceFolderElement extends ScmElement<ScmResourceFolderElement.Props> {
 
-    override render(): JSX.Element {
+    override render(): React.JSX.Element {
         const { hover } = this.state;
-        const { model, treeNode, sourceUri, labelProvider, commandExecutor, menus, contextKeys, caption } = this.props;
+        const { model, treeNode, sourceUri, labelProvider, menus, contextKeys, caption } = this.props;
         const sourceFileStat = FileStat.dir(sourceUri);
         const icon = labelProvider.getIcon(sourceFileStat);
         const title = new URI(sourceUri).path.fsPath();
@@ -741,7 +759,6 @@ export class ScmResourceFolderElement extends ScmElement<ScmResourceFolderElemen
                 hover,
                 menu: menus.getMenu(ScmTreeWidget.RESOURCE_FOLDER_INLINE_MENU),
                 menuPath: ScmTreeWidget.RESOURCE_FOLDER_INLINE_MENU,
-                commandExecutor,
                 args: this.contextMenuArgs,
                 contextKeys,
                 model,
@@ -776,12 +793,12 @@ export namespace ScmResourceFolderElement {
 
 export class ScmInlineActions extends React.Component<ScmInlineActions.Props> {
     override render(): React.ReactNode {
-        const { hover, menu, menuPath, args, commandExecutor, model, treeNode, contextKeys, children } = this.props;
+        const { hover, menu, menuPath, args, model, treeNode, contextKeys, children } = this.props;
         return <div className='theia-scm-inline-actions-container'>
             <div className='theia-scm-inline-actions'>
-                {hover && menu.children
-                    .map((node, index) => node instanceof ActionMenuNode &&
-                        <ScmInlineAction key={index} {...{ node, menuPath, args, commandExecutor, model, treeNode, contextKeys }} />)}
+                {hover && menu?.children
+                    .map((node, index) => CommandMenu.is(node) &&
+                        <ScmInlineAction key={index} {...{ node, menuPath, args, model, treeNode, contextKeys }} />)}
             </div>
             {children}
         </div>;
@@ -790,9 +807,8 @@ export class ScmInlineActions extends React.Component<ScmInlineActions.Props> {
 export namespace ScmInlineActions {
     export interface Props {
         hover: boolean;
-        menu: CompoundMenuNode;
+        menu: CompoundMenuNode | undefined;
         menuPath: MenuPath;
-        commandExecutor: MenuCommandExecutor;
         model: ScmTreeModel;
         treeNode: TreeNode;
         contextKeys: ScmContextKeyService;
@@ -803,14 +819,14 @@ export namespace ScmInlineActions {
 
 export class ScmInlineAction extends React.Component<ScmInlineAction.Props> {
     override render(): React.ReactNode {
-        const { node, model, treeNode, args, commandExecutor, menuPath, contextKeys } = this.props;
+        const { node, menuPath, model, treeNode, args, contextKeys } = this.props;
 
         let isActive: boolean = false;
         model.execInNodeContext(treeNode, () => {
-            isActive = contextKeys.match(node.when);
+            isActive = node.isVisible(menuPath, contextKeys, undefined, ...args);
         });
 
-        if (!commandExecutor.isVisible(menuPath, node.command, ...args) || !isActive) {
+        if (!isActive) {
             return false;
         }
         return <div className='theia-scm-inline-action'>
@@ -821,14 +837,13 @@ export class ScmInlineAction extends React.Component<ScmInlineAction.Props> {
     protected execute = (event: React.MouseEvent) => {
         event.stopPropagation();
 
-        const { commandExecutor, menuPath, node, args } = this.props;
-        commandExecutor.executeCommand([menuPath[0]], node.command, ...args);
+        const { node, menuPath, args } = this.props;
+        node.run(menuPath, ...args);
     };
 }
 export namespace ScmInlineAction {
     export interface Props {
-        node: ActionMenuNode;
-        commandExecutor: MenuCommandExecutor;
+        node: CommandMenu;
         menuPath: MenuPath;
         model: ScmTreeModel;
         treeNode: TreeNode;

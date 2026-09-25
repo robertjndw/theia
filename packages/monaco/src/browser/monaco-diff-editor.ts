@@ -26,11 +26,15 @@ import { ICodeEditor, IDiffEditorConstructionOptions } from '@theia/monaco-edito
 import { IActionDescriptor, IStandaloneCodeEditor, IStandaloneDiffEditor, StandaloneCodeEditor, StandaloneDiffEditor2 }
     from '@theia/monaco-editor-core/esm/vs/editor/standalone/browser/standaloneCodeEditor';
 import { IEditorConstructionOptions } from '@theia/monaco-editor-core/esm/vs/editor/browser/config/editorConfiguration';
-import { EmbeddedDiffEditorWidget } from '@theia/monaco-editor-core/esm/vs/editor/browser/widget/embeddedCodeEditorWidget';
+import { ICodeEditorWidgetOptions } from '@theia/monaco-editor-core/esm/vs/editor/browser/widget/codeEditor/codeEditorWidget';
+import { EmbeddedDiffEditorWidget } from '@theia/monaco-editor-core/esm/vs/editor/browser/widget/diffEditor/embeddedDiffEditorWidget';
 import { IInstantiationService } from '@theia/monaco-editor-core/esm/vs/platform/instantiation/common/instantiation';
 import { ContextKeyValue, IContextKey } from '@theia/monaco-editor-core/esm/vs/platform/contextkey/common/contextkey';
 import { IDisposable } from '@theia/monaco-editor-core/esm/vs/base/common/lifecycle';
 import { ICommandHandler } from '@theia/monaco-editor-core/esm/vs/platform/commands/common/commands';
+import { EditorContextKeys } from '@theia/monaco-editor-core/esm/vs/editor/common/editorContextKeys';
+import { IEditorOptions } from '@theia/monaco-editor-core/esm/vs/editor/common/config/editorOptions';
+import { ILineChange } from '@theia/monaco-editor-core/esm/vs/editor/common/diff/legacyLinesDiffComputer';
 
 export namespace MonacoDiffEditor {
     export interface IOptions extends MonacoEditor.ICommonOptions, IDiffEditorConstructionOptions {
@@ -40,6 +44,7 @@ export namespace MonacoDiffEditor {
 export class MonacoDiffEditor extends MonacoEditor {
     protected _diffEditor: IStandaloneDiffEditor;
     protected _diffNavigator: DiffNavigator;
+    protected readonly diffEditorModel: monaco.editor.IDiffEditorModel;
 
     constructor(
         uri: URI,
@@ -53,11 +58,10 @@ export class MonacoDiffEditor extends MonacoEditor {
         parentEditor?: MonacoEditor
     ) {
         super(uri, modifiedModel, node, services, options, override, parentEditor);
+        this.diffEditorModel = { original: this.originalModel.textEditorModel, modified: this.modifiedModel.textEditorModel };
         this.documents.add(originalModel);
-        const original = originalModel.textEditorModel;
-        const modified = modifiedModel.textEditorModel;
+        this.wordWrapOverride = options?.wordWrapOverride2;
         this._diffNavigator = diffNavigatorFactory.createdDiffNavigator(this._diffEditor);
-        this._diffEditor.setModel({ original, modified });
     }
 
     get diffEditor(): monaco.editor.IStandaloneDiffEditor {
@@ -66,6 +70,10 @@ export class MonacoDiffEditor extends MonacoEditor {
 
     get diffNavigator(): DiffNavigator {
         return this._diffNavigator;
+    }
+
+    get diffInformation(): ILineChange[] {
+        return this._diffEditor.getLineChanges() || [];
     }
 
     protected override create(options?: IDiffEditorConstructionOptions, override?: EditorServiceOverrides): Disposable {
@@ -82,10 +90,20 @@ export class MonacoDiffEditor extends MonacoEditor {
         return this._diffEditor;
     }
 
+    protected wordWrapOverride: IEditorOptions['wordWrapOverride2'];
+    protected lastReachedSideBySideBreakpoint = true;
     protected override resize(dimension: Dimension | null): void {
         if (this.node) {
             const layoutSize = this.computeLayoutSize(this.node, dimension);
             this._diffEditor.layout(layoutSize);
+            // Workaround for https://github.com/microsoft/vscode/issues/217386#issuecomment-2711750462
+            const leftEditor = this._diffEditor.getOriginalEditor();
+            const hasReachedSideBySideBreakpoint = leftEditor.contextKeyService
+                .getContextKeyValue(EditorContextKeys.diffEditorRenderSideBySideInlineBreakpointReached.key);
+            if (hasReachedSideBySideBreakpoint !== this.lastReachedSideBySideBreakpoint) {
+                leftEditor.updateOptions({ wordWrapOverride2: this.wordWrapOverride ?? hasReachedSideBySideBreakpoint ? 'off' : 'inherit' });
+            }
+            this.lastReachedSideBySideBreakpoint = !!hasReachedSideBySideBreakpoint;
         }
     }
 
@@ -100,22 +118,42 @@ export class MonacoDiffEditor extends MonacoEditor {
     }
 
     override getResourceUri(): URI {
-        return new URI(this.originalModel.uri);
+        return new URI(this.modifiedModel.uri);
     }
     override createMoveToUri(resourceUri: URI): URI {
         const [left, right] = DiffUris.decode(this.uri);
         return DiffUris.encode(left.withPath(resourceUri.path), right.withPath(resourceUri.path));
     }
 
+    override handleVisibilityChanged(nowVisible: boolean): void {
+        const isFirstShow = nowVisible && !this.savedViewState;
+        super.handleVisibilityChanged(nowVisible);
+        if (isFirstShow) {
+            this._diffEditor.revealFirstDiff();
+        }
+    }
+
+    override readonly onShouldDisplayDirtyDiffChanged = undefined;
     override shouldDisplayDirtyDiff(): boolean {
         return false;
+    }
+    override setShouldDisplayDirtyDiff(value: boolean): void {
+        // no op
+    }
+
+    protected override get baseEditor(): monaco.editor.IEditor {
+        return this.diffEditor;
+    }
+
+    protected override get baseModel(): monaco.editor.IEditorModel {
+        return this.diffEditorModel;
     }
 }
 
 class EmbeddedDiffEditor extends EmbeddedDiffEditorWidget implements IStandaloneDiffEditor {
 
     protected override _createInnerEditor(instantiationService: IInstantiationService, container: HTMLElement,
-        options: Readonly<IEditorConstructionOptions>): StandaloneCodeEditor {
+        options: Readonly<IEditorConstructionOptions>, _editorWidgetOptions: ICodeEditorWidgetOptions): StandaloneCodeEditor {
         return instantiationService.createInstance(StandaloneCodeEditor, container, options);
     }
 

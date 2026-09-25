@@ -14,20 +14,20 @@
 // SPDX-License-Identifier: EPL-2.0 OR GPL-2.0-only WITH Classpath-exception-2.0
 // *****************************************************************************
 import { AICommandHandlerFactory } from '@theia/ai-core/lib/browser/ai-command-handler-factory';
-import { CommandContribution, CommandRegistry, MessageService } from '@theia/core';
-import { PreferenceService, QuickInputService } from '@theia/core/lib/browser';
-import { inject, injectable } from '@theia/core/shared/inversify';
+import { CommandContribution, CommandRegistry, MessageService, nls, PreferenceService, ILogger } from '@theia/core';
+import { QuickInputService } from '@theia/core/lib/browser';
+import { inject, injectable, named } from '@theia/core/shared/inversify';
 import { LlamafileManager } from '../common/llamafile-manager';
-import { PREFERENCE_LLAMAFILE } from './llamafile-preferences';
+import { PREFERENCE_LLAMAFILE } from '../common/llamafile-preferences';
 import { LlamafileEntry } from './llamafile-frontend-application-contribution';
 
 export const StartLlamafileCommand = {
     id: 'llamafile.start',
-    label: 'Start Llamafile',
+    label: nls.localize('theia/ai/llamaFile/start', 'Start Llamafile'),
 };
 export const StopLlamafileCommand = {
     id: 'llamafile.stop',
-    label: 'Stop Llamafile',
+    label: nls.localize('theia/ai/llamaFile/stop', 'Stop Llamafile'),
 };
 
 @injectable()
@@ -48,13 +48,16 @@ export class LlamafileCommandContribution implements CommandContribution {
     @inject(LlamafileManager)
     protected llamafileManager: LlamafileManager;
 
+    @inject(ILogger) @named('ai-llamafile:LlamafileCommandContribution')
+    protected readonly logger: ILogger;
+
     registerCommands(commandRegistry: CommandRegistry): void {
         commandRegistry.registerCommand(StartLlamafileCommand, this.commandHandlerFactory({
             execute: async () => {
                 try {
                     const llamaFiles = this.preferenceService.get<LlamafileEntry[]>(PREFERENCE_LLAMAFILE);
                     if (llamaFiles === undefined || llamaFiles.length === 0) {
-                        this.messageService.error('No Llamafiles configured.');
+                        this.messageService.error(nls.localize('theia/ai/llamafile/error/noConfigured', 'No Llamafiles configured.'));
                         return;
                     }
                     const options = llamaFiles.map(llamaFile => ({ label: llamaFile.name }));
@@ -64,8 +67,13 @@ export class LlamafileCommandContribution implements CommandContribution {
                     }
                     this.llamafileManager.startServer(result.label);
                 } catch (error) {
-                    console.error('Something went wrong during the llamafile start.', error);
-                    this.messageService.error(`Something went wrong during the llamafile start: ${error.message}.\nFor more information, see the console.`);
+                    this.logger.error('Something went wrong during the llamafile start.', error);
+                    this.messageService.error(
+                        nls.localize(
+                            'theia/ai/llamafile/error/startFailed',
+                            'Something went wrong during the llamafile start: {0}.\nFor more information, see the console.',
+                            error.message
+                        ));
                 }
             }
         }));
@@ -74,7 +82,7 @@ export class LlamafileCommandContribution implements CommandContribution {
                 try {
                     const llamaFiles = await this.llamafileManager.getStartedLlamafiles();
                     if (llamaFiles === undefined || llamaFiles.length === 0) {
-                        this.messageService.error('No Llamafiles running.');
+                        this.messageService.error(nls.localize('theia/ai/llamafile/error/noRunning', 'No Llamafiles running.'));
                         return;
                     }
                     const options = llamaFiles.map(llamaFile => ({ label: llamaFile }));
@@ -84,8 +92,13 @@ export class LlamafileCommandContribution implements CommandContribution {
                     }
                     this.llamafileManager.stopServer(result.label);
                 } catch (error) {
-                    console.error('Something went wrong during the llamafile stop.', error);
-                    this.messageService.error(`Something went wrong during the llamafile stop: ${error.message}.\nFor more information, see the console.`);
+                    this.logger.error('Something went wrong during the llamafile stop.', error);
+                    this.messageService.error(
+                        nls.localize(
+                            'theia/ai/llamafile/error/stopFailed',
+                            'Something went wrong during the llamafile stop: {0}.\nFor more information, see the console.',
+                            error.message
+                        ));
                 }
             }
         }));

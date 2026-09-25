@@ -14,11 +14,11 @@
 // SPDX-License-Identifier: EPL-2.0 OR GPL-2.0-only WITH Classpath-exception-2.0
 // *****************************************************************************
 
-import { FrontendApplicationContribution, PreferenceService } from '@theia/core/lib/browser';
+import { FrontendApplicationContribution } from '@theia/core/lib/browser';
 import { inject, injectable } from '@theia/core/shared/inversify';
-import { OllamaLanguageModelsManager, OllamaModelDescription } from '../common';
-import { HOST_PREF, MODELS_PREF } from './ollama-preferences';
-import { PREFERENCE_NAME_REQUEST_SETTINGS, RequestSetting } from '@theia/ai-core/lib/browser/ai-core-preferences';
+import { OLLAMA_REASONING_SUPPORT, OllamaLanguageModelsManager, OllamaModelDescription } from '../common';
+import { HOST_PREF, MODELS_PREF } from '../common/ollama-preferences';
+import { PreferenceService } from '@theia/core';
 
 const OLLAMA_PROVIDER_ID = 'ollama';
 @injectable()
@@ -34,24 +34,33 @@ export class OllamaFrontendApplicationContribution implements FrontendApplicatio
 
     onStart(): void {
         this.preferenceService.ready.then(() => {
-            const host = this.preferenceService.get<string>(HOST_PREF, 'http://localhost:11434');
-            this.manager.setHost(host);
+            const host = this.preferenceService.get<string>(HOST_PREF);
+            this.manager.setHost(host || undefined);
+
+            const proxyUri = this.preferenceService.get<string>('http.proxy', undefined);
+            this.manager.setProxyUrl(proxyUri);
 
             const models = this.preferenceService.get<string[]>(MODELS_PREF, []);
-            const requestSettings = this.preferenceService.get<RequestSetting[]>(PREFERENCE_NAME_REQUEST_SETTINGS, []);
-            this.manager.createOrUpdateLanguageModels(...models.map(modelId => this.createOllamaModelDescription(modelId, requestSettings)));
+            this.manager.createOrUpdateLanguageModels(...models.map(modelId => this.createOllamaModelDescription(modelId)));
             this.prevModels = [...models];
 
             this.preferenceService.onPreferenceChanged(event => {
                 if (event.preferenceName === HOST_PREF) {
-                    this.manager.setHost(event.newValue);
+                    this.manager.setHost(this.preferenceService.get<string>(HOST_PREF));
+                    this.updateAllModels();
                 } else if (event.preferenceName === MODELS_PREF) {
-                    this.handleModelChanges(event.newValue as string[]);
-                } else if (event.preferenceName === PREFERENCE_NAME_REQUEST_SETTINGS) {
-                    this.handleRequestSettingsChange(event.newValue as RequestSetting[]);
+                    this.handleModelChanges(this.preferenceService.get<string[]>(MODELS_PREF, []));
+                } else if (event.preferenceName === 'http.proxy') {
+                    this.manager.setProxyUrl(this.preferenceService.get<string>('http.proxy', undefined));
+                    this.updateAllModels();
                 }
             });
         });
+    }
+
+    protected updateAllModels(): void {
+        const models = this.preferenceService.get<string[]>(MODELS_PREF, []);
+        this.manager.createOrUpdateLanguageModels(...models.map(modelId => this.createOllamaModelDescription(modelId)));
     }
 
     protected handleModelChanges(newModels: string[]): void {
@@ -62,30 +71,20 @@ export class OllamaFrontendApplicationContribution implements FrontendApplicatio
         const modelsToAdd = [...updatedModels].filter(model => !oldModels.has(model));
 
         this.manager.removeLanguageModels(...modelsToRemove);
-        const requestSettings = this.preferenceService.get<RequestSetting[]>(PREFERENCE_NAME_REQUEST_SETTINGS, []);
-        this.manager.createOrUpdateLanguageModels(...modelsToAdd.map(modelId => this.createOllamaModelDescription(modelId, requestSettings)));
+        this.manager.createOrUpdateLanguageModels(...modelsToAdd.map(modelId => this.createOllamaModelDescription(modelId)));
         this.prevModels = newModels;
     }
 
-    protected handleRequestSettingsChange(newSettings: RequestSetting[]): void {
-        const models = this.preferenceService.get<string[]>(MODELS_PREF, []);
-        this.manager.createOrUpdateLanguageModels(...models.map(modelId => this.createOllamaModelDescription(modelId, newSettings)));
-    }
-
-    protected createOllamaModelDescription(modelId: string, requestSettings: RequestSetting[]): OllamaModelDescription {
+    protected createOllamaModelDescription(modelId: string): OllamaModelDescription {
         const id = `${OLLAMA_PROVIDER_ID}/${modelId}`;
-        const matchingSettings = requestSettings.filter(
-            setting => (!setting.providerId || setting.providerId === OLLAMA_PROVIDER_ID) && setting.modelId === modelId
-        );
-        if (matchingSettings.length > 1) {
-            console.warn(`Multiple entries found for modelId "${modelId}". Using the first match and ignoring the rest.`);
-        }
 
-        const modelRequestSetting = matchingSettings[0];
         return {
             id: id,
             model: modelId,
-            defaultRequestSettings: modelRequestSetting?.requestSettings
+            // Whether the underlying model supports thinking is checked per-request via `ollama.show`;
+            // for non-thinking models the reasoning level is silently ignored, so it's safe to always
+            // advertise reasoning support and let the runtime decide.
+            reasoningSupport: OLLAMA_REASONING_SUPPORT
         };
     }
 }

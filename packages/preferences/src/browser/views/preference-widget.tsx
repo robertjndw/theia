@@ -15,18 +15,18 @@
 // *****************************************************************************
 
 import { postConstruct, injectable, inject } from '@theia/core/shared/inversify';
-import { Panel, Widget, Message, StatefulWidget, PreferenceScope, codicon } from '@theia/core/lib/browser';
-import { PreferencesEditorState, PreferencesEditorWidget } from './preference-editor-widget';
+import { Panel, Widget, Message, StatefulWidget, codicon } from '@theia/core/lib/browser';
+import { PreferencesEditorWidget } from './preference-editor-widget';
 import { PreferencesTreeWidget } from './preference-tree-widget';
 import { PreferencesSearchbarState, PreferencesSearchbarWidget } from './preference-searchbar-widget';
 import { PreferencesScopeTabBar, PreferencesScopeTabBarState } from './preference-scope-tabbar-widget';
 import { Preference } from '../util/preference-types';
 import URI from '@theia/core/lib/common/uri';
 import { nls } from '@theia/core/lib/common/nls';
+import { PreferenceScope } from '@theia/core';
 
 interface PreferencesWidgetState {
     scopeTabBarState: PreferencesScopeTabBarState,
-    editorState: PreferencesEditorState,
     searchbarWidgetState: PreferencesSearchbarState,
 }
 
@@ -105,14 +105,12 @@ export class PreferencesWidget extends Panel implements StatefulWidget {
     storeState(): PreferencesWidgetState {
         return {
             scopeTabBarState: this.tabBarWidget.storeState(),
-            editorState: this.editorWidget.storeState(),
             searchbarWidgetState: this.searchbarWidget.storeState(),
         };
     }
 
     restoreState(state: PreferencesWidgetState): void {
         this.tabBarWidget.restoreState(state.scopeTabBarState);
-        this.editorWidget.restoreState(state.editorState);
         this.searchbarWidget.restoreState(state.searchbarWidgetState);
     }
 }

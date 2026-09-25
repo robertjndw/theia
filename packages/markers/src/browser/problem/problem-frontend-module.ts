@@ -21,16 +21,18 @@ import { ProblemWidget, PROBLEMS_WIDGET_ID } from './problem-widget';
 import { ProblemContribution } from './problem-contribution';
 import { createProblemWidget } from './problem-container';
 import { FrontendApplicationContribution, bindViewContribution, ApplicationShellLayoutMigration, LabelProviderContribution } from '@theia/core/lib/browser';
+import { SaveErrorChecker } from '@theia/core/lib/browser/saveable-service';
 import { ProblemManager } from './problem-manager';
 import { WidgetFactory } from '@theia/core/lib/browser/widget-manager';
 import { ProblemTabBarDecorator } from './problem-tabbar-decorator';
 import { TabBarToolbarContribution } from '@theia/core/lib/browser/shell/tab-bar-toolbar';
 import { ProblemLayoutVersion3Migration } from './problem-layout-migrations';
 import { TabBarDecorator } from '@theia/core/lib/browser/shell/tab-bar-decorator';
-import { bindProblemPreferences } from './problem-preferences';
 import { MarkerTreeLabelProvider } from '../marker-tree-label-provider';
 import { ProblemWidgetTabBarDecorator } from './problem-widget-tab-bar-decorator';
 import { ProblemDecorationContribution, ProblemDecorationsProvider } from './problem-decorations-provider';
+import { ProblemAutoSaveContribution } from './problem-auto-save-contribution';
+import { bindProblemPreferences } from '../../common/problem-preferences';
 
 export default new ContainerModule(bind => {
     bindProblemPreferences(bind);
@@ -61,4 +63,7 @@ export default new ContainerModule(bind => {
 
     bind(ProblemWidgetTabBarDecorator).toSelf().inSingletonScope();
     bind(TabBarDecorator).toService(ProblemWidgetTabBarDecorator);
+
+    bind(ProblemAutoSaveContribution).toSelf().inSingletonScope();
+    bind(SaveErrorChecker).toService(ProblemAutoSaveContribution);
 });

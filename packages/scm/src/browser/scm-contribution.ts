@@ -28,10 +28,11 @@ import {
     ColorTheme,
     CssStyleCollector
 } from '@theia/core/lib/browser';
-import { TabBarToolbarContribution, TabBarToolbarRegistry, TabBarToolbarItem } from '@theia/core/lib/browser/shell/tab-bar-toolbar';
+import { TabBarToolbarContribution, TabBarToolbarRegistry, TabBarToolbarAction } from '@theia/core/lib/browser/shell/tab-bar-toolbar';
 import { CommandRegistry, Command, Disposable, DisposableCollection, CommandService, MenuModelRegistry } from '@theia/core/lib/common';
 import { ContextKeyService, ContextKey } from '@theia/core/lib/browser/context-key-service';
 import { ScmService } from './scm-service';
+import { ScmContextKeyService } from './scm-context-key-service';
 import { ScmWidget } from '../browser/scm-widget';
 import URI from '@theia/core/lib/common/uri';
 import { ScmQuickOpenService } from './scm-quick-open-service';
@@ -43,8 +44,9 @@ import { ScmCommand } from './scm-provider';
 import { ScmDecorationsService } from '../browser/decorations/scm-decorations-service';
 import { nls } from '@theia/core/lib/common/nls';
 import { isHighContrast } from '@theia/core/lib/common/theme';
-import { EditorMainMenu } from '@theia/editor/lib/browser';
+import { EditorMainMenu, EditorWidget } from '@theia/editor/lib/browser';
 import { DirtyDiffNavigator } from './dirty-diff/dirty-diff-navigator';
+import { MonacoDiffEditor } from '@theia/monaco/lib/browser/monaco-diff-editor';
 
 export const SCM_WIDGET_FACTORY_ID = ScmWidget.ID;
 export const SCM_VIEW_CONTAINER_ID = 'scm-view-container';
@@ -95,12 +97,14 @@ export namespace SCM_COMMANDS {
     export const GOTO_NEXT_CHANGE = Command.toDefaultLocalizedCommand({
         id: 'workbench.action.editor.nextChange',
         category: 'Source Control',
-        label: 'Go to Next Change'
+        label: 'Go to Next Change',
+        iconClass: codicon('arrow-down')
     });
     export const GOTO_PREVIOUS_CHANGE = Command.toDefaultLocalizedCommand({
         id: 'workbench.action.editor.previousChange',
         category: 'Source Control',
-        label: 'Go to Previous Change'
+        label: 'Go to Previous Change',
+        iconClass: codicon('arrow-up')
     });
     export const SHOW_NEXT_CHANGE = Command.toDefaultLocalizedCommand({
         id: 'editor.action.dirtydiff.next',
@@ -139,6 +143,7 @@ export class ScmContribution extends AbstractViewContribution<ScmWidget> impleme
     @inject(ContextKeyService) protected readonly contextKeys: ContextKeyService;
     @inject(ScmDecorationsService) protected readonly scmDecorationsService: ScmDecorationsService;
     @inject(DirtyDiffNavigator) protected readonly dirtyDiffNavigator: DirtyDiffNavigator;
+    @inject(ScmContextKeyService) protected readonly scmContextKeys: ScmContextKeyService;
 
     protected scmFocus: ContextKey<boolean>;
 
@@ -167,8 +172,9 @@ export class ScmContribution extends AbstractViewContribution<ScmWidget> impleme
 
     onStart(): void {
         this.updateStatusBar();
-        this.scmService.onDidAddRepository(() => this.updateStatusBar());
-        this.scmService.onDidRemoveRepository(() => this.updateStatusBar());
+        this.updateScmProviderCount();
+        this.scmService.onDidAddRepository(() => { this.updateStatusBar(); this.updateScmProviderCount(); });
+        this.scmService.onDidRemoveRepository(() => { this.updateStatusBar(); this.updateScmProviderCount(); });
         this.scmService.onDidChangeSelectedRepository(() => this.updateStatusBar());
         this.scmService.onDidChangeStatusBarCommands(() => this.updateStatusBar());
         this.labelProvider.onDidChange(() => this.updateStatusBar());
@@ -181,6 +187,10 @@ export class ScmContribution extends AbstractViewContribution<ScmWidget> impleme
 
     protected updateContextKeys(): void {
         this.scmFocus.set(this.shell.currentWidget instanceof ScmWidget);
+    }
+
+    protected updateScmProviderCount(): void {
+        this.scmContextKeys.scmProviderCount.set(this.scmService.repositories.length);
     }
 
     override registerCommands(commandRegistry: CommandRegistry): void {
@@ -198,10 +208,36 @@ export class ScmContribution extends AbstractViewContribution<ScmWidget> impleme
         // This is consistent with behavior in VS Code, and also with other similar commands (such as `Next Problem/Previous Problem`) in Theia.
         // See https://github.com/eclipse-theia/theia/pull/13104#discussion_r1497316614 for a detailed discussion.
         commandRegistry.registerCommand(SCM_COMMANDS.GOTO_NEXT_CHANGE, {
-            execute: () => this.dirtyDiffNavigator.gotoNextChange()
+            execute: widget => {
+                if (widget instanceof EditorWidget && widget.editor instanceof MonacoDiffEditor) {
+                    widget.editor.diffNavigator.next();
+                    widget.activate();
+                } else {
+                    this.dirtyDiffNavigator.gotoNextChange();
+                }
+            },
+            isEnabled: widget => {
+                if (widget instanceof EditorWidget && widget.editor instanceof MonacoDiffEditor) {
+                    return widget.editor.diffNavigator.hasNext();
+                }
+                return true;
+            }
         });
         commandRegistry.registerCommand(SCM_COMMANDS.GOTO_PREVIOUS_CHANGE, {
-            execute: () => this.dirtyDiffNavigator.gotoPreviousChange()
+            execute: widget => {
+                if (widget instanceof EditorWidget && widget.editor instanceof MonacoDiffEditor) {
+                    widget.editor.diffNavigator.previous();
+                    widget.activate();
+                } else {
+                    this.dirtyDiffNavigator.gotoPreviousChange();
+                }
+            },
+            isEnabled: widget => {
+                if (widget instanceof EditorWidget && widget.editor instanceof MonacoDiffEditor) {
+                    return widget.editor.diffNavigator.hasPrevious();
+                }
+                return true;
+            }
         });
         commandRegistry.registerCommand(SCM_COMMANDS.SHOW_NEXT_CHANGE, {
             execute: () => this.dirtyDiffNavigator.showNextChange()
@@ -232,7 +268,7 @@ export class ScmContribution extends AbstractViewContribution<ScmWidget> impleme
         const viewModeEmitter = new Emitter<void>();
         const registerToggleViewItem = (command: Command, mode: 'tree' | 'list') => {
             const id = command.id;
-            const item: TabBarToolbarItem = {
+            const item: TabBarToolbarAction = {
                 id,
                 command: id,
                 tooltip: command.label,
@@ -270,6 +306,18 @@ export class ScmContribution extends AbstractViewContribution<ScmWidget> impleme
                 }
                 return false;
             }
+        });
+
+        registry.registerItem({
+            id: SCM_COMMANDS.GOTO_PREVIOUS_CHANGE.id,
+            command: SCM_COMMANDS.GOTO_PREVIOUS_CHANGE.id,
+            isVisible: widget => widget instanceof EditorWidget && widget.editor instanceof MonacoDiffEditor,
+        });
+
+        registry.registerItem({
+            id: SCM_COMMANDS.GOTO_NEXT_CHANGE.id,
+            command: SCM_COMMANDS.GOTO_NEXT_CHANGE.id,
+            isVisible: widget => widget instanceof EditorWidget && widget.editor instanceof MonacoDiffEditor,
         });
 
         registry.registerItem({
@@ -363,6 +411,147 @@ export class ScmContribution extends AbstractViewContribution<ScmWidget> impleme
      */
     registerColors(colors: ColorRegistry): void {
         colors.register(
+            // SCM Graph lane colors (matching VS Code's scm.graph.* color IDs)
+            {
+                id: 'scmGraph.historyItemHoverDefaultLabelForeground',
+                defaults: {
+                    dark: '#0078d4',
+                    light: '#0078d4',
+                    hcDark: '#0078d4',
+                    hcLight: '#0078d4'
+                },
+                description: 'Default foreground color for history item labels in the SCM history graph on hover.'
+            },
+            {
+                id: 'scmGraph.historyItemHoverAdditionsForeground',
+                defaults: {
+                    dark: '#81b88b',
+                    light: '#388a34',
+                    hcDark: '#81b88b',
+                    hcLight: '#388a34'
+                },
+                description: 'Foreground color for additions in the SCM history graph on hover.'
+            },
+            {
+                id: 'scmGraph.historyItemHoverDeletionsForeground',
+                defaults: {
+                    dark: '#c74e39',
+                    light: '#a1260d',
+                    hcDark: '#c74e39',
+                    hcLight: '#a1260d'
+                },
+                description: 'Foreground color for deletions in the SCM history graph on hover.'
+            },
+            {
+                id: 'scmGraph.historyItemHoverLabelForeground',
+                defaults: {
+                    dark: '#e2e2e2',
+                    light: '#3b3b3b',
+                    hcDark: '#ffffff',
+                    hcLight: '#000000'
+                },
+                description: 'Foreground color for labels in the SCM history graph on hover.'
+            },
+            {
+                id: 'scmGraph.historyItemRefForeground',
+                defaults: {
+                    dark: '#ffffff',
+                    light: '#ffffff',
+                    hcDark: '#ffffff',
+                    hcLight: '#ffffff'
+                },
+                description: 'Foreground color for ref badge labels in the SCM history graph.'
+            },
+            {
+                id: 'scmGraph.historyItemRefColor',
+                defaults: {
+                    dark: '#0078d4',
+                    light: '#0078d4',
+                    hcDark: '#0078d4',
+                    hcLight: '#0078d4'
+                },
+                description: 'Color for ref labels in the SCM history graph.'
+            },
+            {
+                id: 'scmGraph.historyItemRemoteRefColor',
+                defaults: {
+                    dark: '#b267e6',
+                    light: '#8b009b',
+                    hcDark: '#b267e6',
+                    hcLight: '#8b009b'
+                },
+                description: 'Color for remote ref labels in the SCM history graph.'
+            },
+            {
+                id: 'scmGraph.historyItemTagRefColor',
+                defaults: {
+                    dark: '#d7ba7d',
+                    light: '#8d6914',
+                    hcDark: '#d7ba7d',
+                    hcLight: '#8d6914'
+                },
+                description: 'Color for tag ref labels in the SCM history graph.'
+            },
+            {
+                id: 'scmGraph.historyItemBaseRefColor',
+                defaults: {
+                    dark: '#a1260d',
+                    light: '#a1260d',
+                    hcDark: '#a1260d',
+                    hcLight: '#a1260d'
+                },
+                description: 'Color for base ref labels in the SCM history graph.'
+            },
+            {
+                id: 'scmGraph.foreground1',
+                defaults: {
+                    dark: '#ffb000',
+                    light: '#ffb000',
+                    hcDark: '#ffb000',
+                    hcLight: '#ffb000'
+                },
+                description: 'Foreground color 1 for additional lanes in the SCM history graph.'
+            },
+            {
+                id: 'scmGraph.foreground2',
+                defaults: {
+                    dark: '#dc267f',
+                    light: '#dc267f',
+                    hcDark: '#dc267f',
+                    hcLight: '#dc267f'
+                },
+                description: 'Foreground color 2 for additional lanes in the SCM history graph.'
+            },
+            {
+                id: 'scmGraph.foreground3',
+                defaults: {
+                    dark: '#994f00',
+                    light: '#994f00',
+                    hcDark: '#994f00',
+                    hcLight: '#994f00'
+                },
+                description: 'Foreground color 3 for additional lanes in the SCM history graph.'
+            },
+            {
+                id: 'scmGraph.foreground4',
+                defaults: {
+                    dark: '#40b0a6',
+                    light: '#40b0a6',
+                    hcDark: '#40b0a6',
+                    hcLight: '#40b0a6'
+                },
+                description: 'Foreground color 4 for additional lanes in the SCM history graph.'
+            },
+            {
+                id: 'scmGraph.foreground5',
+                defaults: {
+                    dark: '#b66dff',
+                    light: '#b66dff',
+                    hcDark: '#b66dff',
+                    hcLight: '#b66dff'
+                },
+                description: 'Foreground color 5 for additional lanes in the SCM history graph.'
+            },
             {
                 id: ScmColors.editorGutterModifiedBackground, defaults: {
                     dark: '#1B81A8',
@@ -434,6 +623,22 @@ export class ScmContribution extends AbstractViewContribution<ScmWidget> impleme
                     hcDark: Color.transparent(ScmColors.editorGutterDeletedBackground, 0.6),
                     hcLight: Color.transparent(ScmColors.editorGutterDeletedBackground, 0.6)
                 }, description: 'Overview ruler marker color for deleted content.'
+            },
+            {
+                id: 'scmGraph.historyItemHoverAdditionsForeground', defaults: {
+                    dark: '#81B88B',
+                    light: '#587C0C',
+                    hcDark: '#A1E3AD',
+                    hcLight: '#374E06'
+                }, description: 'History item hover additions foreground color.'
+            },
+            {
+                id: 'scmGraph.historyItemHoverDeletionsForeground', defaults: {
+                    dark: '#C74E39',
+                    light: '#AD0707',
+                    hcDark: '#C74E39',
+                    hcLight: '#AD0707'
+                }, description: 'History item hover deletions foreground color.'
             }
         );
     }

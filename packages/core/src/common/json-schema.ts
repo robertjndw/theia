@@ -14,7 +14,7 @@
 // SPDX-License-Identifier: EPL-2.0 OR GPL-2.0-only WITH Classpath-exception-2.0
 // *****************************************************************************
 
-import { JSONValue } from '@phosphor/coreutils';
+import { JSONValue } from '@lumino/coreutils';
 
 export type JsonType = 'string' | 'array' | 'number' | 'integer' | 'object' | 'boolean' | 'null';
 
@@ -87,6 +87,7 @@ export interface IJSONSchema {
     errorMessage?: string; // VSCode extension
     patternErrorMessage?: string; // VSCode extension
     deprecationMessage?: string; // VSCode extension
+    markdownDeprecationMessage?: string; // VS code extension
     enumItemLabels?: string[]; // VSCode extension
     enumDescriptions?: string[]; // VSCode extension
     markdownEnumDescriptions?: string[]; // VSCode extension

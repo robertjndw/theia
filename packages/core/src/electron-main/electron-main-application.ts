@@ -30,22 +30,30 @@ import URI from '../common/uri';
 import { FileUri } from '../common/file-uri';
 import { Deferred, timeout } from '../common/promise-util';
 import { MaybePromise } from '../common/types';
+import { Stopwatch } from '../common/performance';
 import { ContributionProvider } from '../common/contribution-provider';
 import { ElectronSecurityTokenService } from './electron-security-token-service';
 import { ElectronSecurityToken } from '../electron-common/electron-token';
 import Storage = require('electron-store');
 import { CancellationTokenSource, Disposable, DisposableCollection, Path, isOSX, isWindows } from '../common';
 import { DEFAULT_WINDOW_HASH, WindowSearchParams } from '../common/window';
+import { LaunchArguments } from '../common/launch-arguments';
+import { LaunchArgvParser } from './launch-argv-parser';
+import { LaunchArgsStore } from './launch-args-store';
 import { TheiaBrowserWindowOptions, TheiaElectronWindow, TheiaElectronWindowFactory } from './theia-electron-window';
 import { ElectronMainApplicationGlobals } from './electron-main-constants';
 import { createDisposableListener } from './event-utils';
 import { TheiaRendererAPI } from './electron-api-main';
 import { StopReason } from '../common/frontend-application-state';
 import { dynamicRequire } from '../node/dynamic-require';
+import { ThemeMode } from '../common/theme';
+import { backendGlobal } from '../node/backend-global';
 
 export { ElectronMainApplicationGlobals };
 
 const createYargs: (argv?: string[], cwd?: string) => Argv = require('yargs/yargs');
+
+const ELECTRON_TIMER_WARNING_THRESHOLD = 50;
 
 /**
  * Options passed to the main/default command handler.
@@ -64,6 +72,25 @@ export interface ElectronMainCommandOptions {
      * If the app is already running but user relaunches it, `secondInstance` is true.
      */
     readonly secondInstance: boolean;
+
+    /**
+     * The parsed CLI options of a forwarded launch. Set for `second-instance` launches so that
+     * per-window options (e.g. `--attach-container`, `--session-preference`) are carried to the
+     * newly created window rather than being dropped.
+     *
+     * @experimental
+     */
+    readonly launchArgs?: LaunchArguments;
+
+    /**
+     * Whether an {@link ElectronMainApplicationContribution} has *claimed* this launch via its
+     * `claimsWindow` hook (e.g. a `--attach-container` launch claimed by `@theia/dev-container`).
+     * When set, an empty window is opened instead of restoring the last workspace, since the window
+     * is about to be replaced by whatever the claiming contribution attaches to.
+     *
+     * @experimental
+     */
+    readonly claimed?: boolean;
 }
 
 /**
@@ -98,6 +125,17 @@ export interface ElectronMainApplicationContribution {
      * The application is stopping. Contributions must perform only synchronous operations.
      */
     onStop?(application: ElectronMainApplication): void;
+    /**
+     * Whether this contribution *claims* responsibility for a window opened for the given launch,
+     * e.g. a `--attach-container` launch claimed by `@theia/dev-container`. A claimed launch opens
+     * an empty window rather than restoring the last workspace, since the window is about to be
+     * replaced by whatever the claiming contribution attaches to. Core itself stays agnostic of the
+     * concrete CLI options. The frontend receives the same options (see `LaunchArgsStore`), so the
+     * corresponding frontend contribution can show a placeholder from the first paint.
+     *
+     * @experimental
+     */
+    claimsWindow?(args: LaunchArguments): MaybePromise<boolean>;
 }
 
 // Extracted and modified the functionality from `yargs@15.4.0-beta.0`.
@@ -169,6 +207,12 @@ export class ElectronMainApplication {
     @inject(TheiaElectronWindowFactory)
     protected readonly windowFactory: TheiaElectronWindowFactory;
 
+    @inject(Stopwatch)
+    protected readonly stopwatch: Stopwatch;
+
+    @inject(LaunchArgsStore)
+    protected readonly launchArgsStore: LaunchArgsStore;
+
     protected isPortable = this.makePortable();
 
     protected readonly electronStore = new Storage<{
@@ -227,20 +271,29 @@ export class ElectronMainApplication {
                         await fs.mkdir(args.electronUserData, { recursive: true });
                         app.setPath('userData', args.electronUserData);
                     }
+                    const startupMeasurement = this.stopwatch.start('electron-main-startup');
                     this.useNativeWindowFrame = this.getTitleBarStyle(config) === 'native';
                     this._config = config;
+                    if (isWindows && !!config.electron.appUserModelId) {
+                        app.setAppUserModelId(config.electron.appUserModelId);
+                    }
                     this.hookApplicationEvents();
                     this.showInitialWindow(argv.includes('--open-url') ? argv[argv.length - 1] : undefined);
-                    const port = await this.startBackend();
+                    const port = await this.stopwatch.startAsync('electron-main-start-backend', 'Starting backend', () => this.startBackend());
                     this._backendPort.resolve(port);
                     await app.whenReady();
-                    await this.attachElectronSecurityToken(port);
-                    await this.startContributions();
+                    await this.stopwatch.startAsync('electron-main-security-token', 'Attaching security token',
+                        () => this.attachElectronSecurityToken(port));
+                    await this.stopwatch.startAsync('electron-main-start-contributions', 'Starting contributions',
+                        () => this.startContributions());
+                    startupMeasurement.info('Startup sequence completed');
 
+                    const launchArgs = LaunchArgvParser.parse(argv);
                     this.handleMainCommand({
                         file: args.file,
                         cwd: process.cwd(),
-                        secondInstance: false
+                        secondInstance: false,
+                        claimed: await this.isWindowClaimed(launchArgs)
                     });
                 },
             ).parse();
@@ -275,6 +328,10 @@ export class ElectronMainApplication {
         BrowserWindow.fromWebContents(webContents)?.setBackgroundColor(backgroundColor);
         this.customBackgroundColor = backgroundColor;
         this.saveState(webContents);
+    }
+
+    public setTheme(theme: ThemeMode): void {
+        nativeTheme.themeSource = theme;
     }
 
     protected saveState(webContents: Electron.WebContents): void {
@@ -378,6 +435,8 @@ export class ElectronMainApplication {
         const cancelTokenSource = new CancellationTokenSource();
         const minTime = timeout(splashScreenOptions.minDuration ?? 0, cancelTokenSource.token);
         const maxTime = timeout(splashScreenOptions.maxDuration ?? 30000, cancelTokenSource.token);
+        // Swallow rejections that occur when the cancellation token is cancelled after one of the timers wins.
+        const ignoreCancellation = () => { /* timer was cancelled, intentionally ignored */ };
 
         const showWindowAndCloseSplashScreen = () => {
             cancelTokenSource.cancel();
@@ -388,15 +447,15 @@ export class ElectronMainApplication {
         };
         TheiaRendererAPI.onApplicationStateChanged(mainWindow.webContents, state => {
             if (state === 'ready') {
-                minTime.then(() => showWindowAndCloseSplashScreen());
+                minTime.then(() => showWindowAndCloseSplashScreen(), ignoreCancellation);
             }
         });
-        maxTime.then(() => showWindowAndCloseSplashScreen());
+        maxTime.then(() => showWindowAndCloseSplashScreen(), ignoreCancellation);
         return splashScreenWindow;
     }
 
     protected isShowSplashScreen(): boolean {
-        return typeof this.config.electron.splashScreenOptions === 'object' && !!this.config.electron.splashScreenOptions.content;
+        return !process.env.THEIA_NO_SPLASH && typeof this.config.electron.splashScreenOptions === 'object' && !!this.config.electron.splashScreenOptions.content;
     }
 
     protected getSplashScreenOptions(): ElectronFrontendApplicationConfig.SplashScreenOptions | undefined {
@@ -424,6 +483,7 @@ export class ElectronMainApplication {
                 this.activeWindowStack.splice(stackIndex, 1);
             }
             this.windows.delete(id);
+            this.launchArgsStore.delete(id);
         });
         electronWindow.window.on('maximize', () => TheiaRendererAPI.sendWindowEvent(electronWindow.window.webContents, 'maximize'));
         electronWindow.window.on('unmaximize', () => TheiaRendererAPI.sendWindowEvent(electronWindow.window.webContents, 'unmaximize'));
@@ -445,11 +505,17 @@ export class ElectronMainApplication {
         const windowState = previousWindowState?.screenLayout === this.getCurrentScreenLayout()
             ? previousWindowState
             : this.getDefaultTheiaWindowOptions();
-        return {
+        const result = {
             frame: this.useNativeWindowFrame,
             ...this.getDefaultOptions(),
             ...windowState
         };
+
+        result.webPreferences = {
+            ...result.webPreferences,
+            preload: path.resolve(this.globals.THEIA_APP_PROJECT_PATH, 'lib', 'frontend', 'preload.js').toString()
+        };
+        return result;
     }
 
     protected avoidOverlap(options: TheiaBrowserWindowOptions): TheiaBrowserWindowOptions {
@@ -484,24 +550,46 @@ export class ElectronMainApplication {
                 // Issue: https://github.com/eclipse-theia/theia/issues/8577
                 nodeIntegrationInWorker: false,
                 backgroundThrottling: false,
-                preload: path.resolve(this.globals.THEIA_APP_PROJECT_PATH, 'lib', 'frontend', 'preload.js').toString()
+                enableDeprecatedPaste: true
             },
             ...this.config.electron?.windowOptions || {},
         };
     }
 
-    async openDefaultWindow(params?: WindowSearchParams): Promise<BrowserWindow> {
+    closeWindowById(webContentsId: number): void {
+        const window = this.windows.get(webContentsId);
+        if (window) {
+            window.close(StopReason.Close);
+        }
+    }
+
+    async openDefaultWindow(params?: WindowSearchParams, launchArgs?: LaunchArguments): Promise<BrowserWindow> {
         const options = this.getDefaultTheiaWindowOptions();
         const [uri, electronWindow] = await Promise.all([this.createWindowUri(params), this.reuseOrCreateWindow(options)]);
+        this.stashLaunchArgs(electronWindow, launchArgs);
         electronWindow.loadURL(uri.withFragment(DEFAULT_WINDOW_HASH).toString(true));
         return electronWindow;
     }
 
-    protected async openWindowWithWorkspace(workspacePath: string): Promise<BrowserWindow> {
+    protected async openWindowWithWorkspace(workspacePath: string, launchArgs?: LaunchArguments): Promise<BrowserWindow> {
         const options = await this.getLastWindowOptions();
         const [uri, electronWindow] = await Promise.all([this.createWindowUri(), this.reuseOrCreateWindow(options)]);
+        this.stashLaunchArgs(electronWindow, launchArgs);
         electronWindow.loadURL(uri.withFragment(encodeURI(workspacePath)).toString(true));
         return electronWindow;
+    }
+
+    /**
+     * Associates the parsed options of a forwarded launch with the target window before it loads its
+     * URL, so that the preload script cannot ask for them before they are stored. No-op for a
+     * cold-start launch, which carries none.
+     *
+     * @experimental
+     */
+    protected stashLaunchArgs(window: BrowserWindow, launchArgs?: LaunchArguments): void {
+        if (launchArgs) {
+            this.launchArgsStore.store(window.webContents.id, launchArgs);
+        }
     }
 
     protected async reuseOrCreateWindow(asyncOptions: MaybePromise<TheiaBrowserWindowOptions>): Promise<BrowserWindow> {
@@ -522,23 +610,58 @@ export class ElectronMainApplication {
     }
 
     protected async handleMainCommand(options: ElectronMainCommandOptions): Promise<void> {
-        if (options.secondInstance === false) {
-            await this.openWindowWithWorkspace(''); // restore previous workspace.
-        } else if (options.file === undefined) {
-            await this.openDefaultWindow();
-        } else {
-            let workspacePath: string | undefined;
+        // A claimed launch (e.g. a CLI attach) opens an empty window rather than restoring the last
+        // workspace: the local workbench would only be discarded when the window reloads into the
+        // claimed target, so loading a real workspace behind the placeholder wastes work and can
+        // trigger side effects.
+        if (options.claimed) {
+            await this.openDefaultWindow(undefined, options.launchArgs);
+            return;
+        }
+        let workspacePath: string | undefined;
+        if (options.file) {
             try {
                 workspacePath = await fs.realpath(path.resolve(options.cwd, options.file));
             } catch {
                 console.error(`Could not resolve the workspace path. "${options.file}" is not a valid 'file' option. Falling back to the default workspace location.`);
             }
-            if (workspacePath === undefined) {
-                await this.openDefaultWindow();
-            } else {
-                await this.openWindowWithWorkspace(workspacePath);
+        }
+        if (workspacePath !== undefined) {
+            await this.openWindowWithWorkspace(workspacePath, options.launchArgs);
+        } else {
+            if (options.secondInstance === false) {
+                await this.openWindowWithWorkspace('', options.launchArgs); // restore previous workspace.
+            } else if (options.file === undefined) {
+                await this.openDefaultWindow(undefined, options.launchArgs);
             }
         }
+    }
+
+    /**
+     * Returns the parsed launch options stored for the window with the given `webContents` id, or
+     * `undefined` for a cold-start window. Read from the per-window metadata channel, where the
+     * caller is identified by the IPC sender, so a window can only ever see its own options.
+     *
+     * @experimental
+     */
+    getLaunchArgs(windowId: number): LaunchArguments | undefined {
+        return this.launchArgsStore.get(windowId);
+    }
+
+    /**
+     * Whether any {@link ElectronMainApplicationContribution} claims responsibility for a window
+     * opened for the given launch (see its `claimsWindow` hook). Core stays agnostic of the concrete
+     * CLI options; e.g. `@theia/dev-container` claims `--attach-container` launches.
+     *
+     * @experimental
+     */
+    protected async isWindowClaimed(args: LaunchArguments): Promise<boolean> {
+        for (const contribution of this.contributions.getContributions()) {
+            if (await contribution.claimsWindow?.(args)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     async openUrl(url: string): Promise<void> {
@@ -560,13 +683,18 @@ export class ElectronMainApplication {
     }
 
     protected getDefaultTheiaWindowOptions(): TheiaBrowserWindowOptions {
-        return {
+        const result = {
             frame: this.useNativeWindowFrame,
             isFullScreen: false,
             isMaximized: false,
             ...this.getDefaultTheiaWindowBounds(),
-            ...this.getDefaultOptions()
+            ...this.getDefaultOptions(),
         };
+        result.webPreferences = {
+            ...result.webPreferences || {},
+            preload: path.resolve(this.globals.THEIA_APP_PROJECT_PATH, 'lib', 'frontend', 'preload.js').toString()
+        };
+        return result;
     }
 
     protected getDefaultTheiaSecondaryWindowBounds(): TheiaBrowserWindowOptions {
@@ -574,11 +702,9 @@ export class ElectronMainApplication {
     }
 
     protected getDefaultTheiaWindowBounds(): TheiaBrowserWindowOptions {
-        // The `screen` API must be required when the application is ready.
-        // See: https://electronjs.org/docs/api/screen#screen
+        const { bounds } = this.getDisplayForNewWindow();
         // We must center by hand because `browserWindow.center()` fails on multi-screen setups
         // See: https://github.com/electron/electron/issues/3490
-        const { bounds } = screen.getDisplayNearestPoint(screen.getCursorScreenPoint());
         const height = Math.round(bounds.height * (2 / 3));
         const width = Math.round(bounds.width * (2 / 3));
         const y = Math.round(bounds.y + (bounds.height - height) / 2);
@@ -589,6 +715,52 @@ export class ElectronMainApplication {
             x,
             y
         };
+    }
+
+    /**
+     * Returns the display where a new window should be opened.
+     * Attempts to use the display nearest to the cursor position for multi-monitor setups.
+     * Falls back to the primary display if cursor position cannot be determined
+     * (e.g., on Wayland before any window is opened).
+     * See: https://github.com/eclipse-theia/theia/issues/16582
+     */
+    protected getDisplayForNewWindow(): Electron.Display {
+        // On Wayland, screen.getCursorScreenPoint() causes a native crash (SIGSEGV)
+        // before any window is opened. Detect Wayland and use primary display instead.
+        if (this.isWaylandSession()) {
+            console.debug('Running under Wayland, using primary display for new window.');
+            return screen.getPrimaryDisplay();
+        }
+        try {
+            return screen.getDisplayNearestPoint(screen.getCursorScreenPoint());
+        } catch (error) {
+            console.warn('Failed to get cursor screen point, falling back to primary display.', error);
+            return screen.getPrimaryDisplay();
+        }
+    }
+
+    /**
+     * Detects if the current session is running natively under Wayland
+     * (i.e., not using X11 fallback/XWayland).
+     */
+    protected isWaylandSession(): boolean {
+        if (process.platform !== 'linux') {
+            return false;
+        }
+
+        // Primary check: WAYLAND_DISPLAY is set when a Wayland compositor is running
+        const hasWaylandDisplay = !!process.env.WAYLAND_DISPLAY;
+
+        // Secondary check: XDG_SESSION_TYPE explicitly set to 'wayland'
+        const isWaylandSession = process.env.XDG_SESSION_TYPE === 'wayland';
+
+        // Check whether X11 fallback is in use
+        const usingX11Fallback =
+            process.env.GDK_BACKEND?.includes('x11') ||
+            process.env.ELECTRON_OZONE_PLATFORM_HINT === 'x11' ||
+            process.argv.includes('--ozone-platform=x11');
+
+        return (hasWaylandDisplay || isWaylandSession) && !usingX11Fallback;
     }
 
     /**
@@ -659,10 +831,12 @@ export class ElectronMainApplication {
         process.env.THEIA_ELECTRON_VERSION = process.versions.electron;
         if (noBackendFork) {
             process.env[ElectronSecurityToken] = JSON.stringify(this.electronSecurityToken);
-            // The backend server main file is supposed to export a promise resolving with the port used by the http(s) server.
+            // The backend server main file is supposed put a promise resolving with the port used by the http(s) server into the global object.
             dynamicRequire(this.globals.THEIA_BACKEND_MAIN_PATH);
-            // @ts-expect-error
-            const address: AddressInfo = await globalThis.serverAddress;
+            const address = await backendGlobal.serverAddress;
+            if (!address) {
+                throw new Error('The backend server did not start correctly.');
+            }
             return address.port;
         } else {
             const backendProcess = fork(
@@ -741,20 +915,27 @@ export class ElectronMainApplication {
         this.stopContributions();
     }
 
-    protected async onSecondInstance(event: ElectronEvent, argv: string[], cwd: string): Promise<void> {
-        if (argv.includes('--open-url')) {
-            this.openUrl(argv[argv.length - 1]);
+    protected async onSecondInstance(event: ElectronEvent, _: string[], cwd: string, originalArgv: string[]): Promise<void> {
+        // the second instance passes it's original argument array as the fourth argument to this method
+        // The `argv` second parameter is not usable for us since it is mangled by electron before being passed here
+
+        if (originalArgv.includes('--open-url')) {
+            this.openUrl(originalArgv[originalArgv.length - 1]);
         } else {
-            createYargs(this.processArgv.getProcessArgvWithoutBin(argv), process.cwd())
+            const argv = this.processArgv.getProcessArgvWithoutBin(originalArgv);
+            createYargs(argv, cwd)
                 .help(false)
                 .command('$0 [file]', false,
                     cmd => cmd
                         .positional('file', { type: 'string' }),
                     async args => {
+                        const launchArgs = LaunchArgvParser.parse(argv);
                         await this.handleMainCommand({
                             file: args.file,
-                            cwd: process.cwd(),
-                            secondInstance: true
+                            cwd: cwd,
+                            secondInstance: true,
+                            launchArgs,
+                            claimed: await this.isWindowClaimed(launchArgs)
                         });
                     },
                 ).parse();
@@ -772,16 +953,20 @@ export class ElectronMainApplication {
         webContents.setWindowOpenHandler(details => {
             // if it's a secondary window, allow it to open
             if (new URI(details.url).path.fsPath() === new Path(this.globals.THEIA_SECONDARY_WINDOW_HTML_PATH).fsPath()) {
-                const { minWidth, minHeight } = this.getDefaultOptions();
+                const defaultOptions = this.getDefaultOptions();
                 const options: BrowserWindowConstructorOptions = {
                     ...this.getDefaultTheiaSecondaryWindowBounds(),
                     // We always need the native window frame for now because the secondary window does not have Theia's title bar by default.
                     // In 'custom' title bar mode this would leave the window without any window controls (close, min, max)
                     // TODO set to this.useNativeWindowFrame when secondary windows support a custom title bar.
                     frame: true,
-                    minWidth,
-                    minHeight
+                    minWidth: defaultOptions.minWidth,
+                    minHeight: defaultOptions.minHeight,
+                    webPreferences: {
+                        enableDeprecatedPaste: defaultOptions.webPreferences?.enableDeprecatedPaste
+                    }
                 };
+
                 if (!this.useNativeWindowFrame) {
                     // If the main window does not have a native window frame, do not show  an icon in the secondary window's native title bar.
                     // The data url is a 1x1 transparent png
@@ -843,8 +1028,14 @@ export class ElectronMainApplication {
     protected async startContributions(): Promise<void> {
         const promises = [];
         for (const contribution of this.contributions.getContributions()) {
-            if (contribution.onStart) {
-                promises.push(contribution.onStart(this));
+            const onStart = contribution.onStart;
+            if (onStart) {
+                promises.push(this.stopwatch.startAsync(
+                    `${contribution.constructor.name}.onStart`,
+                    `${contribution.constructor.name}.onStart`,
+                    () => onStart.call(contribution, this),
+                    { thresholdMillis: ELECTRON_TIMER_WARNING_THRESHOLD }
+                ));
             }
         }
         await Promise.all(promises);

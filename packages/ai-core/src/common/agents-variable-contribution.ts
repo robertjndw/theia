@@ -15,13 +15,14 @@
 // *****************************************************************************
 import { inject, injectable } from '@theia/core/shared/inversify';
 import { AIVariable, AIVariableContext, AIVariableContribution, AIVariableResolutionRequest, AIVariableResolver, AIVariableService, ResolvedAIVariable } from './variable-service';
-import { MaybePromise } from '@theia/core';
+import { MaybePromise, nls } from '@theia/core';
 import { AgentService } from './agent-service';
+import { Agent } from './agent';
 
 export const AGENTS_VARIABLE: AIVariable = {
     id: 'agents',
     name: 'agents',
-    description: 'Returns the list of agents available in the system'
+    description: nls.localize('theia/ai/core/agentsVariable/description', 'Returns the list of agents available in the system')
 };
 
 export interface ResolvedAgentsVariable extends ResolvedAIVariable {
@@ -53,12 +54,16 @@ export class AgentsVariableContribution implements AIVariableContribution, AIVar
 
     async resolve(request: AIVariableResolutionRequest, context: AIVariableContext): Promise<ResolvedAgentsVariable | undefined> {
         if (request.variable.name === AGENTS_VARIABLE.name) {
-            const agents = this.agentService.getAgents().map(agent => ({
-                id: agent.id,
-                name: agent.name,
-                description: agent.description
-            }));
-            return { variable: AGENTS_VARIABLE, agents, value: JSON.stringify(agents) };
+            return this.resolveAgentsVariable(this.agentService.getAgents(), AGENTS_VARIABLE);
         }
+    }
+
+    resolveAgentsVariable(includedAgents: Agent[], variable: AIVariable): ResolvedAgentsVariable {
+        const agents = includedAgents.map(agent => ({
+            id: agent.id,
+            name: agent.name,
+            description: agent.description
+        }));
+        return { variable, agents, value: JSON.stringify(agents) };
     }
 }

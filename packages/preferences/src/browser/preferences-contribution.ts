@@ -14,28 +14,23 @@
 // SPDX-License-Identifier: EPL-2.0 OR GPL-2.0-only WITH Classpath-exception-2.0
 // *****************************************************************************
 
-import { injectable, inject, named, optional } from '@theia/core/shared/inversify';
-import { MenuModelRegistry, CommandRegistry, nls } from '@theia/core';
+import { injectable, inject, optional } from '@theia/core/shared/inversify';
+import { MenuModelRegistry, CommandRegistry, nls, PreferenceScope, PreferenceService } from '@theia/core';
 import {
     CommonMenus,
     AbstractViewContribution,
     CommonCommands,
     KeybindingRegistry,
     Widget,
-    PreferenceScope,
-    PreferenceProvider,
-    PreferenceService,
     QuickInputService,
     QuickPickItem,
     isFirefox,
-    PreferenceSchemaProvider,
 } from '@theia/core/lib/browser';
 import { isOSX } from '@theia/core/lib/common/os';
 import { TabBarToolbarRegistry } from '@theia/core/lib/browser/shell/tab-bar-toolbar';
 import { EditorManager, EditorWidget } from '@theia/editor/lib/browser';
 import URI from '@theia/core/lib/common/uri';
 import { PreferencesWidget } from './views/preference-widget';
-import { WorkspacePreferenceProvider } from './workspace-preference-provider';
 import { Preference, PreferencesCommands, PreferenceMenus } from './util/preference-types';
 import { ClipboardService } from '@theia/core/lib/browser/clipboard-service';
 import { FileService } from '@theia/filesystem/lib/browser/file-service';
@@ -46,14 +41,11 @@ import { FileStat } from '@theia/filesystem/lib/common/files';
 export class PreferencesContribution extends AbstractViewContribution<PreferencesWidget> {
 
     @inject(FileService) protected readonly fileService: FileService;
-    @inject(PreferenceProvider) @named(PreferenceScope.Workspace) protected readonly workspacePreferenceProvider: WorkspacePreferenceProvider;
     @inject(EditorManager) protected readonly editorManager: EditorManager;
     @inject(PreferenceService) protected readonly preferenceService: PreferenceService;
     @inject(ClipboardService) protected readonly clipboardService: ClipboardService;
-    @inject(PreferencesWidget) protected readonly scopeTracker: PreferencesWidget;
     @inject(WorkspaceService) protected readonly workspaceService: WorkspaceService;
     @inject(QuickInputService) @optional() protected readonly quickInputService: QuickInputService;
-    @inject(PreferenceSchemaProvider) protected readonly schema: PreferenceSchemaProvider;
 
     constructor() {
         super({
@@ -63,6 +55,10 @@ export class PreferencesContribution extends AbstractViewContribution<Preference
                 area: 'main',
             },
         });
+    }
+
+    protected get currentScope(): Preference.SelectedScopeDetails {
+        return this.tryGetWidget()?.currentScope ?? Preference.DEFAULT_SCOPE;
     }
 
     override registerCommands(commands: CommandRegistry): void {
@@ -100,7 +96,8 @@ export class PreferencesContribution extends AbstractViewContribution<Preference
             isEnabled: Preference.EditorCommandArgs.is,
             isVisible: Preference.EditorCommandArgs.is,
             execute: ({ id }: Preference.EditorCommandArgs) => {
-                this.preferenceService.set(id, undefined, Number(this.scopeTracker.currentScope.scope), this.scopeTracker.currentScope.uri);
+                const { scope, uri } = this.currentScope;
+                return this.preferenceService.set(id, undefined, Number(scope), uri);
             }
         });
         commands.registerCommand(PreferencesCommands.OPEN_USER_PREFERENCES, {
@@ -120,9 +117,9 @@ export class PreferencesContribution extends AbstractViewContribution<Preference
         commands.registerCommand(PreferencesCommands.OPEN_FOLDER_PREFERENCES, {
             isEnabled: () => !!this.workspaceService.isMultiRootWorkspaceOpened && this.workspaceService.tryGetRoots().length > 0,
             isVisible: () => !!this.workspaceService.isMultiRootWorkspaceOpened && this.workspaceService.tryGetRoots().length > 0,
-            execute: () => this.openFolderPreferences(root => {
-                this.openView({ activate: true });
-                this.scopeTracker.setScope(root.resource);
+            execute: () => this.openFolderPreferences(async root => {
+                const widget = await this.openView({ activate: true });
+                widget.setScope(root.resource);
             })
         });
         commands.registerCommand(PreferencesCommands.OPEN_USER_PREFERENCES_JSON, {
@@ -185,7 +182,7 @@ export class PreferencesContribution extends AbstractViewContribution<Preference
     }
 
     protected async openPreferencesJSON(opener: string | PreferencesWidget): Promise<void> {
-        const { scope, activeScopeIsFolder, uri } = this.scopeTracker.currentScope;
+        const { scope, activeScopeIsFolder, uri } = this.currentScope;
         const scopeID = Number(scope);
         let preferenceId = '';
         if (typeof opener === 'string') {
@@ -224,7 +221,7 @@ export class PreferencesContribution extends AbstractViewContribution<Preference
     protected async openFolderPreferences(callback: (root: FileStat) => unknown): Promise<void> {
         const roots = this.workspaceService.tryGetRoots();
         if (roots.length === 1) {
-            callback(roots[0]);
+            await callback(roots[0]);
         } else {
             const items: QuickPickItem[] = roots.map(root => ({
                 label: root.name,

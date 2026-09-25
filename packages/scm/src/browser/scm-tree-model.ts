@@ -83,6 +83,9 @@ export abstract class ScmTreeModel extends TreeModelImpl {
     private _languageId: string | undefined;
 
     protected provider: ScmProvider | undefined;
+    get scmProvider(): ScmProvider | undefined {
+        return this.provider;
+    }
 
     @inject(TreeProps) protected readonly props: ScmTreeModelProps;
 
@@ -369,6 +372,7 @@ export abstract class ScmTreeModel extends TreeModelImpl {
 
         this.contextKeys.scmProvider.set(this.provider.id);
         this.contextKeys.scmResourceGroup.set(groupId);
+        this.contextKeys.scmResourceGroupState.set(this.findGroup(groupId)?.contextValue);
         try {
             callback();
         } finally {

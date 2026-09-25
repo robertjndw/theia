@@ -39,7 +39,7 @@ export const bindSampleToolbarContribution = (bind: interfaces.Bind, rebind: int
 
 export const FIND_IN_WORKSPACE_ROOT = {
     id: 'easy.search.find.in.workspace.root',
-    category: 'Search',
+    category: 'API Samples',
     label: 'Search Workspace Root for Text',
 };
 
@@ -91,6 +91,7 @@ export class SampleToolbarContribution extends AbstractToolbarContribution
                 includeAnchorArg: false,
                 menuPath: ToolbarMenus.SEARCH_WIDGET_DROPDOWN_MENU,
                 anchor: { x: left, y: bottom },
+                context: e.currentTarget
             });
         }
     }
@@ -103,7 +104,7 @@ export class SampleToolbarContribution extends AbstractToolbarContribution
                 className='icon-wrapper action-label item enabled codicon codicon-search'
                 id='easy-search-item-icon'
                 onClick={this.handleOnClick}
-                title='Search for files, text, commands, and more...'
+                title='API Samples: Search for files, text, commands, and more...'
             >
                 <div className='codicon codicon-triangle-down' />
             </div>);

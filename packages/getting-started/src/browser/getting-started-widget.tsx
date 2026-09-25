@@ -14,18 +14,24 @@
 // SPDX-License-Identifier: EPL-2.0 OR GPL-2.0-only WITH Classpath-exception-2.0
 // *****************************************************************************
 
-import { codicon, CommonCommands, Key, KeyCode, LabelProvider, Message, PreferenceService, ReactWidget } from '@theia/core/lib/browser';
+import { codicon, CommonCommands, Key, KeyCode, LabelProvider, Message, ReactWidget } from '@theia/core/lib/browser';
 import { FrontendApplicationConfigProvider } from '@theia/core/lib/browser/frontend-application-config-provider';
 import { WindowService } from '@theia/core/lib/browser/window/window-service';
-import { CommandRegistry, environment, isOSX, Path } from '@theia/core/lib/common';
+import { CommandRegistry, environment, isOSX, Path, PreferenceService } from '@theia/core/lib/common';
 import { ApplicationInfo, ApplicationServer } from '@theia/core/lib/common/application-protocol';
 import { EnvVariablesServer } from '@theia/core/lib/common/env-variables';
 import { nls } from '@theia/core/lib/common/nls';
 import URI from '@theia/core/lib/common/uri';
-import { inject, injectable, postConstruct } from '@theia/core/shared/inversify';
+import { inject, injectable, named, postConstruct } from '@theia/core/shared/inversify';
 import * as React from '@theia/core/shared/react';
 import { KeymapsCommands } from '@theia/keymaps/lib/browser';
 import { WorkspaceCommands, WorkspaceService } from '@theia/workspace/lib/browser';
+import { MarkdownRenderer } from '@theia/core/lib/browser/markdown-rendering/markdown-renderer';
+import { ThemeService } from '@theia/core/lib/browser/theming';
+import { ILogger } from '@theia/core/lib/common/logger';
+import { WalkthroughCommands } from '../common/walkthrough-commands';
+import { WalkthroughService } from './walkthrough-service';
+import { WalkthroughSection } from './walkthrough-section';
 
 /**
  * Default implementation of the `GettingStartedWidget`.
@@ -83,8 +89,7 @@ export class GettingStartedWidget extends ReactWidget {
     protected readonly compatibilityUrl = 'https://eclipse-theia.github.io/vscode-theia-comparator/status.html';
     protected readonly extensionUrl = 'https://www.theia-ide.org/docs/authoring_extensions';
     protected readonly pluginUrl = 'https://www.theia-ide.org/docs/authoring_plugins';
-    protected readonly theiaAIDocUrl = 'https://theia-ide.org/docs/user_ai/';
-    protected readonly ghProjectUrl = 'https://github.com/eclipse-theia/theia/issues/new/choose';
+    protected readonly dataUsageTelemetryUrl = 'https://theia-ide.org/docs/data_usage_telemetry/';
 
     @inject(ApplicationServer)
     protected readonly appServer: ApplicationServer;
@@ -107,16 +112,31 @@ export class GettingStartedWidget extends ReactWidget {
     @inject(PreferenceService)
     protected readonly preferenceService: PreferenceService;
 
+    @inject(MarkdownRenderer)
+    protected readonly markdownRenderer: MarkdownRenderer;
+
+    @inject(WalkthroughService)
+    protected readonly walkthroughService: WalkthroughService;
+
+    @inject(ThemeService)
+    protected readonly themeService: ThemeService;
+
+    @inject(ILogger) @named('getting-started:GettingStartedWidget')
+    protected readonly logger: ILogger;
+
     @postConstruct()
     protected init(): void {
+        // Subscribe before the asynchronous initialization so that a walkthrough selected right after
+        // the widget was created - e.g. by the `walkthrough.open` command - is not missed.
+        this.toDispose.push(this.walkthroughService.onDidChangeWalkthroughs(() => this.refresh()));
+        this.toDispose.push(this.walkthroughService.onDidChangeSelection(() => this.refresh()));
         this.doInit();
     }
 
     protected async doInit(): Promise<void> {
         this.id = GettingStartedWidget.ID;
-        this.title.label = GettingStartedWidget.LABEL;
-        this.title.caption = GettingStartedWidget.LABEL;
         this.title.closable = true;
+        this.updateTitle();
 
         this.applicationInfo = await this.appServer.getApplicationInfo();
         this.recentWorkspaces = await this.workspaceService.recentWorkspaces();
@@ -125,6 +145,24 @@ export class GettingStartedWidget extends ReactWidget {
         const extensions = await this.appServer.getExtensionsInfos();
         this.aiIsIncluded = extensions.find(ext => ext.name === '@theia/ai-core') !== undefined;
         this.update();
+    }
+
+    protected refresh(): void {
+        this.updateTitle();
+        this.update();
+    }
+
+    /**
+     * Name the widget after the walkthrough it currently shows, so that it can be told apart from the
+     * regular welcome content in the tab bar.
+     */
+    protected updateTitle(): void {
+        const walkthrough = this.walkthroughService.selectedWalkthrough;
+        const label = walkthrough
+            ? nls.localizeByDefault('Walkthrough: {0}', walkthrough.title)
+            : GettingStartedWidget.LABEL;
+        this.title.label = label;
+        this.title.caption = label;
     }
 
     protected override onActivateRequest(msg: Message): void {
@@ -139,44 +177,66 @@ export class GettingStartedWidget extends ReactWidget {
      * Render the content of the widget.
      */
     protected render(): React.ReactNode {
+        if (this.walkthroughService.selectedWalkthrough) {
+            return this.renderSelectedWalkthrough();
+        }
         return <div className='gs-container'>
             <div className='gs-content-container'>
-                {this.aiIsIncluded &&
-                    <div className='gs-float shadow-pulse'>
-                        {this.renderAIBanner()}
-                    </div>
-                }
                 {this.renderHeader()}
                 <hr className='gs-hr' />
-                <div className='flex-grid'>
-                    <div className='col'>
-                        {this.renderStart()}
+                {/* Two columns: what the user does with the application on the left, what there is to learn
+                    on the right. The right column collapses below the left one on narrow windows, and
+                    disappears entirely while no walkthrough is available. */}
+                <div className='gs-columns'>
+                    <div className='gs-main-column'>
+                        <div className='flex-grid'>
+                            <div className='col'>
+                                {this.renderStart()}
+                            </div>
+                        </div>
+                        <div className='flex-grid'>
+                            <div className='col'>
+                                {this.renderRecentWorkspaces()}
+                            </div>
+                        </div>
+                        <div className='flex-grid'>
+                            <div className='col'>
+                                {this.renderSettings()}
+                            </div>
+                        </div>
+                        <div className='flex-grid'>
+                            <div className='col'>
+                                {this.renderHelp()}
+                            </div>
+                        </div>
+                        <div className='flex-grid'>
+                            <div className='col'>
+                                {this.renderVersion()}
+                            </div>
+                        </div>
                     </div>
-                </div>
-                <div className='flex-grid'>
-                    <div className='col'>
-                        {this.renderRecentWorkspaces()}
-                    </div>
-                </div>
-                <div className='flex-grid'>
-                    <div className='col'>
-                        {this.renderSettings()}
-                    </div>
-                </div>
-                <div className='flex-grid'>
-                    <div className='col'>
-                        {this.renderHelp()}
-                    </div>
-                </div>
-                <div className='flex-grid'>
-                    <div className='col'>
-                        {this.renderVersion()}
+                    <div className='gs-side-column'>
+                        {this.renderWalkthroughs()}
                     </div>
                 </div>
             </div>
             <div className='gs-preference-container'>
                 {this.renderPreferences()}
             </div>
+        </div>;
+    }
+
+    protected showAllWalkthroughs = () => {
+        this.commandRegistry.executeCommand(WalkthroughCommands.OPEN_WALKTHROUGH.id);
+    };
+
+    /**
+     * Render the selected walkthrough on its own, taking over the whole view.
+     * The regular welcome content is restored once the walkthrough is closed.
+     */
+    protected renderSelectedWalkthrough(): React.ReactNode {
+        return <div className='gs-container gs-walkthrough-container'>
+            {this.renderWalkthroughs()}
         </div>;
     }
 
@@ -203,7 +263,7 @@ export class GettingStartedWidget extends ReactWidget {
                 tabIndex={0}
                 onClick={this.doCreateFile}
                 onKeyDown={this.doCreateFileEnter}>
-                {CommonCommands.NEW_UNTITLED_FILE.label ?? nls.localizeByDefault('New File...')}
+                {nls.localizeByDefault('New File...')}
             </a>
         </div>;
 
@@ -270,7 +330,7 @@ export class GettingStartedWidget extends ReactWidget {
                     tabIndex={0}
                     onClick={() => this.open(new URI(items[index]))}
                     onKeyDown={(e: React.KeyboardEvent) => this.openEnter(e, new URI(items[index]))}>
-                    {new URI(items[index]).path.base}
+                    {this.labelProvider.getName(new URI(items[index]))}
                 </a>
                 <span className='gs-action-details'>
                     {item}
@@ -325,6 +385,19 @@ export class GettingStartedWidget extends ReactWidget {
                     {nls.localizeByDefault('Open Settings')}
                 </a>
             </div>
+            {/* The AI preferences are managed in their own view, so it belongs next to the settings link.
+                Only shown when the AI packages are part of the product (see `aiIsIncluded`). */}
+            {this.aiIsIncluded &&
+                <div className='gs-action-container'>
+                    <a
+                        role={'button'}
+                        tabIndex={0}
+                        onClick={this.doOpenAiConfiguration}
+                        onKeyDown={this.doOpenAiConfigurationEnter}>
+                        {nls.localize('theia/getting-started/openAiConfiguration', 'Open AI Configuration')}
+                    </a>
+                </div>
+            }
             <div className='gs-action-container'>
                 <a
                     role={'button'}
@@ -335,6 +408,16 @@ export class GettingStartedWidget extends ReactWidget {
                 </a>
             </div>
         </div>;
+    }
+
+    protected renderWalkthroughs(): React.ReactNode {
+        return <WalkthroughSection
+            walkthroughService={this.walkthroughService}
+            markdownRenderer={this.markdownRenderer}
+            themeService={this.themeService}
+            logger={this.logger}
+            onShowAll={this.showAllWalkthroughs}
+        />;
     }
 
     /**
@@ -382,6 +465,15 @@ export class GettingStartedWidget extends ReactWidget {
                     {nls.localize('theia/getting-started/newPlugin', 'Building a New Plugin')}
                 </a>
             </div>
+            <div className='gs-action-container'>
+                <a
+                    role={'button'}
+                    tabIndex={0}
+                    onClick={() => this.doOpenExternalLink(this.dataUsageTelemetryUrl)}
+                    onKeyDown={(e: React.KeyboardEvent) => this.doOpenExternalLinkEnter(e, this.dataUsageTelemetryUrl)}>
+                    {nls.localize('theia/getting-started/telemetry', 'Data Usage & Telemetry')}
+                </a>
+            </div>
         </div>;
     }
 
@@ -402,66 +494,6 @@ export class GettingStartedWidget extends ReactWidget {
         return <WelcomePreferences preferenceService={this.preferenceService}></WelcomePreferences>;
     }
 
-    protected renderAIBanner(): React.ReactNode {
-        return <div className='gs-container gs-experimental-container'>
-            <div className='flex-grid'>
-                <div className='col'>
-                    <h3 className='gs-section-header'> 🚀 AI Support in the Theia IDE is available! [Experimental] ✨</h3>
-                    <br />
-                    <div className='gs-action-container'>
-                        Theia IDE now contains experimental AI support, which offers early access to cutting-edge AI capabilities within your IDE.
-                        <br />
-                        <br />
-                        Please note that these features are disabled by default, ensuring that users can opt-in at their discretion.
-                        For those who choose to enable AI support, it is important to be aware that these experimental features may generate continuous
-                        requests to the language models (LLMs) you provide access to. This might incur costs that you need to monitor closely.
-                        <br />
-                        For more details, please visit &nbsp;
-                        <a
-                            role={'button'}
-                            tabIndex={0}
-                            onClick={() => this.doOpenExternalLink(this.theiaAIDocUrl)}
-                            onKeyDown={(e: React.KeyboardEvent) => this.doOpenExternalLinkEnter(e, this.theiaAIDocUrl)}>
-                            {'the documentation'}
-                        </a>.
-                        <br />
-                        <br />
-                        🚧 Please note that this feature is currently in development and may undergo frequent changes.
-                        We welcome your feedback, contributions, and sponsorship! To support the ongoing development of the AI capabilities please visit the&nbsp;
-                        <a
-                            role={'button'}
-                            tabIndex={0}
-                            onClick={() => this.doOpenExternalLink(this.ghProjectUrl)}
-                            onKeyDown={(e: React.KeyboardEvent) => this.doOpenExternalLinkEnter(e, this.ghProjectUrl)}>
-                            {'Github Project'}
-                        </a>.
-                        &nbsp;Thank you for being part of our community!
-                    </div>
-                    <br />
-                    <div className='gs-action-container'>
-                        <a
-                            role={'button'}
-                            style={{ fontSize: 'var(--theia-ui-font-size2)' }}
-                            tabIndex={0}
-                            onClick={() => this.doOpenAIChatView()}
-                            onKeyDown={(e: React.KeyboardEvent) => this.doOpenAIChatViewEnter(e)}>
-                            {'Open the AI Chat View now to learn how to start! ✨'}
-                        </a>
-                    </div>
-                    <br />
-                    <br />
-                </div>
-            </div>
-        </div>;
-    }
-
-    protected doOpenAIChatView = () => this.commandRegistry.executeCommand('aiChat:toggle');
-    protected doOpenAIChatViewEnter = (e: React.KeyboardEvent) => {
-        if (this.isEnterKey(e)) {
-            this.doOpenAIChatView();
-        }
-    };
-
     /**
      * Build the list of workspace paths.
      * @param workspaces {string[]} the list of workspaces.
@@ -481,7 +513,7 @@ export class GettingStartedWidget extends ReactWidget {
     /**
      * Trigger the create file command.
      */
-    protected doCreateFile = () => this.commandRegistry.executeCommand(CommonCommands.NEW_UNTITLED_FILE.id);
+    protected doCreateFile = () => this.commandRegistry.executeCommand(CommonCommands.PICK_NEW_FILE.id);
     protected doCreateFileEnter = (e: React.KeyboardEvent) => {
         if (this.isEnterKey(e)) {
             this.doCreateFile();
@@ -550,6 +582,19 @@ export class GettingStartedWidget extends ReactWidget {
     };
 
     /**
+     * Trigger the open AI configuration command.
+     * Used to open the AI Configuration view, which manages the AI preferences.
+     * Referenced by id because `@theia/getting-started` does not depend on the AI packages, as with the
+     * AI chat view above.
+     */
+    protected doOpenAiConfiguration = () => this.commandRegistry.executeCommand('aiConfiguration:open');
+    protected doOpenAiConfigurationEnter = (e: React.KeyboardEvent) => {
+        if (this.isEnterKey(e)) {
+            this.doOpenAiConfiguration();
+        }
+    };
+
+    /**
      * Trigger the open keyboard shortcuts command.
      * Used to open the keyboard shortcuts widget.
      */
@@ -591,14 +636,14 @@ export interface PreferencesProps {
     preferenceService: PreferenceService;
 }
 
-function WelcomePreferences(props: PreferencesProps): JSX.Element {
+function WelcomePreferences(props: PreferencesProps): React.JSX.Element {
     const [startupEditor, setStartupEditor] = React.useState<string>(
         props.preferenceService.get('workbench.startupEditor', 'welcomePage')
     );
     React.useEffect(() => {
         const prefListener = props.preferenceService.onPreferenceChanged(change => {
             if (change.preferenceName === 'workbench.startupEditor') {
-                const prefValue = change.newValue;
+                const prefValue = props.preferenceService.get<string>('workbench.startupEditor', 'none');
                 setStartupEditor(prefValue);
             }
         });

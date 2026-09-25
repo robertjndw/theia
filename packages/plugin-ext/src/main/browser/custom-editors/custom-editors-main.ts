@@ -38,9 +38,10 @@ import { FileService } from '@theia/filesystem/lib/browser/file-service';
 import { UndoRedoService } from '@theia/editor/lib/browser/undo-redo-service';
 import { WebviewsMainImpl } from '../webviews-main';
 import { WidgetManager } from '@theia/core/lib/browser/widget-manager';
-import { ApplicationShell, LabelProvider, Saveable, SaveOptions } from '@theia/core/lib/browser';
+import { ApplicationShell, LabelProvider, Saveable, SaveAsOptions, SaveOptions } from '@theia/core/lib/browser';
 import { WebviewPanelOptions } from '@theia/plugin';
-import { EditorPreferences } from '@theia/editor/lib/browser';
+import { EditorPreferences } from '@theia/editor/lib/common/editor-preferences';
+import { BinaryBuffer } from '@theia/core/lib/common/buffer';
 
 const enum CustomEditorModelType {
     Custom,
@@ -144,6 +145,8 @@ export class CustomEditorsMainImpl implements CustomEditorsMain, Disposable {
 
                 this.webviewsMain.hookWebview(widget);
                 widget.title.label = this.labelProvider.getName(resource);
+                widget.title.caption = resource.path.fsPath();
+                widget.title.iconClass = this.labelProvider.getIcon(resource) + ' file-icon';
 
                 const _cancellationSource = new CancellationTokenSource();
                 await this.proxy.$resolveWebviewEditor(
@@ -186,7 +189,7 @@ export class CustomEditorsMainImpl implements CustomEditorsMain, Disposable {
 
         switch (modelType) {
             case CustomEditorModelType.Text: {
-                const model = CustomTextEditorModel.create(viewType, resource, this.textModelService, this.fileService);
+                const model = CustomTextEditorModel.create(viewType, resource, this.textModelService);
                 return this.customEditorService.models.add(resource, viewType, model);
             }
             case CustomEditorModelType.Custom: {
@@ -224,7 +227,7 @@ export interface CustomEditorModel extends Saveable, Disposable {
 
     revert(options?: Saveable.RevertOptions): Promise<void>;
     saveCustomEditor(options?: SaveOptions): Promise<void>;
-    saveCustomEditorAs(resource: TheiaURI, targetResource: TheiaURI, options?: SaveOptions): Promise<void>;
+    saveCustomEditorAs?(resource: TheiaURI, targetResource: TheiaURI, options?: SaveOptions): Promise<void>;
 
     undo(): void;
     redo(): void;
@@ -329,7 +332,7 @@ export class MainCustomEditorModel implements CustomEditorModel {
         }
 
         const cancellationSource = new CancellationTokenSource();
-        this.proxy.$revert(this.resource, this.viewType, cancellationSource.token);
+        await this.proxy.$revert(this.resource, this.viewType, cancellationSource.token);
         this.change(() => {
             this.isDirtyFromContentChange = false;
             this.currentEditIndex = this.savePoint;
@@ -347,7 +350,7 @@ export class MainCustomEditorModel implements CustomEditorModel {
         }
 
         const cancelable = new CancellationTokenSource();
-        const savePromise = this.proxy.$onSave(this.resource, this.viewType, cancelable.token);
+        const savePromise = this.proxy.$save(this.resource, this.viewType, cancelable.token);
         this.ongoingSave?.cancel();
         this.ongoingSave = cancelable;
 
@@ -367,10 +370,14 @@ export class MainCustomEditorModel implements CustomEditorModel {
         }
     }
 
+    async saveAs(options: SaveAsOptions): Promise<void> {
+        await this.saveCustomEditorAs(new TheiaURI(this.resource), options.target, options);
+    }
+
     async saveCustomEditorAs(resource: TheiaURI, targetResource: TheiaURI, options?: SaveOptions): Promise<void> {
         if (this.editable) {
             const source = new CancellationTokenSource();
-            await this.proxy.$onSaveAs(this.resource, this.viewType, targetResource.toComponents(), source.token);
+            await this.proxy.$saveAs(this.resource, this.viewType, targetResource.toComponents(), source.token);
             this.change(() => {
                 this.savePoint = this.currentEditIndex;
             });
@@ -450,19 +457,17 @@ export class CustomTextEditorModel implements CustomEditorModel {
     static async create(
         viewType: string,
         resource: TheiaURI,
-        editorModelService: EditorModelService,
-        fileService: FileService,
+        editorModelService: EditorModelService
     ): Promise<CustomTextEditorModel> {
         const model = await editorModelService.createModelReference(resource);
         model.object.suppressOpenEditorWhenDirty = true;
-        return new CustomTextEditorModel(viewType, resource, model, fileService);
+        return new CustomTextEditorModel(viewType, resource, model);
     }
 
     constructor(
         readonly viewType: string,
         readonly editorResource: TheiaURI,
-        private readonly model: Reference<MonacoEditorModel>,
-        private readonly fileService: FileService,
+        private readonly model: Reference<MonacoEditorModel>
     ) {
         this.toDispose.push(
             this.editorTextModel.onDirtyChanged(e => {
@@ -507,13 +512,12 @@ export class CustomTextEditorModel implements CustomEditorModel {
         return this.saveCustomEditor(options);
     }
 
-    saveCustomEditor(options?: SaveOptions): Promise<void> {
-        return this.editorTextModel.save(options);
+    serialize(): Promise<BinaryBuffer> {
+        return this.editorTextModel.serialize();
     }
 
-    async saveCustomEditorAs(resource: TheiaURI, targetResource: TheiaURI, options?: SaveOptions): Promise<void> {
-        await this.saveCustomEditor(options);
-        await this.fileService.copy(resource, targetResource, { overwrite: false });
+    saveCustomEditor(options?: SaveOptions): Promise<void> {
+        return this.editorTextModel.save(options);
     }
 
     undo(): void {

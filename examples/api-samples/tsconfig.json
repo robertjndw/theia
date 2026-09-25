@@ -19,7 +19,19 @@
       "path": "../../packages/ai-chat-ui"
     },
     {
+      "path": "../../packages/ai-code-completion"
+    },
+    {
       "path": "../../packages/ai-core"
+    },
+    {
+      "path": "../../packages/ai-core-ui"
+    },
+    {
+      "path": "../../packages/ai-mcp"
+    },
+    {
+      "path": "../../packages/ai-mcp-server"
     },
     {
       "path": "../../packages/core"
@@ -38,6 +50,9 @@
     },
     {
       "path": "../../packages/search-in-workspace"
+    },
+    {
+      "path": "../../packages/telemetry"
     },
     {
       "path": "../../packages/test"

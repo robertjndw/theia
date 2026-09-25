@@ -31,9 +31,11 @@ import { ModelDecorationOptions } from '@theia/monaco-editor-core/esm/vs/editor/
 import { IModelDeltaDecoration, OverviewRulerLane, TrackedRangeStickiness } from '@theia/monaco-editor-core/esm/vs/editor/common/model';
 import { animationFrame } from '@theia/core/lib/browser';
 import { NotebookCellEditorService } from '../service/notebook-cell-editor-service';
+import { NotebookViewModel } from '../view-model/notebook-view-model';
 
 interface CellEditorProps {
     notebookModel: NotebookModel;
+    notebookViewModel: NotebookViewModel;
     cell: NotebookCellModel;
     monacoServices: MonacoEditorServices;
     notebookContextManager: NotebookContextManager;
@@ -86,10 +88,17 @@ export class CellEditor extends React.Component<CellEditorProps, {}> {
     protected container?: HTMLDivElement;
     protected matches: NotebookCodeEditorFindMatch[] = [];
     protected oldMatchDecorations: string[] = [];
+    protected resizeObserver?: ResizeObserver;
 
     override componentDidMount(): void {
+        const cellViewModel = this.props.notebookViewModel.cellViewModels.get(this.props.cell.handle);
+
+        if (!cellViewModel) {
+            throw new Error('CellViewModel not found for cell ' + this.props.cell.handle);
+        }
+
         this.disposeEditor();
-        this.toDispose.push(this.props.cell.onWillFocusCellEditor(focusRequest => {
+        this.toDispose.push(cellViewModel.onWillFocusCellEditor(focusRequest => {
             this.editor?.getControl().focus();
             const lineCount = this.editor?.getControl().getModel()?.getLineCount();
             if (focusRequest && lineCount !== undefined) {
@@ -103,7 +112,7 @@ export class CellEditor extends React.Component<CellEditorProps, {}> {
             this.props.notebookContextManager.scopedStore.setContext(NOTEBOOK_CELL_CURSOR_LAST_LINE, currentLine === lineCount);
         }));
 
-        this.toDispose.push(this.props.cell.onWillBlurCellEditor(() => this.blurEditor()));
+        this.toDispose.push(cellViewModel.onWillBlurCellEditor(() => this.blurEditor()));
 
         this.toDispose.push(this.props.cell.onDidChangeEditorOptions(options => {
             this.editor?.getControl().updateOptions(options);
@@ -120,7 +129,7 @@ export class CellEditor extends React.Component<CellEditorProps, {}> {
 
         this.toDispose.push(this.props.cell.onDidSelectFindMatch(match => this.centerEditorInView()));
 
-        this.toDispose.push(this.props.notebookModel.onDidChangeSelectedCell(e => {
+        this.toDispose.push(this.props.notebookViewModel.onDidChangeSelectedCell(e => {
             if (e.cell !== this.props.cell && this.editor?.getControl().hasTextFocus()) {
                 this.blurEditor();
             }
@@ -143,6 +152,13 @@ export class CellEditor extends React.Component<CellEditorProps, {}> {
     }
 
     override componentWillUnmount(): void {
+        if (this.resizeObserver) {
+            if (this.container) {
+                this.resizeObserver.unobserve(this.container);
+            }
+            this.resizeObserver.disconnect();
+            this.resizeObserver = undefined;
+        }
         this.disposeEditor();
     }
 
@@ -184,6 +200,15 @@ export class CellEditor extends React.Component<CellEditorProps, {}> {
                 [[IContextKeyService, this.props.notebookContextManager.scopedStore]],
                 { contributions: EditorExtensionsRegistry.getEditorContributions().filter(c => c.id !== 'editor.contrib.findController') });
             this.toDispose.push(this.editor);
+            // Monaco's EditContext API uses a plain <div> for text input instead of a <textarea>.
+            // PerfectScrollbar's keyboard handler checks isEditable(activeElement) which only recognizes
+            // input/textarea/select/button/[contenteditable] elements. Setting contenteditable on the
+            // EditContext div makes PerfectScrollbar skip keyboard handling when the editor has focus,
+            // preventing Space/PageUp/PageDown/Home/End/arrows from scrolling the notebook container.
+            const editContextElement = editorNode.querySelector('.native-edit-context');
+            if (editContextElement) {
+                editContextElement.setAttribute('contenteditable', 'false');
+            }
             this.editor.setLanguage(cell.language);
             this.toDispose.push(this.editor.getControl().onDidContentSizeChange(() => {
                 editorNode.style.height = this.editor!.getControl().getContentHeight() + 7 + 'px';
@@ -193,7 +218,7 @@ export class CellEditor extends React.Component<CellEditorProps, {}> {
                 notebookModel.cellDirtyChanged(cell, true);
             }));
             this.toDispose.push(this.editor.getControl().onDidFocusEditorText(() => {
-                this.props.notebookModel.setSelectedCell(cell, false);
+                this.props.notebookViewModel.setSelectedCell(cell, false);
                 this.props.notebookCellEditorService.editorFocusChanged(this.editor);
             }));
             this.toDispose.push(this.editor.getControl().onDidBlurEditorText(() => {
@@ -223,7 +248,7 @@ export class CellEditor extends React.Component<CellEditorProps, {}> {
             }));
             this.props.notebookCellEditorService.editorCreated(uri, this.editor);
             this.setMatches();
-            if (notebookModel.selectedCell === cell) {
+            if (this.props.notebookViewModel.selectedCell === cell) {
                 this.editor.getControl().focus();
             }
         }
@@ -248,11 +273,24 @@ export class CellEditor extends React.Component<CellEditorProps, {}> {
         }
 
         this.oldMatchDecorations = this.editor.getControl()
-            .changeDecorations(accessor => accessor.deltaDecorations(this.oldMatchDecorations, decorations));
+            .changeDecorations(accessor => accessor.deltaDecorations(this.oldMatchDecorations, decorations)) ?? [];
     }
 
     protected setContainer(component: HTMLDivElement | null): void {
+        if (this.resizeObserver && this.container) {
+            this.resizeObserver.unobserve(this.container);
+        }
+
         this.container = component ?? undefined;
+
+        if (this.container) {
+            if (!this.resizeObserver) {
+                this.resizeObserver = new ResizeObserver(() => {
+                    this.handleResize();
+                });
+            }
+            this.resizeObserver.observe(this.container);
+        }
     };
 
     protected handleResize = () => {
@@ -265,7 +303,7 @@ export class CellEditor extends React.Component<CellEditorProps, {}> {
     }
 
     override render(): React.ReactNode {
-        return <div className='theia-notebook-cell-editor' onResize={this.handleResize} id={this.props.cell.uri.toString()}
+        return <div className='theia-notebook-cell-editor' id={this.props.cell.uri.toString()}
             ref={container => this.setContainer(container)} style={{ height: this.editor ? undefined : this.estimateHeight() }}>
         </div >;
     }

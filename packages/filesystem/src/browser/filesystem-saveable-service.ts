@@ -14,8 +14,8 @@
 // SPDX-License-Identifier: EPL-2.0 OR GPL-2.0-only WITH Classpath-exception-2.0
 // *****************************************************************************
 
-import { environment, MessageService, nls } from '@theia/core';
-import { inject, injectable } from '@theia/core/shared/inversify';
+import { environment, MessageService, nls, ILogger } from '@theia/core';
+import { inject, injectable, named } from '@theia/core/shared/inversify';
 import { Navigatable, Saveable, SaveableSource, SaveOptions, Widget, open, OpenerService, ConfirmDialog, CommonCommands, LabelProvider } from '@theia/core/lib/browser';
 import { SaveableService } from '@theia/core/lib/browser/saveable-service';
 import URI from '@theia/core/lib/common/uri';
@@ -37,6 +37,9 @@ export class FilesystemSaveableService extends SaveableService {
     @inject(LabelProvider)
     protected readonly labelProvider: LabelProvider;
 
+    @inject(ILogger) @named('filesystem:FilesystemSaveableService')
+    protected override readonly logger: ILogger;
+
     /**
      * This method ensures a few things about `widget`:
      * - `widget.getResourceUri()` actually returns a URI.
@@ -46,7 +49,7 @@ export class FilesystemSaveableService extends SaveableService {
     override canSaveAs(widget: Widget | undefined): widget is Widget & SaveableSource & Navigatable {
         return widget !== undefined
             && Saveable.isSource(widget)
-            && (typeof widget.saveable.createSnapshot === 'function' || typeof widget.saveable.serialize === 'function')
+            && (typeof widget.saveable.createSnapshot === 'function' || typeof widget.saveable.serialize === 'function' || typeof widget.saveable.saveAs === 'function')
             && typeof widget.saveable.revert === 'function'
             && Navigatable.is(widget)
             && widget.getResourceUri() !== undefined;
@@ -61,11 +64,15 @@ export class FilesystemSaveableService extends SaveableService {
         let selected: URI | undefined;
         const canSave = this.canSaveNotSaveAs(sourceWidget);
         const uri: URI = sourceWidget.getResourceUri()!;
+        let filters: { [name: string]: string[] } = { 'All Files': ['*'] };
+        if (sourceWidget.saveable.filters) {
+            filters = { ...sourceWidget.saveable.filters(), ...filters };
+        }
         do {
             selected = await this.fileDialogService.showSaveDialog(
                 {
                     title: CommonCommands.SAVE_AS.label!,
-                    filters: {},
+                    filters: filters,
                     inputValue: uri.path.base
                 });
             if (selected) {
@@ -82,7 +89,7 @@ export class FilesystemSaveableService extends SaveableService {
                 await this.saveSnapshot(sourceWidget, selected, overwrite);
                 return selected;
             } catch (e) {
-                console.warn(e);
+                this.logger.warn(e);
             }
         }
     }
@@ -97,23 +104,30 @@ export class FilesystemSaveableService extends SaveableService {
      */
     protected async saveSnapshot(sourceWidget: Widget & SaveableSource & Navigatable, target: URI, overwrite: boolean): Promise<void> {
         const saveable = sourceWidget.saveable;
-        let buffer: BinaryBuffer;
-        if (saveable.serialize) {
-            buffer = await saveable.serialize();
-        } else if (saveable.createSnapshot) {
-            const snapshot = saveable.createSnapshot();
-            const content = Saveable.Snapshot.read(snapshot) ?? '';
-            buffer = BinaryBuffer.fromString(content);
+        if (saveable.saveAs) {
+            // Some widgets have their own "Save As" implementation, such as the custom plugin editors
+            await saveable.saveAs({
+                target
+            });
         } else {
-            throw new Error('Cannot save the widget as the saveable does not provide a snapshot or a serialize method.');
-        }
-
-        if (await this.fileService.exists(target)) {
-            // Do not fire the `onDidCreate` event as the file already exists.
-            await this.fileService.writeFile(target, buffer);
-        } else {
-            // Ensure to actually call `create` as that fires the `onDidCreate` event.
-            await this.fileService.createFile(target, buffer, { overwrite });
+            // Most other editors simply allow us to serialize the content and write it to the target file.
+            let buffer: BinaryBuffer;
+            if (saveable.serialize) {
+                buffer = await saveable.serialize();
+            } else if (saveable.createSnapshot) {
+                const snapshot = saveable.createSnapshot();
+                const content = Saveable.Snapshot.read(snapshot) ?? '';
+                buffer = BinaryBuffer.fromString(content);
+            } else {
+                throw new Error('Cannot save the widget as the saveable does not provide a snapshot or a serialize method.');
+            }
+            if (await this.fileService.exists(target)) {
+                // Do not fire the `onDidCreate` event as the file already exists.
+                await this.fileService.writeFile(target, buffer);
+            } else {
+                // Ensure to actually call `create` as that fires the `onDidCreate` event.
+                await this.fileService.createFile(target, buffer, { overwrite });
+            }
         }
         await saveable.revert!();
         await open(this.openerService, target, { widgetOptions: { ref: sourceWidget, mode: 'tab-replace' } });

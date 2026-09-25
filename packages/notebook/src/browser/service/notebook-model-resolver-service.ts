@@ -14,8 +14,8 @@
 // SPDX-License-Identifier: EPL-2.0 OR GPL-2.0-only WITH Classpath-exception-2.0
 // *****************************************************************************
 
-import { Emitter, Resource, ResourceProvider, UNTITLED_SCHEME, URI } from '@theia/core';
-import { inject, injectable } from '@theia/core/shared/inversify';
+import { Emitter, Resource, ResourceProvider, UNTITLED_SCHEME, URI, ILogger } from '@theia/core';
+import { inject, injectable, named } from '@theia/core/shared/inversify';
 import { UriComponents } from '@theia/core/lib/common/uri';
 import { FileService } from '@theia/filesystem/lib/browser/file-service';
 import { NotebookData } from '../../common';
@@ -44,6 +44,9 @@ export class NotebookModelResolverService {
     @inject(NotebookTypeRegistry)
     protected notebookTypeRegistry: NotebookTypeRegistry;
 
+    @inject(ILogger) @named('notebook:NotebookModelResolverService')
+    protected readonly logger: ILogger;
+
     protected onDidChangeDirtyEmitter = new Emitter<NotebookModel>();
     readonly onDidChangeDirty = this.onDidChangeDirtyEmitter.event;
     protected onDidSaveNotebookEmitter = new Emitter<UriComponents>();
@@ -65,14 +68,21 @@ export class NotebookModelResolverService {
             throw new Error(`Missing viewType for '${resource}'`);
         }
 
-        const actualResource = await this.resourceProvider(resource);
-        const notebookData = await this.resolveExistingNotebookData(actualResource, viewType!);
-        const notebookModel = await this.notebookService.createNotebookModel(notebookData, viewType, actualResource);
+        try {
 
-        notebookModel.onDirtyChanged(() => this.onDidChangeDirtyEmitter.fire(notebookModel));
-        notebookModel.onDidSaveNotebook(() => this.onDidSaveNotebookEmitter.fire(notebookModel.uri.toComponents()));
+            const actualResource = await this.resourceProvider(resource);
+            const notebookData = await this.resolveExistingNotebookData(actualResource, viewType!);
+            const notebookModel = await this.notebookService.createNotebookModel(notebookData, viewType, actualResource);
 
-        return notebookModel;
+            notebookModel.onDirtyChanged(() => this.onDidChangeDirtyEmitter.fire(notebookModel));
+            notebookModel.onDidSaveNotebook(() => this.onDidSaveNotebookEmitter.fire(notebookModel.uri.toComponents()));
+
+            return notebookModel;
+        } catch (e) {
+            const message = `Error resolving notebook model for: \n ${resource.path.fsPath()} \n with view type ${viewType}. \n ${e}`;
+            this.logger.error(message);
+            throw new Error(message);
+        }
     }
 
     async resolveUntitledResource(arg: UntitledResource, viewType: string): Promise<NotebookModel> {

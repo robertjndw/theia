@@ -17,29 +17,43 @@ import {
     ChatAgent,
     ChatAgentService,
     ChatModel,
-    ChatProgressMessage,
     ChatRequestModel,
     ChatResponseContent,
     ChatResponseModel,
+    ChatService,
+    EditableChatRequestModel,
     ParsedChatRequestAgentPart,
+    ParsedChatRequestFunctionPart,
     ParsedChatRequestVariablePart,
+    type ChatRequest,
+    type ChatHierarchyBranch,
 } from '@theia/ai-chat';
-import { CommandRegistry, ContributionProvider } from '@theia/core';
+import { AIVariableService } from '@theia/ai-core';
+import { AIActivationService } from '@theia/ai-core/lib/browser';
+import { CommandRegistry, ContributionProvider, Disposable, DisposableCollection, Emitter, Event, ILogger } from '@theia/core';
 import {
     codicon,
-    CommonCommands,
     CompositeTreeNode,
     ContextMenuRenderer,
     HoverService,
     Key,
     KeyCode,
+    Message,
     NodeProps,
     OpenerService,
     TreeModel,
     TreeNode,
     TreeProps,
     TreeWidget,
+    UnsafeWidgetUtilities,
+    Widget,
+    type ReactWidget
 } from '@theia/core/lib/browser';
+import { ContextKey, ContextKeyService } from '@theia/core/lib/browser/context-key-service';
+import { ChatFindHighlighter } from '../chat-find/chat-find-highlighter';
+import { ChatFindMatch } from '../chat-find/chat-find-matcher';
+import { ChatFindWidget } from '../chat-find/chat-find-widget';
+import { nls } from '@theia/core/lib/common/nls';
 import {
     inject,
     injectable,
@@ -47,30 +61,56 @@ import {
     postConstruct
 } from '@theia/core/shared/inversify';
 import * as React from '@theia/core/shared/react';
-
+import { ImageContextVariable } from '@theia/ai-chat/lib/common/image-context-variable';
+import { MarkdownStringImpl } from '@theia/core/lib/common/markdown-rendering';
 import { ChatNodeToolbarActionContribution } from '../chat-node-toolbar-action-contribution';
 import { ChatResponsePartRenderer } from '../chat-response-part-renderer';
-import { useMarkdownRendering } from '../chat-response-renderer/markdown-part-renderer';
-import { AIVariableService } from '@theia/ai-core';
+import { formatTokenCount } from '../chat-token-usage-indicator-util';
+import { MarkdownRendering, useMarkdownRendering } from '../chat-response-renderer/markdown-part-renderer';
+import { ProgressMessage } from '../chat-progress-message';
+import { AIChatTreeInputFactory, type AIChatTreeInputWidget } from './chat-view-tree-input-widget';
+import { PromptVariantBadge } from './prompt-variant-badge';
+import { ModelBadge } from './model-badge';
 
 // TODO Instead of directly operating on the ChatRequestModel we could use an intermediate view model
 export interface RequestNode extends TreeNode {
-    request: ChatRequestModel
+    request: ChatRequestModel,
+    branch: ChatHierarchyBranch,
+    sessionId: string
 }
 export const isRequestNode = (node: TreeNode): node is RequestNode => 'request' in node;
 
+export interface EditableRequestNode extends RequestNode {
+    request: EditableChatRequestModel
+}
+export const isEditableRequestNode = (node: TreeNode): node is EditableRequestNode => isRequestNode(node) && EditableChatRequestModel.is(node.request);
+
 // TODO Instead of directly operating on the ChatResponseModel we could use an intermediate view model
 export interface ResponseNode extends TreeNode {
-    response: ChatResponseModel
+    response: ChatResponseModel,
+    sessionId: string
 }
 export const isResponseNode = (node: TreeNode): node is ResponseNode => 'response' in node;
 
-function isEnterKey(e: React.KeyboardEvent): boolean {
+export function isEnterKey(e: React.KeyboardEvent): boolean {
     return Key.ENTER.keyCode === KeyCode.createKeyCode(e.nativeEvent).key?.keyCode;
+}
+
+export const ChatWelcomeMessageProvider = Symbol('ChatWelcomeMessageProvider');
+export interface ChatWelcomeMessageProvider {
+    renderWelcomeMessage?(): React.ReactNode;
+    renderDisabledMessage?(): React.ReactNode;
+    readonly hasReadyModels?: boolean;
+    readonly modelRequirementBypassed?: boolean;
+    readonly defaultAgent?: string;
+    readonly onStateChanged?: Event<void>;
+    /** Optional priority for rendering order. Higher values render first. Default: 0 */
+    readonly priority?: number;
 }
 
 @injectable()
 export class ChatViewTreeWidget extends TreeWidget {
+
     static readonly ID = 'chat-tree-widget';
     static readonly CONTEXT_MENU = ['chat-tree-context-menu'];
 
@@ -87,17 +127,59 @@ export class ChatViewTreeWidget extends TreeWidget {
     protected readonly variableService: AIVariableService;
 
     @inject(CommandRegistry)
-    private commandRegistry: CommandRegistry;
+    protected commandRegistry: CommandRegistry;
 
     @inject(OpenerService)
     protected readonly openerService: OpenerService;
 
     @inject(HoverService)
-    private hoverService: HoverService;
+    protected hoverService: HoverService;
+
+    @inject(ContributionProvider) @named(ChatWelcomeMessageProvider)
+    protected readonly welcomeMessageProviders: ContributionProvider<ChatWelcomeMessageProvider>;
+
+    @inject(AIChatTreeInputFactory)
+    protected inputWidgetFactory: AIChatTreeInputFactory;
+
+    @inject(AIActivationService)
+    protected readonly activationService: AIActivationService;
+
+    @inject(ChatService)
+    protected readonly chatService: ChatService;
+
+    @inject(ContextKeyService)
+    protected readonly contextKeyService: ContextKeyService;
+
+    @inject(ILogger) @named('ai-chat-ui:ChatViewTreeWidget')
+    protected readonly logger: ILogger;
+
+    protected chatResponseFocusKey: ContextKey<boolean>;
+
+    @inject(ChatFindWidget)
+    protected readonly findWidget: ChatFindWidget;
+
+    @inject(ChatFindHighlighter)
+    protected readonly findHighlighter: ChatFindHighlighter;
+
+    protected readonly onDidSubmitEditEmitter = new Emitter<ChatRequest>();
+    onDidSubmitEdit = this.onDidSubmitEditEmitter.event;
+
+    protected readonly chatInputs: Map<string, AIChatTreeInputWidget> = new Map();
 
     protected _shouldScrollToEnd = true;
 
     protected isEnabled = false;
+
+    protected chatModelId: string;
+
+    /** Tracks if we are at the bottom for showing the scroll-to-bottom button. */
+    protected atBottom = true;
+    /**
+     * Track the visibility of the scroll button.
+     */
+    protected _showScrollButton = false;
+
+    onScrollLockChange?: (temporaryLocked: boolean) => void;
 
     set shouldScrollToEnd(shouldScrollToEnd: boolean) {
         this._shouldScrollToEnd = shouldScrollToEnd;
@@ -133,128 +215,340 @@ export class ChatViewTreeWidget extends TreeWidget {
 
         this.id = ChatViewTreeWidget.ID + '-treeContainer';
         this.addClass('treeContainer');
+
+        this.chatResponseFocusKey = this.contextKeyService.createKey<boolean>('chatResponseFocus', false);
+        this.node.setAttribute('tabindex', '0');
+        this.node.setAttribute('aria-label', nls.localize('theia/ai/chat-ui/chatResponses', 'Chat responses'));
+
+        this.findWidget.fallbackFocusTarget = this.node;
+        this.toDispose.pushAll([
+            this.findWidget,
+            this.findHighlighter,
+            this.findWidget.onDidChangeState(state => this.findHighlighter.update(this.node, state.regexp, state.matches, state.current)),
+            this.findWidget.onDidRequestReveal(match => this.revealFindMatch(match))
+        ]);
+
+        this.toDispose.pushAll([
+            this.toDisposeOnChatModelChange,
+            this.activationService.onDidChangeCanRun(change => {
+                this.chatInputs.forEach(widget => {
+                    widget.setEnabled(change);
+                });
+                this.update();
+            }),
+            this.onAtBottomStateChange(atBottom => {
+                this.handleAtBottomStateChange(atBottom);
+            })
+        ]);
+
+        for (const provider of this.welcomeMessageProviders.getContributions()) {
+            if (provider.onStateChanged) {
+                this.toDispose.push(
+                    provider.onStateChanged(() => {
+                        this.update();
+                    })
+                );
+            }
+        }
+
+        // Re-render node toolbars when a contribution signals its actions changed (e.g. a gating setting toggled).
+        for (const contribution of this.chatNodeToolbarActionContributions.getContributions()) {
+            if (contribution.onDidChange) {
+                this.toDispose.push(contribution.onDidChange(() => this.update()));
+            }
+        }
+
     }
 
     public setEnabled(enabled: boolean): void {
         this.isEnabled = enabled;
+        if (!enabled) {
+            this.findWidget.dismiss();
+        }
         this.update();
     }
 
-    protected override renderTree(model: TreeModel): React.ReactNode {
-        if (this.isEnabled) {
-            return super.renderTree(model);
+    /** Opens the find bar over the response tree (or refocuses it when already open). */
+    showFind(): void {
+        this.findWidget.open();
+    }
+
+    hideFind(): void {
+        this.findWidget.dismiss();
+    }
+
+    get isFindVisible(): boolean {
+        return this.findWidget.isOpen;
+    }
+
+    /** Whether the tracked session has content to search; false while the welcome/session-list screen shows. */
+    get canFind(): boolean {
+        return this.findWidget.canFind;
+    }
+
+    /**
+     * Reveals a match: mounts the owning row via virtuoso when it is not rendered yet, then re-applies the highlights
+     * and scrolls the matched text itself into view (rows can be taller than the viewport).
+     */
+    protected revealFindMatch(match: ChatFindMatch): void {
+        const row = this.rows.get(match.nodeId);
+        if (row === undefined) {
+            return;
         }
-        return this.renderDisabledMessage();
+        const settle = (): void => {
+            this.findHighlighter.refresh();
+            this.findHighlighter.scrollCurrentIntoView(this.node);
+        };
+        if (this.findHighlighter.findRow(this.node, match.nodeId)) {
+            requestAnimationFrame(settle);
+            return;
+        }
+        this.view?.list?.scrollIntoView({
+            index: row.index,
+            align: 'center',
+            done: settle
+        });
     }
 
-    private renderDisabledMessage(): React.ReactNode {
-        return <div className={'theia-ResponseNode'}>
-            <div className='theia-ResponseNode-Content' key={'disabled-message'}>
-                <div className="disable-message">
-                    <span className="section-header"> 🚀 Experimental AI Feature Available!</span>
-                    <div className="section-title">
-                        <p><code>Currently, all AI Features are disabled!</code></p>
-                    </div>
-                    <div className="section-title">
-                        <p>How to Enable Experimental AI Features:</p>
-                    </div>
-                    <div className="section-content">
-                        <p>To enable the experimental AI features, please go to &nbsp;
-                            {this.renderLinkButton('the settings menu', CommonCommands.OPEN_PREFERENCES.id)}
-                            &nbsp;and locate the <strong>AI Features</strong> section.</p>
-                        <ol>
-                            <li>Toggle the switch for <strong>'Ai-features: Enable'</strong>.</li>
-                            <li>Provide at least one LLM provider (e.g. OpenAI), also see <a href="https://theia-ide.org/docs/user_ai/" target="_blank">the documentation</a>
-                                for more information.</li>
-                        </ol>
-                        <p>This will activate the new AI capabilities in the app. Please remember, these features are still in development, so they may change or be unstable. 🚧</p>
-                    </div>
+    protected override onAfterAttach(msg: Message): void {
+        super.onAfterAttach(msg);
+        // Registered per attach, not in `init()`: `addEventListener` disposes on detach, so listeners registered
+        // once would be lost the first time the view is moved (e.g. to the main area), leaving `chatResponseFocus`
+        // stuck and every keybinding scoped to it dead until the page is reloaded.
+        this.addEventListener(this.node, 'focusin', () => this.chatResponseFocusKey.set(true));
+        this.addEventListener(this.node, 'focusout', () => this.chatResponseFocusKey.set(false));
+        // The tree node is a React root, so the find bar is attached as a sibling right before it,
+        // the same way the core TreeWidget hosts its SearchBox.
+        if (this.findWidget.isAttached) {
+            Widget.detach(this.findWidget);
+        }
+        if (this.node.parentElement) {
+            UnsafeWidgetUtilities.attach(this.findWidget, this.node.parentElement, this.node);
+        }
+    }
 
-                    <div className="section-title">
-                        <p>Currently Supported Views and Features:</p>
-                    </div>
-                    <div className="section-content">
-                        <p>Once the experimental AI features are enabled, you can access the following views and features:</p>
-                        <ul>
-                            <li>Code Completion</li>
-                            <li>Terminal Assistance (via CTRL+I in a terminal)</li>
-                            <li>This Chat View (features the following agents):
-                                <ul>
-                                    <li>Universal Chat Agent</li>
-                                    <li>Workspace Chat Agent</li>
-                                    <li>Command Chat Agent</li>
-                                    <li>Orchestrator Chat Agent</li>
-                                </ul>
-                            </li>
-                            <li>{this.renderLinkButton('AI History View', 'aiHistory:open')}</li>
-                            <li>{this.renderLinkButton('AI Configuration View', 'aiConfiguration:open')}</li>
-                        </ul>
-                        <p>See <a href="https://theia-ide.org/docs/user_ai/" target="_blank">the documentation</a> for more information.</p>
-                    </div>
-                </div>
+    protected override onBeforeDetach(msg: Message): void {
+        this.chatResponseFocusKey.set(false);
+        if (this.findWidget.isAttached) {
+            Widget.detach(this.findWidget);
+        }
+        super.onBeforeDetach(msg);
+    }
+
+    /** Toggles auto-scroll and the scroll-to-bottom button based on whether the viewport includes the bottom of the list. */
+    protected handleAtBottomStateChange(isAtBottom: boolean): void {
+        if (isAtBottom !== this.atBottom) {
+            this.atBottom = isAtBottom;
+            if (isAtBottom) {
+                // Arrived at bottom — re-enable auto-scroll and hide the button
+                this._showScrollButton = false;
+                this.setTemporaryScrollLock(false);
+            } else {
+                // Left the bottom — lock auto-scroll and show the button
+                this._showScrollButton = true;
+                this.setTemporaryScrollLock(true);
+            }
+            this.update();
+        }
+    }
+
+    protected setTemporaryScrollLock(enabled: boolean): void {
+        // Immediately apply scroll lock changes without delay
+        this.onScrollLockChange?.(enabled);
+        // Update cached scrollToRow so that outdated values do not cause unwanted scrolling on update()
+        this.updateScrollToRow();
+    }
+
+    protected override renderTree(model: TreeModel): React.ReactNode {
+        if (!this.isEnabled) {
+            return this.renderDisabledMessage();
+        }
+
+        const tree = CompositeTreeNode.is(model.root) && model.root.children?.length > 0
+            ? super.renderTree(model)
+            : this.renderWelcomeMessage();
+
+        return <React.Fragment>
+            {tree}
+            {this.renderScrollToBottomButton()}
+        </React.Fragment>;
+    }
+
+    /** Shows the scroll to bottom button if not at the bottom (debounced). */
+    protected renderScrollToBottomButton(): React.ReactNode {
+        if (!this._showScrollButton) {
+            return undefined;
+        }
+        // Down-arrow, Theia codicon, fixed overlay on widget
+        return <button
+            className="theia-ChatTree-ScrollToBottom codicon codicon-arrow-down"
+            title={nls.localize('theia/ai/chat-ui/chat-view-tree-widget/scrollToBottom', 'Jump to latest message')}
+            onClick={() => this.handleScrollToBottomButtonClick()}
+        />;
+    }
+
+    /** Scrolls to the bottom row and updates atBottom state. */
+    protected handleScrollToBottomButtonClick(): void {
+        this.scrollToRow = this.rows.size;
+        this.atBottom = true;
+        this._showScrollButton = false;
+        this.setTemporaryScrollLock(false);
+        this.update();
+    }
+
+    /**
+     * Returns providers sorted by priority (highest first).
+     */
+    protected getSortedWelcomeMessageProviders(): ChatWelcomeMessageProvider[] {
+        return this.welcomeMessageProviders.getContributions()
+            .toSorted((a, b) => (b.priority ?? 0) - (a.priority ?? 0));
+    }
+
+    /**
+     * Returns the highest-priority provider for backward-compatible property access.
+     */
+    protected get welcomeMessageProvider(): ChatWelcomeMessageProvider | undefined {
+        return this.getSortedWelcomeMessageProviders()[0];
+    }
+
+    protected renderDisabledMessage(): React.ReactNode {
+        const providers = this.getSortedWelcomeMessageProviders();
+        const nodes = providers
+            .map(p => p.renderDisabledMessage?.())
+            .filter((node): node is React.ReactNode => node !== undefined);
+        return this.renderContributedWelcomeContent('theia-WelcomeMessage-Container', nodes);
+    }
+
+    protected renderWelcomeMessage(): React.ReactNode {
+        const providers = this.getSortedWelcomeMessageProviders();
+        const nodes = providers
+            .map(p => p.renderWelcomeMessage?.())
+            .filter((node): node is React.ReactNode => node !== undefined);
+        return this.renderContributedWelcomeContent('theia-WelcomeMessage-Container', nodes);
+    }
+
+    protected renderContributedWelcomeContent(containerClass: string, nodes: React.ReactNode[]): React.ReactNode {
+        if (nodes.length === 0) {
+            return <></>;
+        }
+        const withDividers: React.ReactNode[] = [];
+        nodes.forEach((node, index) => {
+            if (index > 0) {
+                withDividers.push(<div key={`welcome-divider-${index}`} className='theia-WelcomeMessage-Divider' />);
+            }
+            withDividers.push(node);
+        });
+        return <div className={containerClass}>
+            <div className='theia-WelcomeMessage-Container-Inner'>
+                {withDividers}
             </div>
-        </div >;
+        </div>;
     }
 
-    private renderLinkButton(title: string, openCommandId: string): React.ReactNode {
-        return <a
-            role={'button'}
-            tabIndex={0}
-            onClick={() => this.commandRegistry.executeCommand(openCommandId)}
-            onKeyDown={e => isEnterKey(e) && this.commandRegistry.executeCommand(openCommandId)}>
-            {title}
-        </a>;
-    }
-
-    private mapRequestToNode(request: ChatRequestModel): RequestNode {
+    protected mapRequestToNode(branch: ChatHierarchyBranch): RequestNode {
         return {
-            id: request.id,
             parent: this.model.root as CompositeTreeNode,
-            request
+            get id(): string {
+                return this.request.id;
+            },
+            get request(): ChatRequestModel {
+                return branch.get();
+            },
+            branch,
+            sessionId: this.chatModelId
         };
     }
 
-    private mapResponseToNode(response: ChatResponseModel): ResponseNode {
+    protected mapResponseToNode(response: ChatResponseModel): ResponseNode {
         return {
             id: response.id,
             parent: this.model.root as CompositeTreeNode,
-            response
+            response,
+            sessionId: this.chatModelId
         };
     }
+
+    protected readonly toDisposeOnChatModelChange = new DisposableCollection();
 
     /**
      * Tracks the ChatModel handed over.
      * Tracking multiple chat models will result in a weird UI
      */
     public trackChatModel(chatModel: ChatModel): void {
+        this.toDisposeOnChatModelChange.dispose();
         this.recreateModelTree(chatModel);
+        this.findWidget.setChatModel(chatModel);
+
         chatModel.getRequests().forEach(request => {
             if (!request.response.isComplete) {
                 request.response.onDidChange(() => this.scheduleUpdateScrollToRow());
             }
         });
-        this.toDispose.push(
+        this.toDisposeOnChatModelChange.pushAll([
+            Disposable.create(() => {
+                this.chatInputs.forEach(widget => widget.dispose());
+                this.chatInputs.clear();
+            }),
             chatModel.onDidChange(event => {
+                if (event.kind === 'enableEdit') {
+                    this.scrollToRow = this.rows.get(event.request.id)?.index;
+                    this.update();
+                    return;
+                } else if (event.kind === 'cancelEdit') {
+                    this.disposeChatInputWidget(event.request);
+                    this.scrollToRow = undefined;
+                    this.update();
+                    return;
+                } else if (event.kind === 'changeHierarchyBranch') {
+                    this.scrollToRow = undefined;
+                }
+
                 this.recreateModelTree(chatModel);
+
                 if (event.kind === 'addRequest' && !event.request.response.isComplete) {
                     event.request.response.onDidChange(() => this.scheduleUpdateScrollToRow());
+                } else if (event.kind === 'submitEdit') {
+                    event.branch.succeedingBranches().forEach(branch => {
+                        this.disposeChatInputWidget(branch.get());
+                    });
+                    this.onDidSubmitEditEmitter.fire(
+                        event.newRequest,
+                    );
                 }
             })
-        );
+        ]);
+    }
+
+    protected disposeChatInputWidget(request: ChatRequestModel): void {
+        const widget = this.chatInputs.get(request.id);
+        if (widget) {
+            widget.dispose();
+            this.chatInputs.delete(request.id);
+        }
+    }
+
+    protected override doUpdateRows(): void {
+        super.doUpdateRows();
+        // Follow new requests and responses to the end of the chat, unless auto-scroll is locked.
+        this.scheduleUpdateScrollToRow();
     }
 
     protected override getScrollToRow(): number | undefined {
+        // Only scroll to end if auto-scroll is enabled (not locked)
         if (this.shouldScrollToEnd) {
             return this.rows.size;
         }
-        return super.getScrollToRow();
+        // When auto-scroll is disabled, don't auto-scroll at all
+        return undefined;
     }
 
-    private async recreateModelTree(chatModel: ChatModel): Promise<void> {
+    protected async recreateModelTree(chatModel: ChatModel): Promise<void> {
         if (CompositeTreeNode.is(this.model.root)) {
             const nodes: TreeNode[] = [];
-            chatModel.getRequests().forEach(request => {
-                nodes.push(this.mapRequestToNode(request));
+            this.chatModelId = chatModel.id;
+            chatModel.getBranches().forEach(branch => {
+                const request = branch.get();
+                nodes.push(this.mapRequestToNode(branch));
                 nodes.push(this.mapResponseToNode(request.response));
             });
             this.model.root.children = nodes;
@@ -272,15 +566,24 @@ export class ChatViewTreeWidget extends TreeWidget {
         if (!(isRequestNode(node) || isResponseNode(node))) {
             return super.renderNode(node, props);
         }
+        const ariaLabel = isRequestNode(node)
+            ? nls.localize('theia/ai/chat-ui/yourMessage', 'Your message')
+            : nls.localize('theia/ai/chat-ui/responseFrom', 'Response from {0}', this.getAgentLabel(node));
         return <React.Fragment key={node.id}>
-            <div className='theia-ChatNode' onContextMenu={e => this.handleContextMenu(node, e)}>
+            <div
+                className='theia-ChatNode'
+                data-node-id={node.id}
+                role='article'
+                aria-label={ariaLabel}
+                onContextMenu={e => this.handleContextMenu(node, e)}
+            >
                 {this.renderAgent(node)}
                 {this.renderDetail(node)}
             </div>
         </React.Fragment>;
     }
 
-    private renderAgent(node: RequestNode | ResponseNode): React.ReactNode {
+    protected renderAgent(node: RequestNode | ResponseNode): React.ReactNode {
         const inProgress = isResponseNode(node) && !node.response.isComplete && !node.response.isCanceled && !node.response.isError;
         const waitingForInput = isResponseNode(node) && node.response.isWaitingForInput;
         const toolbarContributions = !inProgress
@@ -291,15 +594,37 @@ export class ChatViewTreeWidget extends TreeWidget {
             : [];
         const agentLabel = React.createRef<HTMLHeadingElement>();
         const agentDescription = this.getAgent(node)?.description;
+
+        const promptVariantId = isResponseNode(node) ? node.response.promptVariantId : undefined;
+        const isPromptVariantEdited = isResponseNode(node) ? !!node.response.isPromptVariantEdited : false;
+        const languageModel = isResponseNode(node) ? node.response.languageModel : undefined;
+
         return <React.Fragment>
             <div className='theia-ChatNodeHeader'>
                 <div className={`theia-AgentAvatar ${this.getAgentIconClassName(node)}`}></div>
                 <h3 ref={agentLabel}
                     className='theia-AgentLabel'
                     onMouseEnter={() => {
-                        if (agentDescription) {
+                        const tokenUsage = isResponseNode(node) ? node.response.tokenUsage : undefined;
+                        const hasTokenInfo = tokenUsage && (tokenUsage.inputTokens > 0 || tokenUsage.outputTokens > 0);
+                        const tokenInfo = hasTokenInfo
+                            ? `${nls.localize('theia/ai/chat-ui/tokenUsageLabel', 'Token Usage')}: ${nls.localizeByDefault(
+                                'Input: {0}', formatTokenCount(tokenUsage.inputTokens))} | ${nls.localizeByDefault(
+                                    'Output: {0}', formatTokenCount(tokenUsage.outputTokens))}`
+                            : undefined;
+                        if (agentDescription || tokenInfo) {
+                            const md = new MarkdownStringImpl();
+                            if (agentDescription) {
+                                md.appendMarkdown(agentDescription);
+                            }
+                            if (agentDescription && tokenInfo) {
+                                md.appendMarkdown('\n\n---\n\n');
+                            }
+                            if (tokenInfo) {
+                                md.appendMarkdown(tokenInfo);
+                            }
                             this.hoverService.requestHover({
-                                content: agentDescription,
+                                content: md,
                                 target: agentLabel.current!,
                                 position: 'right'
                             });
@@ -307,50 +632,73 @@ export class ChatViewTreeWidget extends TreeWidget {
                     }}>
                     {this.getAgentLabel(node)}
                 </h3>
-                {inProgress && !waitingForInput && <span className='theia-ChatContentInProgress'>Generating</span>}
-                {inProgress && waitingForInput && <span className='theia-ChatContentInProgress'>Waiting for input</span>}
-                <div className='theia-ChatNodeToolbar'>
-                    {!inProgress &&
-                        toolbarContributions.length > 0 &&
-                        toolbarContributions.map(action =>
-                            <span
-                                key={action.commandId}
-                                className={`theia-ChatNodeToolbarAction ${action.icon}`}
-                                title={action.tooltip}
-                                onClick={e => {
-                                    e.stopPropagation();
-                                    this.commandRegistry.executeCommand(action.commandId, node);
-                                }}
-                                onKeyDown={e => {
-                                    if (isEnterKey(e)) {
+                {promptVariantId && (
+                    <PromptVariantBadge
+                        variantId={promptVariantId}
+                        isEdited={isPromptVariantEdited}
+                        hoverService={this.hoverService}
+                    />
+                )}
+                {languageModel && (
+                    <ModelBadge
+                        modelId={languageModel}
+                        hoverService={this.hoverService}
+                    />
+                )}
+                {inProgress && !waitingForInput &&
+                    <span className='theia-ChatContentInProgress' role='status' aria-live='polite'>
+                        <span className={`${codicon('loading')} codicon-modifier-spin`} aria-hidden={true}></span>
+                        {nls.localize('theia/ai/chat-ui/chat-view-tree-widget/generating', 'Generating')}
+                    </span>}
+                {inProgress && waitingForInput &&
+                    <span className='theia-ChatContentInProgress' role='status' aria-live='polite'>
+                        <span className={`${codicon('loading')} codicon-modifier-spin`} aria-hidden={true}></span>
+                        {nls.localize('theia/ai/chat-ui/chat-view-tree-widget/waitingForInput', 'Waiting for input')}
+                    </span>}
+                {!inProgress &&
+                    <div className='theia-ChatNodeToolbar'>
+                        {toolbarContributions.length > 0 &&
+                            toolbarContributions.map(action =>
+                                <span
+                                    key={action.commandId}
+                                    className={`theia-ChatNodeToolbarAction ${action.icon}`}
+                                    title={action.tooltip}
+                                    aria-label={action.tooltip}
+                                    tabIndex={0}
+                                    onClick={e => {
                                         e.stopPropagation();
                                         this.commandRegistry.executeCommand(action.commandId, node);
-                                    }
-                                }}
-                                role='button'
-                            ></span>
-                        )}
-                </div>
+                                    }}
+                                    onKeyDown={e => {
+                                        if (isEnterKey(e)) {
+                                            e.stopPropagation();
+                                            this.commandRegistry.executeCommand(action.commandId, node);
+                                        }
+                                    }}
+                                    role='button'
+                                ></span>
+                            )}
+                    </div>}
             </div>
         </React.Fragment>;
     }
 
-    private getAgentLabel(node: RequestNode | ResponseNode): string {
+    protected getAgentLabel(node: RequestNode | ResponseNode): string {
         if (isRequestNode(node)) {
             // TODO find user name
-            return 'You';
+            return nls.localize('theia/ai/chat-ui/chat-view-tree-widget/you', 'You');
         }
-        return this.getAgent(node)?.name ?? 'AI';
+        return this.getAgent(node)?.name ?? nls.localize('theia/ai/chat-ui/chat-view-tree-widget/ai', 'AI');
     }
 
-    private getAgent(node: RequestNode | ResponseNode): ChatAgent | undefined {
+    protected getAgent(node: RequestNode | ResponseNode): ChatAgent | undefined {
         if (isRequestNode(node)) {
             return undefined;
         }
         return node.response.agentId ? this.chatAgentService.getAgent(node.response.agentId) : undefined;
     }
 
-    private getAgentIconClassName(node: RequestNode | ResponseNode): string | undefined {
+    protected getAgentIconClassName(node: RequestNode | ResponseNode): string | undefined {
         if (isRequestNode(node)) {
             return codicon('account');
         }
@@ -359,7 +707,7 @@ export class ChatViewTreeWidget extends TreeWidget {
         return agent?.iconClass ?? codicon('copilot');
     }
 
-    private renderDetail(node: RequestNode | ResponseNode): React.ReactNode {
+    protected renderDetail(node: RequestNode | ResponseNode): React.ReactNode {
         if (isRequestNode(node)) {
             return this.renderChatRequest(node);
         }
@@ -368,17 +716,46 @@ export class ChatViewTreeWidget extends TreeWidget {
         };
     }
 
-    private renderChatRequest(node: RequestNode): React.ReactNode {
+    protected renderChatRequest(node: RequestNode): React.ReactNode {
         return <ChatRequestRender
             node={node}
             hoverService={this.hoverService}
             chatAgentService={this.chatAgentService}
             variableService={this.variableService}
             openerService={this.openerService}
+            provideChatInputWidget={() => {
+                const editableNode = node;
+                if (isEditableRequestNode(editableNode)) {
+                    let widget = this.chatInputs.get(editableNode.id);
+                    if (!widget) {
+                        widget = this.inputWidgetFactory({
+                            node: editableNode,
+                            initialValue: editableNode.request.message.request.text,
+                            onQuery: async (query, modeId, capabilityOverrides, genericCapabilitySelections, serverToolSelections) => {
+                                // Carry the edit widget's current selections so an edited+resent request honors
+                                // the capabilities (e.g. enabled server tools) the user picked while editing.
+                                editableNode.request.submitEdit({ text: query, modeId, capabilityOverrides, genericCapabilitySelections, serverToolSelections });
+                            },
+                            branch: editableNode.branch
+                        });
+
+                        this.chatInputs.set(editableNode.id, widget);
+
+                        widget.disposed.connect(() => {
+                            this.chatInputs.delete(editableNode.id);
+                            editableNode.request.cancelEdit();
+                        });
+                    }
+
+                    return widget;
+                }
+
+                return;
+            }}
         />;
     }
 
-    private renderChatResponse(node: ResponseNode): React.ReactNode {
+    protected renderChatResponse(node: ResponseNode): React.ReactNode {
         return (
             <div className={'theia-ResponseNode'}>
                 {!node.response.isComplete
@@ -409,7 +786,7 @@ export class ChatViewTreeWidget extends TreeWidget {
         );
     }
 
-    private getChatResponsePartRenderer(content: ChatResponseContent, node: ResponseNode): React.ReactNode {
+    protected getChatResponsePartRenderer(content: ChatResponseContent, node: ResponseNode): React.ReactNode {
         const renderer = this.chatResponsePartRenderers.getContributions().reduce<[number, ChatResponsePartRenderer<ChatResponseContent> | undefined]>(
             (prev, current) => {
                 const prio = current.canHandle(content);
@@ -419,8 +796,8 @@ export class ChatViewTreeWidget extends TreeWidget {
             },
             [-1, undefined])[1];
         if (!renderer) {
-            console.error('No renderer found for content', content);
-            return <div>Error: No renderer found</div>;
+            this.logger.error('No renderer found for content', content);
+            return <div>{nls.localize('theia/ai/chat-ui/chat-view-tree-widget/noRenderer', 'Error: No renderer found')}</div>;
         }
         return renderer.render(content, node);
     }
@@ -429,28 +806,152 @@ export class ChatViewTreeWidget extends TreeWidget {
         this.contextMenuRenderer.render({
             menuPath: ChatViewTreeWidget.CONTEXT_MENU,
             anchor: { x: event.clientX, y: event.clientY },
-            args: [node]
+            args: [node],
+            context: event.currentTarget
         });
         event.preventDefault();
     }
+
+    protected override handleSpace(event: KeyboardEvent): boolean {
+        // We need to return false to prevent the handler within
+        // packages/core/src/browser/widgets/widget.ts
+        // Otherwise, the space key will never be handled by the monaco editor
+        return false;
+    }
 }
 
-const ChatRequestRender = (
+interface WidgetContainerProps {
+    widget: ReactWidget;
+}
+
+const WidgetContainer: React.FC<WidgetContainerProps> = ({ widget }) => {
+    // eslint-disable-next-line no-null/no-null
+    const containerRef = React.useRef<HTMLDivElement | null>(null);
+
+    React.useEffect(() => {
+        if (containerRef.current && !widget.isAttached) {
+            Widget.attach(widget, containerRef.current);
+        }
+    }, [containerRef.current]);
+
+    // Clean up
+    React.useEffect(() =>
+        () => {
+            setTimeout(() => {
+                // Delay clean up to allow react to finish its rendering cycle
+                widget.clearFlag(Widget.Flag.IsAttached);
+                widget.dispose();
+            });
+        }, []);
+
+    return <div ref={containerRef} />;
+};
+
+export const ChatRequestRender = (
     {
-        node, hoverService, chatAgentService, variableService, openerService
+        node, hoverService, chatAgentService, variableService, openerService,
+        provideChatInputWidget
     }: {
         node: RequestNode,
         hoverService: HoverService,
         chatAgentService: ChatAgentService,
         variableService: AIVariableService,
-        openerService: OpenerService
+        openerService: OpenerService,
+        provideChatInputWidget: () => ReactWidget | undefined,
     }) => {
     const parts = node.request.message.parts;
+    if (EditableChatRequestModel.isEditing(node.request)) {
+        const widget = provideChatInputWidget();
+        if (widget) {
+            return <div className="theia-RequestNode">
+                <WidgetContainer widget={widget}></WidgetContainer>
+            </div>;
+        }
+    }
+
+    const renderFooter = () => {
+        if (node.branch.items.length < 2) {
+            return;
+        }
+
+        const isFirst = node.branch.activeBranchIndex === 0;
+        const isLast = node.branch.activeBranchIndex === node.branch.items.length - 1;
+
+        return (
+            <div className='theia-RequestNode-Footer'>
+                <div className={`item ${isFirst ? '' : 'enabled'}`}>
+                    <div className="codicon codicon-chevron-left action-label" title="Previous" onClick={() => {
+                        node.branch.enablePrevious();
+                    }}></div>
+                </div>
+                <small>
+                    <span>{node.branch.activeBranchIndex + 1}/</span>
+                    <span>{node.branch.items.length}</span>
+                </small>
+                <div className={`item ${isLast ? '' : 'enabled'}`}>
+                    <div className='codicon codicon-chevron-right action-label' title="Next" onClick={() => {
+                        node.branch.enableNext();
+                    }}></div>
+                </div>
+            </div>
+        );
+    };
+
+    // Single-pass: parse inline image parts once and index by part position
+    const inlineImageByIndex = ImageContextVariable.extractInlineImagesWithIndices(parts);
+    const inlineImageDataSet = new Set<string>(Array.from(inlineImageByIndex.values()).map(v => v.data));
+
+    const renderContextImages = () => {
+        const seenData = new Set<string>();
+        const resolvedImages = (node.request.context?.variables ?? [])
+            .filter(v => ImageContextVariable.isResolvedImageContext(v))
+            .map(v => ImageContextVariable.parseResolved(v))
+            .filter((v): v is NonNullable<typeof v> => v !== undefined)
+            .filter(v => !inlineImageDataSet.has(v.data))
+            .filter(v => {
+                if (seenData.has(v.data)) {
+                    return false;
+                }
+                seenData.add(v.data);
+                return true;
+            });
+        if (resolvedImages.length === 0) {
+            return undefined;
+        }
+        return (
+            <div className='theia-RequestNode-ImagePreview'>
+                {resolvedImages.map((resolved, i) => {
+                    const altText = resolved.name ?? resolved.wsRelativePath?.split('/').pop() ?? 'Image';
+                    return (
+                        <div key={i} className='theia-RequestNode-ImagePreview-Item'>
+                            <img
+                                src={`data:${resolved.mimeType};base64,${resolved.data}`}
+                                alt={altText}
+                            />
+                        </div>
+                    );
+                })}
+            </div>
+        );
+    };
+
     return (
         <div className="theia-RequestNode">
             <p>
                 {parts.map((part, index) => {
-                    if (part instanceof ParsedChatRequestAgentPart || part instanceof ParsedChatRequestVariablePart) {
+                    const resolvedInlineImage = inlineImageByIndex.get(index);
+                    if (resolvedInlineImage) {
+                        const altText = resolvedInlineImage.name ?? resolvedInlineImage.wsRelativePath?.split('/').pop() ?? 'Image';
+                        return (
+                            <span key={index} className='theia-RequestNode-ImagePreview-Item theia-RequestNode-ImagePreview-Inline'>
+                                <img
+                                    src={`data:${resolvedInlineImage.mimeType};base64,${resolvedInlineImage.data}`}
+                                    alt={altText}
+                                />
+                            </span>
+                        );
+                    }
+                    if (part instanceof ParsedChatRequestAgentPart || part instanceof ParsedChatRequestVariablePart || part instanceof ParsedChatRequestFunctionPart) {
                         let description = undefined;
                         let className = '';
                         if (part instanceof ParsedChatRequestAgentPart) {
@@ -459,6 +960,9 @@ const ChatRequestRender = (
                         } else if (part instanceof ParsedChatRequestVariablePart) {
                             description = variableService.getVariable(part.variableName)?.description;
                             className = 'theia-RequestNode-VariableLabel';
+                        } else if (part instanceof ParsedChatRequestFunctionPart) {
+                            description = part.toolRequest?.description;
+                            className = 'theia-RequestNode-FunctionLabel';
                         }
                         return (
                             <HoverableLabel
@@ -470,14 +974,22 @@ const ChatRequestRender = (
                             />
                         );
                     } else {
-                        // maintain the leading and trailing spaces with explicit `&nbsp;`, otherwise they would get trimmed by the markdown renderer
-                        const ref = useMarkdownRendering(part.text.replace(/^\s|\s$/g, '&nbsp;'), openerService, true);
+                        const ref = useMarkdownRendering(
+                            MarkdownRendering.prepareRequestText(part.text),
+                            openerService,
+                            true,
+                            undefined,
+                            // User requests are authored by the user, so their resources are trusted and rendered directly.
+                            false
+                        );
                         return (
                             <span key={index} ref={ref}></span>
                         );
                     }
                 })}
             </p>
+            {renderContextImages()}
+            {renderFooter()}
         </div>
     );
 };
@@ -510,23 +1022,3 @@ const HoverableLabel = (
         </span>
     );
 };
-
-const ProgressMessage = (c: ChatProgressMessage) => (
-    <div className='theia-ResponseNode-ProgressMessage'>
-        <Indicator {...c} /> {c.content}
-    </div>
-);
-
-const Indicator = (progressMessage: ChatProgressMessage) => (
-    <span className='theia-ResponseNode-ProgressMessage-Indicator'>
-        {progressMessage.status === 'inProgress' &&
-            <i className={'fa fa-spinner fa-spin ' + progressMessage.status}></i>
-        }
-        {progressMessage.status === 'completed' &&
-            <i className={'fa fa-check ' + progressMessage.status}></i>
-        }
-        {progressMessage.status === 'failed' &&
-            <i className={'fa fa-warning ' + progressMessage.status}></i>
-        }
-    </span>
-);

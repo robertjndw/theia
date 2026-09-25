@@ -4,7 +4,7 @@
 
 <img src='https://raw.githubusercontent.com/eclipse-theia/theia/master/logo/theia.svg?sanitize=true' alt='theia-ext-logo' width='100px' />
 
-<h2>ECLIPSE THEIA - Open AI EXTENSION</h2>
+<h2>ECLIPSE THEIA - OPEN AI EXTENSION</h2>
 
 <hr />
 
@@ -23,35 +23,37 @@ You can configure the end points via the `ai-features.openAiCustom.customOpenAiM
 
 ```ts
 {
-    model: string
-    url: string
-    id?: string
-    apiKey?: string | true
-    apiVersion?: string | true
-    supportsDeveloperMessage?: boolean
+    model: string,
+    url: string,
+    id?: string,
+    apiKey?: string | true,
+    apiVersion?: string | true,
+    developerMessageSettings?: 'user' | 'system' | 'developer' | 'mergeWithFollowingUserMessage' | 'skip',
     enableStreaming?: boolean
 }
 ```
 
 - `model` and `url` are mandatory attributes, indicating the end point and model to use
 - `id` is an optional attribute which is used in the UI to refer to this configuration
-- `apiKey` is either the key to access the API served at the given URL or `true` to use the global OpenAI API key. If not given 'no-key' will be used.
+- `apiKey` is either the key to access the API served at the given URL or `true` to use the global OpenAI API key. If not given 'no-key' will be used. The `apiKey` will be send as a Bearer Token in the authorization request.
 - `apiVersion` is either the api version to access the API served at the given URL in Azure or `true` to use the global OpenAI API version.
-- `supportsDeveloperMessage` is a flag that indicates whether the model supports the `developer` role or not. `true` by default.
+- `developerMessageSettings` Controls the handling of system messages: `user`, `system`, and `developer` will be used as a role, `mergeWithFollowingUserMessage` will prefix the
+  following user message with the system message or convert the system message to user message if the next message is not a user message. `skip` will just remove the system message.
+  Defaulting to `developer`.
 - `enableStreaming` is a flag that indicates whether the streaming API shall be used or not. `true` by default.
 
 ### Azure OpenAI
 
-To use a custom OpenAI model hosted on Azure, the `AzureOpenAI` class needs to be used, as described in the 
+To use a custom OpenAI model hosted on Azure, the `AzureOpenAI` class needs to be used, as described in the
 [openai-node docs](https://github.com/openai/openai-node?tab=readme-ov-file#microsoft-azure-openai).
 
 Requests to an OpenAI model hosted on Azure need an `apiVersion`. To configure a custom OpenAI model in Theia you therefore need to configure the `apiVersion` with the end point.
 Note that if you don't configure an `apiVersion`, the default `OpenAI` object is used for initialization and a connection to an Azure hosted OpenAI model will fail.
 
-An OpenAI model version deployed on Azure might not support the `developer` role. In that case it is possible to configure whether the `developer` role is supported or not via the 
-`supportsDeveloperMessage` option, which defaults to `true`.
+An OpenAI model version deployed on Azure might not support the `developer` role. In that case it is possible to configure whether the `developer` role is supported or not via the
+`developerMessageSettings` option, e.g. setting it to `system` or `user`.
 
-The following snippet shows a possible configuration to access an OpenAI model hosted on Azure. The `AZURE_OPENAI_API_BASE_URL` needs to be given without the `/chat/completions` 
+The following snippet shows a possible configuration to access an OpenAI model hosted on Azure. The `AZURE_OPENAI_API_BASE_URL` needs to be given without the `/chat/completions`
 path and without the `api-version` parameter, e.g. _`https://<my_prefix>.openai.azure.com/openai/deployments/<my_deployment>`_
 
 ```json
@@ -64,7 +66,7 @@ path and without the `api-version` parameter, e.g. _`https://<my_prefix>.openai.
       "id": "azure-deployment",
       "apiKey": "<AZURE_OPENAI_API_KEY>",
       "apiVersion": "<AZURE_OPENAI_API_VERSION>",
-      "supportsDeveloperMessage": false
+      "developerMessageSettings": "system"
     }
   ],
   "ai-features.agentSettings": {
@@ -90,6 +92,7 @@ path and without the `api-version` parameter, e.g. _`https://<my_prefix>.openai.
 
 ## Additional Information
 
+- [API documentation for `@theia/ai-openai`](https://eclipse-theia.github.io/theia/docs/next/modules/_theia_ai-openai.html)
 - [Theia - GitHub](https://github.com/eclipse-theia/theia)
 - [Theia - Website](https://theia-ide.org/)
 

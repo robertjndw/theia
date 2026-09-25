@@ -24,9 +24,9 @@ import {
     ViewContainerIdentifier, ViewContainer, createTreeContainer, TreeWidget, LabelProviderContribution, LabelProvider,
     UndoRedoHandler, DiffUris, Navigatable, SplitWidget,
     noopWidgetStatusBarContribution,
-    WidgetStatusBarContribution
+    WidgetStatusBarContribution, WidgetContextKeyContribution
 } from '@theia/core/lib/browser';
-import { MaybePromise, CommandContribution, ResourceResolver, bindContributionProvider, URI, generateUuid } from '@theia/core/lib/common';
+import { MaybePromise, CommandContribution, ResourceResolver, bindRootContributionProvider, URI, generateUuid, PreferenceContribution, nls } from '@theia/core/lib/common';
 import { WebSocketConnectionProvider } from '@theia/core/lib/browser/messaging';
 import { HostedPluginSupport } from '../../hosted/browser/hosted-plugin';
 import { HostedPluginWatcher } from '../../hosted/browser/hosted-plugin-watcher';
@@ -60,7 +60,6 @@ import { OutputChannelRegistryMainImpl } from './output-channel-registry-main';
 import { WebviewWidget } from './webview/webview';
 import { WebviewEnvironment } from './webview/webview-environment';
 import { WebviewThemeDataProvider } from './webview/webview-theme-data-provider';
-import { bindWebviewPreferences } from './webview/webview-preferences';
 import { WebviewResourceCache } from './webview/webview-resource-cache';
 import { PluginIconThemeService, PluginIconThemeFactory, PluginIconThemeDefinition, PluginIconTheme } from './plugin-icon-theme-service';
 import { PluginTreeViewNodeLabelProvider } from './view/plugin-tree-view-node-label-provider';
@@ -68,7 +67,7 @@ import { WebviewWidgetFactory } from './webview/webview-widget-factory';
 import { CommentsService, PluginCommentService } from './comments/comments-service';
 import { CommentingRangeDecorator } from './comments/comments-decorator';
 import { CommentsContribution } from './comments/comments-contribution';
-import { CommentsContextKeyService } from './comments/comments-context-key-service';
+import { CommentsContext } from './comments/comments-context';
 import { PluginCustomEditorRegistry } from './custom-editors/plugin-custom-editor-registry';
 import { CustomEditorWidgetFactory } from '../browser/custom-editors/custom-editor-widget-factory';
 import { CustomEditorWidget } from './custom-editors/custom-editor-widget';
@@ -77,7 +76,6 @@ import { WebviewFrontendSecurityWarnings } from './webview/webview-frontend-secu
 import { PluginAuthenticationServiceImpl } from './plugin-authentication-service';
 import { AuthenticationService } from '@theia/core/lib/browser/authentication-service';
 import { bindTreeViewDecoratorUtilities, TreeViewDecoratorService } from './view/tree-view-decorator-service';
-import { CodeEditorWidgetUtil } from './menus/vscode-theia-menu-mappings';
 import { PluginMenuCommandAdapter } from './menus/plugin-menu-command-adapter';
 import './theme-icon-override';
 import { PluginIconService } from './plugin-icon-service';
@@ -91,6 +89,12 @@ import { CellOutputWebviewImpl, createCellOutputWebviewContainer } from './noteb
 import { ArgumentProcessorContribution } from './command-registry-main';
 import { WebviewSecondaryWindowSupport } from './webview/webview-secondary-window-support';
 import { CustomEditorUndoRedoHandler } from './custom-editors/custom-editor-undo-redo-handler';
+import { CustomEditorNavigationContribution } from './custom-editors/custom-editor-navigation-contribution';
+import { bindWebviewPreferences } from '../common/webview-preferences';
+import { bindPluginHostEnvironmentPreferences } from '../common/plugin-host-environment-preferences';
+import { WebviewFrontendPreferenceContribution } from './webview/webview-frontend-preference-contribution';
+import { PluginExtToolbarItemArgumentProcessor } from './plugin-ext-argument-processor';
+import { WorkspaceRestriction, WorkspaceRestrictionContribution } from '@theia/workspace/lib/browser/workspace-trust-service';
 
 export default new ContainerModule((bind, unbind, isBound, rebind) => {
 
@@ -181,6 +185,9 @@ export default new ContainerModule((bind, unbind, isBound, rebind) => {
     })).inSingletonScope();
 
     bindWebviewPreferences(bind);
+    bindPluginHostEnvironmentPreferences(bind);
+    bind(WebviewFrontendPreferenceContribution).toSelf().inSingletonScope();
+    bind(PreferenceContribution).toService(WebviewFrontendPreferenceContribution);
     bind(WebviewEnvironment).toSelf().inSingletonScope();
     bind(WebviewThemeDataProvider).toSelf().inSingletonScope();
     bind(WebviewResourceCache).toSelf().inSingletonScope();
@@ -191,6 +198,7 @@ export default new ContainerModule((bind, unbind, isBound, rebind) => {
     bind(WebviewSecondaryWindowSupport).toSelf().inSingletonScope();
     bind(FrontendApplicationContribution).toService(WebviewSecondaryWindowSupport);
     bind(FrontendApplicationContribution).toService(WebviewContextKeys);
+    bind(WidgetContextKeyContribution).toService(WebviewContextKeys);
     bind(WidgetStatusBarContribution).toConstantValue(noopWidgetStatusBarContribution(WebviewWidget));
 
     bind(PluginCustomEditorRegistry).toSelf().inSingletonScope();
@@ -200,6 +208,9 @@ export default new ContainerModule((bind, unbind, isBound, rebind) => {
     bind(WidgetFactory).toService(CustomEditorWidgetFactory);
     bind(CustomEditorUndoRedoHandler).toSelf().inSingletonScope();
     bind(UndoRedoHandler).toService(CustomEditorUndoRedoHandler);
+
+    bind(CustomEditorNavigationContribution).toSelf().inSingletonScope();
+    bind(FrontendApplicationContribution).toService(CustomEditorNavigationContribution);
 
     bind(WidgetFactory).toDynamicValue(ctx => ({
         id: CustomEditorWidget.SIDE_BY_SIDE_FACTORY_ID,
@@ -250,13 +261,12 @@ export default new ContainerModule((bind, unbind, isBound, rebind) => {
 
     bind(MenusContributionPointHandler).toSelf().inSingletonScope();
     bind(PluginMenuCommandAdapter).toSelf().inSingletonScope();
-    bind(CodeEditorWidgetUtil).toSelf().inSingletonScope();
     bind(KeybindingsContributionPointHandler).toSelf().inSingletonScope();
     bind(PluginContributionHandler).toSelf().inSingletonScope();
 
     bind(TextContentResourceResolver).toSelf().inSingletonScope();
     bind(ResourceResolver).toService(TextContentResourceResolver);
-    bindContributionProvider(bind, MainPluginApiProvider);
+    bindRootContributionProvider(bind, MainPluginApiProvider);
 
     bind(PluginDebugService).toSelf().inSingletonScope();
     rebind(DebugService).toService(PluginDebugService);
@@ -266,7 +276,7 @@ export default new ContainerModule((bind, unbind, isBound, rebind) => {
     bind(CommentsService).to(PluginCommentService).inSingletonScope();
     bind(CommentingRangeDecorator).toSelf().inSingletonScope();
     bind(CommentsContribution).toSelf().inSingletonScope();
-    bind(CommentsContextKeyService).toSelf().inSingletonScope();
+    bind(CommentsContext).toSelf().inSingletonScope();
 
     bind(WebviewFrontendSecurityWarnings).toSelf().inSingletonScope();
     bind(FrontendApplicationContribution).toService(WebviewFrontendSecurityWarnings);
@@ -287,6 +297,36 @@ export default new ContainerModule((bind, unbind, isBound, rebind) => {
     bind(CellOutputWebviewFactory).toFactory(ctx => () =>
         createCellOutputWebviewContainer(ctx.container).get(CellOutputWebviewImpl)
     );
-    bindContributionProvider(bind, ArgumentProcessorContribution);
+    bindRootContributionProvider(bind, ArgumentProcessorContribution);
+
+    bind(PluginExtToolbarItemArgumentProcessor).toSelf().inSingletonScope();
+    bind(ArgumentProcessorContribution).toService(PluginExtToolbarItemArgumentProcessor);
+
+    bind(WorkspaceRestrictionContribution).toDynamicValue(ctx => {
+        const hostedPlugin = ctx.container.get(HostedPluginSupport);
+        return {
+            getRestrictions(): WorkspaceRestriction[] {
+                if (hostedPlugin.disabledByTrust.size === 0) {
+                    return [];
+                }
+                return [{
+                    label: nls.localize('theia/plugin-ext/extensionsRestrictedMode',
+                        'Some extensions are disabled in Restricted Mode'),
+                    details: Array.from(hostedPlugin.disabledByTrust)
+                }];
+            },
+            requiresReloadOnTrustChange(newTrust: boolean): boolean {
+                if (newTrust) {
+                    // Granting trust: reload only if plugins were actually blocked.
+                    return hostedPlugin.disabledByTrust.size > 0;
+                }
+                // Revoking trust: reload only if any loaded plugin declares supported: false,
+                // meaning it must be stopped now that the workspace is no longer trusted.
+                return hostedPlugin.plugins.some(
+                    p => p.model.untrustedWorkspacesSupport === false
+                );
+            }
+        };
+    }).inSingletonScope();
 
 });

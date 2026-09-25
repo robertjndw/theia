@@ -13,7 +13,7 @@
 //
 // SPDX-License-Identifier: EPL-2.0 OR GPL-2.0-only WITH Classpath-exception-2.0
 //
-import { IpcRendererEvent } from '@theia/electron/shared/electron';
+import { IpcRendererEvent, webUtils } from '@theia/electron/shared/electron';
 import { Disposable } from '../common/disposable';
 import { StopReason } from '../common/frontend-application-state';
 import { NativeKeyboardLayout } from '../common/keyboard/keyboard-layout-provider';
@@ -27,7 +27,9 @@ import {
     CHANNEL_REQUEST_RELOAD, CHANNEL_APP_STATE_CHANGED, CHANNEL_SHOW_ITEM_IN_FOLDER, CHANNEL_READ_CLIPBOARD, CHANNEL_WRITE_CLIPBOARD,
     CHANNEL_KEYBOARD_LAYOUT_CHANGED, CHANNEL_IPC_CONNECTION, InternalMenuDto, CHANNEL_REQUEST_SECONDARY_CLOSE, CHANNEL_SET_BACKGROUND_COLOR,
     CHANNEL_WC_METADATA, CHANNEL_ABOUT_TO_CLOSE, CHANNEL_OPEN_WITH_SYSTEM_APP,
-    CHANNEL_OPEN_URL
+    CHANNEL_OPEN_URL, CHANNEL_SET_THEME, CHANNEL_OPEN_DEVTOOLS_FOR_WINDOW,
+    CHANNEL_UPDATE_RECENT_WORKSPACES,
+    CHANNEL_SET_AUTO_HIDE_MENU_BAR
 } from '../electron-common/electron-api';
 
 // eslint-disable-next-line import/no-extraneous-dependencies
@@ -79,6 +81,7 @@ function convertMenu(menu: MenuDto[] | undefined, handlerMap: Map<number, () => 
 const api: TheiaCoreAPI = {
     WindowMetadata: { webcontentId: 'none' },
     setMenuBarVisible: (visible: boolean, windowName?: string) => ipcRenderer.send(CHANNEL_SET_MENU_BAR_VISIBLE, visible, windowName),
+    setAutoHideMenuBar: (enabled: boolean, windowName?: string) => ipcRenderer.send(CHANNEL_SET_AUTO_HIDE_MENU_BAR, enabled, windowName),
     setMenu: (menu: MenuDto[] | undefined) => {
         commandHandlers.delete(mainMenuId);
         const handlers = new Map<number, () => void>();
@@ -90,6 +93,8 @@ const api: TheiaCoreAPI = {
     showItemInFolder: fsPath => {
         ipcRenderer.send(CHANNEL_SHOW_ITEM_IN_FOLDER, fsPath);
     },
+
+    getPathForFile: (file: File) => webUtils.getPathForFile(file),
     openWithSystemApp: location => {
         ipcRenderer.send(CHANNEL_OPEN_WITH_SYSTEM_APP, location);
     },
@@ -119,6 +124,9 @@ const api: TheiaCoreAPI = {
     },
     setBackgroundColor: function (backgroundColor): void {
         ipcRenderer.send(CHANNEL_SET_BACKGROUND_COLOR, backgroundColor);
+    },
+    setTheme: function (theme): void {
+        ipcRenderer.send(CHANNEL_SET_THEME, theme);
     },
     minimize: function (): void {
         ipcRenderer.send(CHANNEL_MINIMIZE);
@@ -160,7 +168,7 @@ const api: TheiaCoreAPI = {
         return Disposable.create(() => ipcRenderer.off(CHANNEL_ON_WINDOW_EVENT, h));
     },
     setCloseRequestHandler: function (handler: (stopReason: StopReason) => Promise<boolean>): void {
-        ipcRenderer.on(CHANNEL_REQUEST_CLOSE, async (event, stopReason, confirmChannel, cancelChannel) => {
+        ipcRenderer.on(CHANNEL_REQUEST_CLOSE, async (event: Electron.IpcRendererEvent, stopReason: StopReason, confirmChannel: string, cancelChannel: string) => {
             try {
                 if (await handler(stopReason)) {
                     event.sender.send(confirmChannel);
@@ -195,12 +203,15 @@ const api: TheiaCoreAPI = {
     toggleDevTools: function (): void {
         ipcRenderer.send(CHANNEL_TOGGLE_DEVTOOLS);
     },
+    openDevToolsForWindow: function (windowName: string): void {
+        ipcRenderer.send(CHANNEL_OPEN_DEVTOOLS_FOR_WINDOW, windowName);
+    },
     getZoomLevel: function (): Promise<number> {
         return ipcRenderer.invoke(CHANNEL_GET_ZOOM_LEVEL);
     },
 
-    setZoomLevel: function (desired: number): void {
-        ipcRenderer.send(CHANNEL_SET_ZOOM_LEVEL, desired);
+    setZoomLevel: function (desired: number, windowName?: string): void {
+        ipcRenderer.send(CHANNEL_SET_ZOOM_LEVEL, desired, windowName);
     },
     isFullScreenable: function (): boolean {
         return ipcRenderer.sendSync(CHANNEL_IS_FULL_SCREENABLE);
@@ -238,7 +249,9 @@ const api: TheiaCoreAPI = {
     sendData: data => {
         ipcRenderer.send(CHANNEL_IPC_CONNECTION, data);
     },
-    useNativeElements: !('THEIA_ELECTRON_DISABLE_NATIVE_ELEMENTS' in process.env && process.env.THEIA_ELECTRON_DISABLE_NATIVE_ELEMENTS === '1')
+    useNativeElements: !('THEIA_ELECTRON_DISABLE_NATIVE_ELEMENTS' in process.env && process.env.THEIA_ELECTRON_DISABLE_NATIVE_ELEMENTS === '1'),
+
+    updateRecentWorkspaces: (workspaceUris: string[], categoryName: string): void => { ipcRenderer.send(CHANNEL_UPDATE_RECENT_WORKSPACES, workspaceUris, categoryName); }
 };
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -249,7 +262,7 @@ function createDisposableListener(channel: string, handler: (event: any, ...args
 
 export function preload(): void {
     console.log('exposing theia core electron api');
-    ipcRenderer.on(CHANNEL_INVOKE_MENU, (_, menuId: number, handlerId: number) => {
+    ipcRenderer.on(CHANNEL_INVOKE_MENU, (_: Electron.IpcRendererEvent, menuId: number, handlerId: number) => {
         const map = commandHandlers.get(menuId);
         if (map) {
             const handler = map.get(handlerId);
@@ -258,7 +271,9 @@ export function preload(): void {
             }
         }
     });
-    api.WindowMetadata.webcontentId = ipcRenderer.sendSync(CHANNEL_WC_METADATA);
+    // Synchronous, so the metadata (including the parsed options of a forwarded launch) is in place
+    // before any frontend code runs.
+    api.WindowMetadata = ipcRenderer.sendSync(CHANNEL_WC_METADATA);
 
     contextBridge.exposeInMainWorld('electronTheiaCore', api);
 }

@@ -21,15 +21,16 @@ import { SearchInWorkspaceOptions } from '../common/search-in-workspace-interfac
 import * as React from '@theia/core/shared/react';
 import { createRoot, Root } from '@theia/core/shared/react-dom/client';
 import { Event, Emitter, Disposable } from '@theia/core/lib/common';
-import { WorkspaceService } from '@theia/workspace/lib/browser';
+import { WorkspaceSearchFilterService, WorkspaceService } from '@theia/workspace/lib/browser';
 import { SearchInWorkspaceContextKeyService } from './search-in-workspace-context-key-service';
 import { CancellationTokenSource } from '@theia/core';
 import { ProgressBarFactory } from '@theia/core/lib/browser/progress-bar-factory';
 import { EditorManager } from '@theia/editor/lib/browser';
-import { SearchInWorkspacePreferences } from './search-in-workspace-preferences';
+import { SearchInWorkspacePreferences } from '../common/search-in-workspace-preferences';
 import { SearchInWorkspaceInput } from './components/search-in-workspace-input';
 import { SearchInWorkspaceTextArea } from './components/search-in-workspace-textarea';
 import { nls } from '@theia/core/lib/common/nls';
+import { Deferred } from '@theia/core/lib/common/promise-util';
 
 export interface SearchFieldState {
     className: string;
@@ -46,7 +47,7 @@ export class SearchInWorkspaceWidget extends BaseWidget implements StatefulWidge
     protected matchCaseState: SearchFieldState;
     protected wholeWordState: SearchFieldState;
     protected regExpState: SearchFieldState;
-    protected includeIgnoredState: SearchFieldState;
+    protected useExcludeSettingsState: SearchFieldState;
 
     protected showSearchDetails = false;
     protected _hasResults = false;
@@ -70,6 +71,8 @@ export class SearchInWorkspaceWidget extends BaseWidget implements StatefulWidge
     private replaceRef = React.createRef<SearchInWorkspaceTextArea>();
     private includeRef = React.createRef<SearchInWorkspaceInput>();
     private excludeRef = React.createRef<SearchInWorkspaceInput>();
+
+    private refsAreSet = new Deferred();
 
     protected _showReplaceField = false;
     protected get showReplaceField(): boolean {
@@ -100,6 +103,9 @@ export class SearchInWorkspaceWidget extends BaseWidget implements StatefulWidge
 
     @inject(SearchInWorkspacePreferences)
     protected readonly searchInWorkspacePreferences: SearchInWorkspacePreferences;
+
+    @inject(WorkspaceSearchFilterService)
+    protected readonly searchFilterService: WorkspaceSearchFilterService;
 
     protected searchFormContainerRoot: Root;
 
@@ -134,10 +140,10 @@ export class SearchInWorkspaceWidget extends BaseWidget implements StatefulWidge
             enabled: false,
             title: nls.localizeByDefault('Use Regular Expression')
         };
-        this.includeIgnoredState = {
+        this.useExcludeSettingsState = {
             className: codicon('eye'),
-            enabled: false,
-            title: nls.localize('theia/search-in-workspace/includeIgnoredFiles', 'Include Ignored Files')
+            enabled: true,
+            title: nls.localizeByDefault('Use Exclude Settings and Ignore Files')
         };
         this.searchInWorkspaceOptions = {
             matchCase: false,
@@ -169,6 +175,10 @@ export class SearchInWorkspaceWidget extends BaseWidget implements StatefulWidge
             }
         }));
 
+        this.toDispose.push(this.searchFilterService.onExclusionGlobsChanged(() => {
+            this.performSearch();
+        }));
+
         this.toDispose.push(this.resultTreeWidget);
         this.toDispose.push(this.resultTreeWidget.onExpansionChanged(() => {
             this.onDidUpdateEmitter.fire();
@@ -182,7 +192,7 @@ export class SearchInWorkspaceWidget extends BaseWidget implements StatefulWidge
             matchCaseState: this.matchCaseState,
             wholeWordState: this.wholeWordState,
             regExpState: this.regExpState,
-            includeIgnoredState: this.includeIgnoredState,
+            useExcludeSettingsState: this.useExcludeSettingsState,
             showSearchDetails: this.showSearchDetails,
             searchInWorkspaceOptions: this.searchInWorkspaceOptions,
             searchTerm: this.searchTerm,
@@ -192,6 +202,12 @@ export class SearchInWorkspaceWidget extends BaseWidget implements StatefulWidge
             replaceHistoryState: this.replaceRef.current?.state,
             includeHistoryState: this.includeRef.current?.state,
             excludeHistoryState: this.excludeRef.current?.state,
+            // For compatibility in case of downgrade to an earlier Theia version that expects to find this state
+            includeIgnoredState: {
+                ...this.useExcludeSettingsState,
+                enabled: !this.useExcludeSettingsState.enabled,
+                title: nls.localize('theia/search-in-workspace/includeIgnoredFiles', 'Include Ignored Files')
+            },
         };
     }
 
@@ -200,14 +216,20 @@ export class SearchInWorkspaceWidget extends BaseWidget implements StatefulWidge
         this.matchCaseState = oldState.matchCaseState;
         this.wholeWordState = oldState.wholeWordState;
         this.regExpState = oldState.regExpState;
-        this.includeIgnoredState = oldState.includeIgnoredState;
+        if (oldState.useExcludeSettingsState) {
+            this.useExcludeSettingsState = oldState.useExcludeSettingsState;
+        } else if (oldState.includeIgnoredState) {
+            this.useExcludeSettingsState = oldState.includeIgnoredState;
+            this.useExcludeSettingsState.enabled = !this.useExcludeSettingsState.enabled;
+        }
         // Override the title of the restored state, as we could have changed languages in between
         this.matchCaseState.title = nls.localizeByDefault('Match Case');
         this.wholeWordState.title = nls.localizeByDefault('Match Whole Word');
         this.regExpState.title = nls.localizeByDefault('Use Regular Expression');
-        this.includeIgnoredState.title = nls.localize('theia/search-in-workspace/includeIgnoredFiles', 'Include Ignored Files');
+        this.useExcludeSettingsState.title = nls.localizeByDefault('Use Exclude Settings and Ignore Files');
         this.showSearchDetails = oldState.showSearchDetails;
         this.searchInWorkspaceOptions = oldState.searchInWorkspaceOptions;
+        this.searchInWorkspaceOptions.includeIgnored = !this.useExcludeSettingsState.enabled;
         this.searchTerm = oldState.searchTerm;
         this.replaceTerm = oldState.replaceTerm;
         this.showReplaceField = oldState.showReplaceField;
@@ -285,7 +307,7 @@ export class SearchInWorkspaceWidget extends BaseWidget implements StatefulWidge
         this.replaceTerm = '';
         this.searchInWorkspaceOptions.include = [];
         this.searchInWorkspaceOptions.exclude = [];
-        this.includeIgnoredState.enabled = false;
+        this.useExcludeSettingsState.enabled = true;
         this.matchCaseState.enabled = false;
         this.wholeWordState.enabled = false;
         this.regExpState.enabled = false;
@@ -346,18 +368,19 @@ export class SearchInWorkspaceWidget extends BaseWidget implements StatefulWidge
         this.focusInputField();
     }
 
-    protected focusInputField(): void {
-        const f = document.getElementById('search-input-field');
-        if (f) {
-            (f as HTMLInputElement).focus();
-            (f as HTMLInputElement).select();
+    protected async focusInputField(): Promise<void> {
+        // Wait until React rendering is sufficiently progressed before trying to focus the input field.
+        await this.refsAreSet.promise;
+        if (this.searchRef.current?.textarea.current) {
+            this.searchRef.current.textarea.current.focus();
+            this.searchRef.current.textarea.current.select();
         }
     }
 
     protected renderSearchHeader(): React.ReactNode {
         const searchAndReplaceContainer = this.renderSearchAndReplace();
         const searchDetails = this.renderSearchDetails();
-        return <div>{searchAndReplaceContainer}{searchDetails}</div>;
+        return <div ref={() => this.refsAreSet.resolve()}>{searchAndReplaceContainer}{searchDetails}</div>;
     }
 
     protected renderSearchAndReplace(): React.ReactNode {
@@ -423,6 +446,7 @@ export class SearchInWorkspaceWidget extends BaseWidget implements StatefulWidge
         const searchOnType = this.searchInWorkspacePreferences['search.searchOnType'];
         if (searchOnType) {
             const delay = this.searchInWorkspacePreferences['search.searchOnTypeDebouncePeriod'] || 0;
+
             window.clearTimeout(this._searchTimeout);
             this._searchTimeout = window.setTimeout(() => this.doSearch(e), delay);
         }
@@ -430,7 +454,6 @@ export class SearchInWorkspaceWidget extends BaseWidget implements StatefulWidge
 
     protected readonly onKeyDownSearch = (e: React.KeyboardEvent) => {
         if (Key.ENTER.keyCode === KeyCode.createKeyCode(e.nativeEvent).key?.keyCode) {
-            this.searchTerm = (e.target as HTMLInputElement).value;
             this.performSearch();
         }
     };
@@ -438,7 +461,8 @@ export class SearchInWorkspaceWidget extends BaseWidget implements StatefulWidge
     protected doSearch(e: React.KeyboardEvent): void {
         if (e.target) {
             const searchValue = (e.target as HTMLInputElement).value;
-            if (this.searchTerm === searchValue && Key.ENTER.keyCode !== KeyCode.createKeyCode(e.nativeEvent).key?.keyCode) {
+
+            if (this.searchTerm === searchValue) {
                 return;
             } else {
                 this.searchTerm = searchValue;
@@ -569,8 +593,7 @@ export class SearchInWorkspaceWidget extends BaseWidget implements StatefulWidge
         const matchCaseOption = this.renderOptionElement(this.matchCaseState);
         const wholeWordOption = this.renderOptionElement(this.wholeWordState);
         const regexOption = this.renderOptionElement(this.regExpState);
-        const includeIgnoredOption = this.renderOptionElement(this.includeIgnoredState);
-        return <div className='option-buttons'>{matchCaseOption}{wholeWordOption}{regexOption}{includeIgnoredOption}</div>;
+        return <div className='option-buttons'>{matchCaseOption}{wholeWordOption}{regexOption}</div>;
     }
 
     protected renderOptionElement(opt: SearchFieldState): React.ReactNode {
@@ -592,7 +615,7 @@ export class SearchInWorkspaceWidget extends BaseWidget implements StatefulWidge
         this.searchInWorkspaceOptions.matchCase = this.matchCaseState.enabled;
         this.searchInWorkspaceOptions.matchWholeWord = this.wholeWordState.enabled;
         this.searchInWorkspaceOptions.useRegExp = this.regExpState.enabled;
-        this.searchInWorkspaceOptions.includeIgnored = this.includeIgnoredState.enabled;
+        this.searchInWorkspaceOptions.includeIgnored = !this.useExcludeSettingsState.enabled;
     }
 
     protected renderSearchDetails(): React.ReactNode {
@@ -622,49 +645,55 @@ export class SearchInWorkspaceWidget extends BaseWidget implements StatefulWidge
     protected renderGlobField(kind: 'include' | 'exclude'): React.ReactNode {
         const currentValue = this.searchInWorkspaceOptions[kind];
         const value = currentValue && currentValue.join(', ') || '';
+        const useExcludeSettingsToggle = kind === 'exclude'
+            ? <div className='option-buttons'>{this.renderOptionElement(this.useExcludeSettingsState)}</div>
+            : undefined;
         return <div className='glob-field'>
             <div className='label'>{nls.localizeByDefault('files to ' + kind)}</div>
-            <SearchInWorkspaceInput
-                className='theia-input'
-                type='text'
-                size={1}
-                defaultValue={value}
-                autoComplete='off'
-                id={kind + '-glob-field'}
-                placeholder={kind === 'include'
-                    ? nls.localizeByDefault('e.g. *.ts, src/**/include')
-                    : nls.localizeByDefault('e.g. *.ts, src/**/exclude')
-                }
-                onKeyUp={e => {
-                    if (e.target) {
-                        const targetValue = (e.target as HTMLInputElement).value || '';
-                        let shouldSearch = Key.ENTER.keyCode === KeyCode.createKeyCode(e.nativeEvent).key?.keyCode;
-                        const currentOptions = (this.searchInWorkspaceOptions[kind] || []).slice().map(s => s.trim()).sort();
-                        const candidateOptions = this.splitOnComma(targetValue).map(s => s.trim()).sort();
-                        const sameAs = (left: string[], right: string[]) => {
-                            if (left.length !== right.length) {
-                                return false;
-                            }
-                            for (let i = 0; i < left.length; i++) {
-                                if (left[i] !== right[i]) {
+            <div className='glob-field-input'>
+                <SearchInWorkspaceInput
+                    className='theia-input'
+                    type='text'
+                    size={1}
+                    defaultValue={value}
+                    autoComplete='off'
+                    id={kind + '-glob-field'}
+                    placeholder={kind === 'include'
+                        ? nls.localizeByDefault('e.g. *.ts, src/**/include')
+                        : nls.localizeByDefault('e.g. *.ts, src/**/exclude')
+                    }
+                    onKeyUp={e => {
+                        if (e.target) {
+                            const targetValue = (e.target as HTMLInputElement).value || '';
+                            let shouldSearch = Key.ENTER.keyCode === KeyCode.createKeyCode(e.nativeEvent).key?.keyCode;
+                            const currentOptions = (this.searchInWorkspaceOptions[kind] || []).slice().map(s => s.trim()).sort();
+                            const candidateOptions = this.splitOnComma(targetValue).map(s => s.trim()).sort();
+                            const sameAs = (left: string[], right: string[]) => {
+                                if (left.length !== right.length) {
                                     return false;
                                 }
+                                for (let i = 0; i < left.length; i++) {
+                                    if (left[i] !== right[i]) {
+                                        return false;
+                                    }
+                                }
+                                return true;
+                            };
+                            if (!sameAs(currentOptions, candidateOptions)) {
+                                this.searchInWorkspaceOptions[kind] = this.splitOnComma(targetValue);
+                                shouldSearch = true;
                             }
-                            return true;
-                        };
-                        if (!sameAs(currentOptions, candidateOptions)) {
-                            this.searchInWorkspaceOptions[kind] = this.splitOnComma(targetValue);
-                            shouldSearch = true;
+                            if (shouldSearch) {
+                                this.performSearch();
+                            }
                         }
-                        if (shouldSearch) {
-                            this.performSearch();
-                        }
-                    }
-                }}
-                onFocus={kind === 'include' ? this.handleFocusIncludesInputBox : this.handleFocusExcludesInputBox}
-                onBlur={kind === 'include' ? this.handleBlurIncludesInputBox : this.handleBlurExcludesInputBox}
-                ref={kind === 'include' ? this.includeRef : this.excludeRef}
-            />
+                    }}
+                    onFocus={kind === 'include' ? this.handleFocusIncludesInputBox : this.handleFocusExcludesInputBox}
+                    onBlur={kind === 'include' ? this.handleBlurIncludesInputBox : this.handleBlurExcludesInputBox}
+                    ref={kind === 'include' ? this.includeRef : this.excludeRef}
+                />
+                {useExcludeSettingsToggle}
+            </div>
         </div>;
     }
 

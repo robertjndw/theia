@@ -1,5 +1,5 @@
 // *****************************************************************************
-// Copyright (C) 2024 robertjndw
+// Copyright (C) 2026 Robert Jandow
 //
 // This program and the accompanying materials are made available under the
 // terms of the Eclipse Public License v. 2.0 which is available at
@@ -15,10 +15,9 @@
 // *****************************************************************************
 
 import { ContainerModule } from '@theia/core/shared/inversify';
-import { TerminalFrontendOnlyContribution } from './terminal-frontend-only-contribution';
-import { TerminalService } from '../browser/base/terminal-service';
+import { BrowserOnlyTerminalFrontendContribution } from './browser-only-terminal-frontend-contribution';
+import { TerminalFrontendContribution } from '../browser/terminal-frontend-contribution';
 
 export default new ContainerModule((bind, unbind, isBound, rebind) => {
-    bind(TerminalFrontendOnlyContribution).toSelf().inSingletonScope();
-    rebind(TerminalService).toService(TerminalFrontendOnlyContribution);
+    rebind(TerminalFrontendContribution).to(BrowserOnlyTerminalFrontendContribution).inSingletonScope();
 });

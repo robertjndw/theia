@@ -17,15 +17,15 @@
 import debounce = require('@theia/core/shared/lodash.debounce');
 import { URI } from '@theia/core/shared/vscode-uri';
 import { interfaces } from '@theia/core/shared/inversify';
-import { WebviewsMain, MAIN_RPC_CONTEXT, WebviewsExt, WebviewPanelViewState } from '../../common/plugin-api-rpc';
+import { WebviewsMain, MAIN_RPC_CONTEXT, WebviewsExt, WebviewPanelViewState, ThemeIcon } from '../../common/plugin-api-rpc';
 import { RPCProtocol } from '../../common/rpc-protocol';
-import { ViewBadge, WebviewOptions, WebviewPanelOptions, WebviewPanelShowOptions } from '@theia/plugin';
+import { WebviewOptions, WebviewPanelOptions, WebviewPanelShowOptions } from '@theia/plugin';
 import { ApplicationShell } from '@theia/core/lib/browser/shell/application-shell';
 import { WebviewWidget, WebviewWidgetIdentifier } from './webview/webview';
 import { Disposable, DisposableCollection } from '@theia/core/lib/common/disposable';
 import { ViewColumnService } from '@theia/core/lib/browser/shell/view-column-service';
 import { WidgetManager } from '@theia/core/lib/browser/widget-manager';
-import { JSONExt } from '@theia/core/shared/@phosphor/coreutils';
+import { JSONExt } from '@theia/core/shared/@lumino/coreutils';
 import { Mutable } from '@theia/core/lib/common/types';
 import { HostedPluginSupport } from '../../hosted/browser/hosted-plugin';
 import { IconUrl } from '../../common/plugin-protocol';
@@ -135,8 +135,8 @@ export class WebviewsMainImpl implements WebviewsMain, Disposable {
     }
 
     async $reveal(handle: string, showOptions: WebviewPanelShowOptions): Promise<void> {
-        const widget = await this.getWebview(handle);
-        if (widget.isDisposed) {
+        const widget = await this.tryGetWebview(handle);
+        if (!widget || widget.isDisposed) {
             return;
         }
         if ((showOptions.viewColumn !== undefined && showOptions.viewColumn !== widget.viewState.position) || showOptions.area !== undefined) {
@@ -156,30 +156,27 @@ export class WebviewsMainImpl implements WebviewsMain, Disposable {
     }
 
     async $setTitle(handle: string, value: string): Promise<void> {
-        const webview = await this.getWebview(handle);
-        webview.title.label = value;
-    }
-
-    async $setBadge(handle: string, badge: ViewBadge | undefined): Promise<void> {
-        const webview = await this.getWebview(handle);
+        const webview = await this.tryGetWebview(handle);
         if (webview) {
-            webview.badge = badge?.value;
-            webview.badgeTooltip = badge?.tooltip;
+            webview.title.label = value;
         }
     }
 
-    async $setIconPath(handle: string, iconUrl: IconUrl | undefined): Promise<void> {
-        const webview = await this.getWebview(handle);
-        webview.setIconUrl(iconUrl);
+    async $setIconPath(handle: string, iconUrl: IconUrl | ThemeIcon | undefined): Promise<void> {
+        const webview = await this.tryGetWebview(handle);
+        webview?.setIconUrl(iconUrl);
     }
 
     async $setHtml(handle: string, value: string): Promise<void> {
-        const webview = await this.getWebview(handle);
-        webview.setHTML(value);
+        const webview = await this.tryGetWebview(handle);
+        webview?.setHTML(value);
     }
 
     async $setOptions(handle: string, options: WebviewOptions): Promise<void> {
-        const webview = await this.getWebview(handle);
+        const webview = await this.tryGetWebview(handle);
+        if (!webview) {
+            return;
+        }
         const { enableScripts, enableForms, localResourceRoots, ...contentOptions } = options;
         webview.setContentOptions({
             allowScripts: enableScripts,
@@ -191,8 +188,6 @@ export class WebviewsMainImpl implements WebviewsMain, Disposable {
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     async $postMessage(handle: string, value: any): Promise<boolean> {
-        // Due to async nature of $postMessage, the webview may have been disposed in the meantime.
-        // Therefore, don't throw an error if the webview is not found, but return false in this case.
         const webview = await this.tryGetWebview(handle);
         if (!webview) {
             return false;
@@ -265,14 +260,14 @@ export class WebviewsMainImpl implements WebviewsMain, Disposable {
         this.proxy.$onDidChangeWebviewPanelViewState(widget.identifier.id, widget.viewState);
     }
 
-    private async getWebview(viewId: string): Promise<WebviewWidget> {
-        const webview = await this.tryGetWebview(viewId);
-        if (!webview) {
-            throw new Error(`Unknown Webview: ${viewId}`);
-        }
-        return webview;
-    }
-
+    /**
+     * Looks up the webview widget for the given handle.
+     *
+     * All `$`-methods of this class are invoked over RPC and resolve the widget asynchronously, so the webview may already
+     * have been disposed by the time they run. The plugin host declares most of them as returning `void` and therefore never
+     * attaches a rejection handler, so throwing here surfaces as an unhandled promise rejection in the plugin host. Callers
+     * must instead treat a missing webview as a no-op, the same way VS Code's `MainThreadWebviews` does.
+     */
     private async tryGetWebview(id: string): Promise<WebviewWidget | undefined> {
         const webview = await this.widgetManager.findWidget<WebviewWidget>(WebviewWidget.FACTORY_ID, options => {
             if (options) {

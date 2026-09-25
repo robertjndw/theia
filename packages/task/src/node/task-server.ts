@@ -45,7 +45,7 @@ export class TaskServerImpl implements TaskServer, Disposable {
     // Currently there is only one property ('isActive'), but in the future we may want to store more properties
     protected readonly backgroundTaskStatusMap = new Map<number, { 'isActive': boolean }>();
 
-    @inject(ILogger) @named('task')
+    @inject(ILogger) @named('task:TaskServerImpl')
     protected readonly logger: ILogger;
 
     @inject(TaskManager)
@@ -90,7 +90,9 @@ export class TaskServerImpl implements TaskServer, Disposable {
     }
 
     async run(taskConfiguration: TaskConfiguration, ctx?: string, option?: RunTaskOption): Promise<TaskInfo> {
-        const runner = this.runnerRegistry.getRunner(taskConfiguration.type, taskConfiguration.taskType);
+        const runner = taskConfiguration.executionType ?
+            this.runnerRegistry.getRunner(taskConfiguration.type, taskConfiguration.executionType) :
+            this.runnerRegistry.getRunner(taskConfiguration.type);
         const task = await runner.run(taskConfiguration, ctx);
 
         if (!this.toDispose.has(task.id)) {
@@ -161,7 +163,7 @@ export class TaskServerImpl implements TaskServer, Disposable {
         this.toDispose.get(task.id)!.push(task);
 
         const taskInfo = await task.getRuntimeInfo();
-        this.fireTaskCreatedEvent(taskInfo);
+        this.fireTaskCreatedEvent(taskInfo, task);
         return taskInfo;
     }
 

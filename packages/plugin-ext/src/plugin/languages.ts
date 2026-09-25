@@ -28,6 +28,7 @@ import {
     InlayHintsDto,
     InlayHintDto,
     IdentifiableInlineCompletions,
+    HoverWithId,
 } from '../common/plugin-api-rpc';
 import { RPCProtocol } from '../common/rpc-protocol';
 import * as theia from '@theia/plugin';
@@ -42,8 +43,8 @@ import {
     Completion,
     SerializedDocumentFilter,
     SignatureHelp,
-    Hover,
     DocumentHighlight,
+    MultiDocumentHighlightDto,
     Range,
     TextEdit,
     FormattingOptions,
@@ -71,7 +72,8 @@ import {
     TypeHierarchyItem,
     InlineCompletionContext,
     DocumentDropEdit,
-    DataTransferDTO
+    DataTransferDTO,
+    HoverContext
 } from '../common/plugin-api-rpc-model';
 import { CompletionAdapter } from './languages/completion';
 import { Diagnostics } from './languages/diagnostics';
@@ -80,6 +82,7 @@ import { HoverAdapter } from './languages/hover';
 import { EvaluatableExpressionAdapter } from './languages/evaluatable-expression';
 import { InlineValuesAdapter } from './languages/inline-values';
 import { DocumentHighlightAdapter } from './languages/document-highlight';
+import { MultiDocumentHighlightAdapter } from './languages/multi-document-highlight';
 import { DocumentFormattingAdapter } from './languages/document-formatting';
 import { RangeFormattingAdapter } from './languages/range-formatting';
 import { OnTypeFormattingAdapter } from './languages/on-type-formatting';
@@ -121,6 +124,7 @@ type Adapter = CompletionAdapter |
     EvaluatableExpressionAdapter |
     InlineValuesAdapter |
     DocumentHighlightAdapter |
+    MultiDocumentHighlightAdapter |
     DocumentFormattingAdapter |
     RangeFormattingAdapter |
     OnTypeFormattingAdapter |
@@ -412,8 +416,13 @@ export class LanguagesExtImpl implements LanguagesExt {
         return this.createDisposable(callId);
     }
 
-    $provideHover(handle: number, resource: UriComponents, position: Position, token: theia.CancellationToken): Promise<Hover | undefined> {
-        return this.withAdapter(handle, HoverAdapter, adapter => adapter.provideHover(URI.revive(resource), position, token), undefined);
+    $provideHover(handle: number, resource: UriComponents, position: Position, context: HoverContext<{ id: number }> | undefined,
+        token: theia.CancellationToken): Promise<HoverWithId | undefined> {
+        return this.withAdapter(handle, HoverAdapter, adapter => adapter.provideHover(URI.revive(resource), position, context, token), undefined);
+    }
+
+    $releaseHover(handle: number, id: number): void {
+        this.withAdapter(handle, HoverAdapter, adapter => Promise.resolve(adapter.releaseHover(id)), undefined);
     }
     // ### Hover Provider end
 
@@ -459,6 +468,23 @@ export class LanguagesExtImpl implements LanguagesExt {
         return this.withAdapter(handle, DocumentHighlightAdapter, adapter => adapter.provideDocumentHighlights(URI.revive(resource), position, token), undefined);
     }
     // ### Document Highlight Provider end
+
+    // ### Multi Document Highlight Provider begin
+    registerMultiDocumentHighlightProvider(
+        selector: theia.DocumentSelector, provider: theia.MultiDocumentHighlightProvider, pluginInfo: PluginInfo
+    ): theia.Disposable {
+        const callId = this.addNewAdapter(new MultiDocumentHighlightAdapter(provider, this.documents));
+        this.proxy.$registerMultiDocumentHighlightProvider(callId, pluginInfo, this.transformDocumentSelector(selector));
+        return this.createDisposable(callId);
+    }
+
+    $provideMultiDocumentHighlights(
+        handle: number, resource: UriComponents, position: Position, otherResources: UriComponents[], token: theia.CancellationToken
+    ): Promise<MultiDocumentHighlightDto[] | undefined> {
+        return this.withAdapter(handle, MultiDocumentHighlightAdapter,
+            adapter => adapter.provideMultiDocumentHighlights(URI.revive(resource), position, otherResources, token), undefined);
+    }
+    // ### Multi Document Highlight Provider end
 
     // ### WorkspaceSymbol Provider begin
     registerWorkspaceSymbolProvider(provider: theia.WorkspaceSymbolProvider, pluginInfo: PluginInfo): theia.Disposable {
@@ -850,19 +876,16 @@ export class LanguagesExtImpl implements LanguagesExt {
 
     registerDocumentSemanticTokensProvider(selector: theia.DocumentSelector, provider: theia.DocumentSemanticTokensProvider, legend: theia.SemanticTokensLegend,
         pluginInfo: PluginInfo): theia.Disposable {
-        const eventHandle = (typeof provider.onDidChangeSemanticTokens === 'function' ? this.nextCallId() : undefined);
-
         const handle = this.addNewAdapter(new DocumentSemanticTokensAdapter(this.documents, provider));
-        this.proxy.$registerDocumentSemanticTokensProvider(handle, pluginInfo, this.transformDocumentSelector(selector), legend, eventHandle);
-        let result = this.createDisposable(handle);
-
-        if (eventHandle) {
-            // eslint-disable-next-line no-unsanitized/method
-            const subscription = provider.onDidChangeSemanticTokens!(_ => this.proxy.$emitDocumentSemanticTokensEvent(eventHandle));
-            result = Disposable.from(result, subscription);
+        const unregister = this.createDisposable(handle);
+        if (typeof provider.onDidChangeSemanticTokens === 'function') {
+            const eventHandle = this.nextCallId();
+            const subscription = provider.onDidChangeSemanticTokens!(_ => this.proxy.$emitDocumentSemanticTokensEvent(handle));
+            this.proxy.$registerDocumentSemanticTokensProvider(handle, pluginInfo, this.transformDocumentSelector(selector), legend, eventHandle);
+            return Disposable.from(unregister, subscription);
         }
-
-        return result;
+        this.proxy.$registerDocumentSemanticTokensProvider(handle, pluginInfo, this.transformDocumentSelector(selector), legend, undefined);
+        return unregister;
     }
 
     $provideDocumentSemanticTokens(handle: number, resource: UriComponents, previousResultId: number, token: theia.CancellationToken): Promise<BinaryBuffer | null> {
@@ -876,8 +899,15 @@ export class LanguagesExtImpl implements LanguagesExt {
     registerDocumentRangeSemanticTokensProvider(selector: theia.DocumentSelector, provider: theia.DocumentRangeSemanticTokensProvider,
         legend: theia.SemanticTokensLegend, pluginInfo: PluginInfo): theia.Disposable {
         const handle = this.addNewAdapter(new DocumentRangeSemanticTokensAdapter(this.documents, provider));
-        this.proxy.$registerDocumentRangeSemanticTokensProvider(handle, pluginInfo, this.transformDocumentSelector(selector), legend);
-        return this.createDisposable(handle);
+        const unregister = this.createDisposable(handle);
+        if (typeof provider.onDidChangeSemanticTokens === 'function') {
+            const eventHandle = this.nextCallId();
+            const subscription = provider.onDidChangeSemanticTokens!(_ => this.proxy.$emitDocumentSemanticTokensEvent(handle));
+            this.proxy.$registerDocumentRangeSemanticTokensProvider(handle, pluginInfo, this.transformDocumentSelector(selector), legend, eventHandle);
+            return Disposable.from(unregister, subscription);
+        }
+        this.proxy.$registerDocumentRangeSemanticTokensProvider(handle, pluginInfo, this.transformDocumentSelector(selector), legend, undefined);
+        return unregister;
     }
 
     $provideDocumentRangeSemanticTokens(handle: number, resource: UriComponents, range: Range, token: theia.CancellationToken): Promise<BinaryBuffer | null> {

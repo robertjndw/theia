@@ -16,13 +16,20 @@
 
 import * as monaco from '@theia/monaco-editor-core';
 
-import { FrontendApplicationContribution, KeybindingContribution, KeybindingRegistry, PreferenceService } from '@theia/core/lib/browser';
-import { inject, injectable } from '@theia/core/shared/inversify';
 import { AIActivationService } from '@theia/ai-core/lib/browser';
-import { Disposable } from '@theia/core';
-import { AICodeInlineCompletionsProvider } from './ai-code-inline-completion-provider';
-import { PREF_AI_INLINE_COMPLETION_AUTOMATIC_ENABLE, PREF_AI_INLINE_COMPLETION_EXCLUDED_EXTENSIONS } from './ai-code-completion-preference';
+import { Disposable, PreferenceService, ILogger } from '@theia/core';
+import { FrontendApplicationContribution, KeybindingContribution, KeybindingRegistry } from '@theia/core/lib/browser';
+import { inject, injectable, named } from '@theia/core/shared/inversify';
 import { InlineCompletionTriggerKind } from '@theia/monaco-editor-core/esm/vs/editor/common/languages';
+import {
+    PREF_AI_INLINE_COMPLETION_AUTOMATIC_ENABLE,
+    PREF_AI_INLINE_COMPLETION_DEBOUNCE_DELAY,
+    PREF_AI_INLINE_COMPLETION_EXCLUDED_EXTENSIONS,
+    PREF_AI_INLINE_COMPLETION_CACHE_CAPACITY
+} from '../common/ai-code-completion-preference';
+import { AICodeInlineCompletionsProvider } from './ai-code-inline-completion-provider';
+import { InlineCompletionDebouncer } from './code-completion-debouncer';
+import { CodeCompletionCache } from './code-completion-cache';
 
 @injectable()
 export class AIFrontendApplicationContribution implements FrontendApplicationContribution, KeybindingContribution {
@@ -34,6 +41,13 @@ export class AIFrontendApplicationContribution implements FrontendApplicationCon
 
     @inject(AIActivationService)
     protected readonly activationService: AIActivationService;
+
+    @inject(ILogger) @named('ai-code-completion:AIFrontendApplicationContribution')
+    protected readonly logger: ILogger;
+
+    private completionCache = new CodeCompletionCache();
+    private debouncer = new InlineCompletionDebouncer();
+    private debounceDelay: number;
 
     private toDispose = new Map<string, Disposable>();
 
@@ -48,15 +62,26 @@ export class AIFrontendApplicationContribution implements FrontendApplicationCon
 
         this.toDispose.set('inlineCompletions', handler());
 
+        this.debounceDelay = this.preferenceService.get<number>(PREF_AI_INLINE_COMPLETION_DEBOUNCE_DELAY, 300);
+
+        const cacheCapacity = this.preferenceService.get<number>(PREF_AI_INLINE_COMPLETION_CACHE_CAPACITY, 100);
+        this.completionCache.setMaxSize(cacheCapacity);
+
         this.preferenceService.onPreferenceChanged(event => {
             if (event.preferenceName === PREF_AI_INLINE_COMPLETION_AUTOMATIC_ENABLE
                 || event.preferenceName === PREF_AI_INLINE_COMPLETION_EXCLUDED_EXTENSIONS) {
                 this.toDispose.get('inlineCompletions')?.dispose();
                 this.toDispose.set('inlineCompletions', handler());
             }
+            if (event.preferenceName === PREF_AI_INLINE_COMPLETION_DEBOUNCE_DELAY) {
+                this.debounceDelay = this.preferenceService.get<number>(PREF_AI_INLINE_COMPLETION_DEBOUNCE_DELAY, 300);
+            }
+            if (event.preferenceName === PREF_AI_INLINE_COMPLETION_CACHE_CAPACITY) {
+                this.completionCache.setMaxSize(this.preferenceService.get<number>(PREF_AI_INLINE_COMPLETION_CACHE_CAPACITY, 100));
+            }
         });
 
-        this.activationService.onDidChangeActiveStatus(change => {
+        this.activationService.onDidChangeCanRun(() => {
             this.toDispose.get('inlineCompletions')?.dispose();
             this.toDispose.set('inlineCompletions', handler());
         });
@@ -71,7 +96,7 @@ export class AIFrontendApplicationContribution implements FrontendApplicationCon
     }
 
     protected handleInlineCompletions(): Disposable {
-        if (!this.activationService.isActive) {
+        if (!this.activationService.canRun) {
             return Disposable.NULL;
         }
         const automatic = this.preferenceService.get<boolean>(PREF_AI_INLINE_COMPLETION_AUTOMATIC_ENABLE, true);
@@ -88,11 +113,41 @@ export class AIFrontendApplicationContribution implements FrontendApplicationCon
                     if (excludedExtensions.some(ext => fileName.endsWith(ext))) {
                         return { items: [] };
                     }
-                    return this.inlineCodeCompletionProvider.provideInlineCompletions(model, position, context, token);
+
+                    const completionHandler = async () => {
+                        try {
+                            const cacheKey = this.completionCache.generateKey(fileName, model, position);
+                            const cachedCompletion = this.completionCache.get(cacheKey);
+
+                            if (cachedCompletion) {
+                                return cachedCompletion;
+                            }
+
+                            const completion = await this.inlineCodeCompletionProvider.provideInlineCompletions(
+                                model,
+                                position,
+                                context,
+                                token
+                            );
+
+                            if (completion && completion.items.length > 0) {
+                                this.completionCache.put(cacheKey, completion);
+                            }
+
+                            return completion;
+                        } catch (error) {
+                            this.logger.error('Error providing inline completions:', error);
+                            return { items: [] };
+                        }
+                    };
+
+                    if (context.triggerKind === InlineCompletionTriggerKind.Automatic) {
+                        return this.debouncer.debounce(async () => completionHandler(), this.debounceDelay);
+                    } else if (context.triggerKind === InlineCompletionTriggerKind.Explicit) {
+                        return completionHandler();
+                    }
                 },
-                freeInlineCompletions: completions => {
-                    this.inlineCodeCompletionProvider.freeInlineCompletions(completions);
-                }
+                disposeInlineCompletions: () => { /* no-op */ }
             }
         );
     }

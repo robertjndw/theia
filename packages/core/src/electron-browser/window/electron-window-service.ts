@@ -15,13 +15,14 @@
 // *****************************************************************************
 
 import { injectable, inject, postConstruct } from 'inversify';
-import { NewWindowOptions, WindowSearchParams } from '../../common/window';
+import { NewWindowOptions } from '../../common/window';
 import { DefaultWindowService } from '../../browser/window/default-window-service';
 import { ElectronMainWindowService } from '../../electron-common/electron-main-window-service';
-import { ElectronWindowPreferences } from './electron-window-preferences';
+import { ElectronWindowPreferences, PREF_WINDOW_ZOOM_LEVEL } from '../../electron-common/electron-window-preferences';
 import { ConnectionCloseService } from '../../common/messaging/connection-management';
 import { FrontendIdProvider } from '../../browser/messaging/frontend-id-provider';
 import { WindowReloadOptions } from '../../browser/window/window-service';
+import { Listener, ListenerList } from '../../common/listener';
 
 @injectable()
 export class ElectronWindowService extends DefaultWindowService {
@@ -48,13 +49,20 @@ export class ElectronWindowService extends DefaultWindowService {
     @inject(ConnectionCloseService)
     protected readonly connectionCloseService: ConnectionCloseService;
 
+    protected readonly onWillShutDownListeners = new ListenerList<void, Promise<void>>();
+    readonly onWillShutDown: Listener.Registration<void, Promise<void>> = this.onWillShutDownListeners.registration;
+
     override openNewWindow(url: string, { external }: NewWindowOptions = {}): undefined {
         this.delegate.openNewWindow(url, { external });
         return undefined;
     }
 
-    override openNewDefaultWindow(params?: WindowSearchParams): void {
-        this.delegate.openNewDefaultWindow(params);
+    override async openNewDefaultWindow(params?: WindowReloadOptions): Promise<number> {
+        return this.delegate.openNewDefaultWindow(params?.search);
+    }
+
+    override closeWindow(windowId: number): void {
+        this.delegate.closeWindow(windowId);
     }
 
     override focus(): void {
@@ -64,7 +72,7 @@ export class ElectronWindowService extends DefaultWindowService {
     protected init(): void {
         // Update the default zoom level on startup when the preferences event is fired.
         this.electronWindowPreferences.onPreferenceChanged(e => {
-            if (e.preferenceName === 'window.zoomLevel') {
+            if (e.preferenceName === PREF_WINDOW_ZOOM_LEVEL) {
                 this.updateWindowZoomLevel();
             }
         });
@@ -74,17 +82,23 @@ export class ElectronWindowService extends DefaultWindowService {
     }
 
     protected override registerUnloadListeners(): void {
-        window.electronTheiaCore.setCloseRequestHandler(reason => this.isSafeToShutDown(reason));
-        window.addEventListener('unload', () => {
-            this.onUnloadEmitter.fire();
+        window.electronTheiaCore.setCloseRequestHandler(async reason => {
+            const willShutDown = await this.isSafeToShutDown(reason);
+            if (willShutDown) {
+                await Listener.awaitAll(undefined, this.onWillShutDownListeners);
+            }
+            return willShutDown;
         });
+        // Intentionally not calling `super`: in Electron the close request handler above takes the role of
+        // `beforeunload`, and there is no back/forward cache, so only the `pagehide` listener is shared.
+        this.registerPageHideListener();
     }
 
     /**
      * Updates the window zoom level based on the preference value.
      */
     protected async updateWindowZoomLevel(): Promise<void> {
-        const preferredZoomLevel = this.electronWindowPreferences['window.zoomLevel'];
+        const preferredZoomLevel = this.electronWindowPreferences[PREF_WINDOW_ZOOM_LEVEL];
         if (await window.electronTheiaCore.getZoomLevel() !== preferredZoomLevel) {
             window.electronTheiaCore.setZoomLevel(preferredZoomLevel);
         }
@@ -106,4 +120,3 @@ export class ElectronWindowService extends DefaultWindowService {
         }
     }
 }
-

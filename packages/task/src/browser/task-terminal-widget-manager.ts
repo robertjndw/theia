@@ -15,7 +15,7 @@
 // *****************************************************************************
 
 import { inject, injectable, postConstruct } from '@theia/core/shared/inversify';
-import { ApplicationShell, WidgetOpenerOptions } from '@theia/core/lib/browser';
+import { WidgetOpenerOptions } from '@theia/core/lib/browser';
 import { TerminalWidget } from '@theia/terminal/lib/browser/base/terminal-widget';
 import { TerminalWidgetFactoryOptions } from '@theia/terminal/lib/browser/terminal-widget-impl';
 import { TerminalService } from '@theia/terminal/lib/browser/base/terminal-service';
@@ -24,6 +24,7 @@ import { ProcessTaskInfo } from '../common/process/task-protocol';
 import { TaskDefinitionRegistry } from './task-definition-registry';
 import { WorkspaceService } from '@theia/workspace/lib/browser/workspace-service';
 import URI from '@theia/core/lib/common/uri';
+import { nls } from '@theia/core';
 
 export interface TaskTerminalWidget extends TerminalWidget {
     readonly kind: 'task';
@@ -66,9 +67,6 @@ export namespace TaskTerminalWidgetOpenerOptions {
 
 @injectable()
 export class TaskTerminalWidgetManager {
-
-    @inject(ApplicationShell)
-    protected readonly shell: ApplicationShell;
 
     @inject(TaskDefinitionRegistry)
     protected readonly taskDefinitionRegistry: TaskDefinitionRegistry;
@@ -142,7 +140,6 @@ export class TaskTerminalWidgetManager {
 
         const { isNew, widget } = await this.getWidgetToRunTask(factoryOptions, openerOptions);
         if (isNew) {
-            this.shell.addWidget(widget, { area: openerOptions.widgetOptions ? openerOptions.widgetOptions.area : 'bottom' });
             widget.resetTerminal();
         } else {
             if (factoryOptions.title) {
@@ -152,12 +149,13 @@ export class TaskTerminalWidgetManager {
                 widget.clearOutput();
             }
         }
-        this.terminalService.open(widget, openerOptions);
-
-        if (TaskTerminalWidgetOpenerOptions.echoExecutedCommand(openerOptions) &&
-            taskInfo && ProcessTaskInfo.is(taskInfo) && taskInfo.command && taskInfo.command.length > 0
-        ) {
-            widget.writeLine(`\x1b[1m> Executing task: ${taskInfo.command} <\x1b[0m\n`);
+        await this.terminalService.open(widget, openerOptions);
+        const command = taskInfo && ProcessTaskInfo.is(taskInfo) ? taskInfo.command : undefined;
+        if (TaskTerminalWidgetOpenerOptions.echoExecutedCommand(openerOptions) && command && command.length > 0) {
+            if (widget.commandHistoryState) {
+                widget.write('\x1b]133;prompt_started\x07');
+            }
+            widget.writeLine('\x1b[1m> ' + nls.localizeByDefault('Executing task: {0}', command) + ' <\x1b[0m\n');
         }
         return widget;
     }
@@ -218,7 +216,7 @@ export class TaskTerminalWidgetManager {
             terminal.close();
         } else if (showReuseMessage) {
             terminal.scrollToBottom();
-            terminal.writeLine('\x1b[1m\n\rTerminal will be reused by tasks. \x1b[0m\n');
+            terminal.writeLine('\x1b[1m\n\r' + nls.localize('theia/task/terminalWillBeReusedByTasks', 'Terminal will be reused by tasks.') + '\x1b[0m\n');
         }
     }
 }

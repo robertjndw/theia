@@ -15,13 +15,14 @@
 // *****************************************************************************
 
 import { inject, injectable, optional, postConstruct } from '@theia/core/shared/inversify';
-import { CommonCommands, PreferenceService, LabelProvider, ApplicationShell, QuickInputService, QuickPickValue, SaveableService } from '@theia/core/lib/browser';
+import { CommonCommands, LabelProvider, ApplicationShell, QuickInputService, QuickPickValue, SaveableService } from '@theia/core/lib/browser';
 import { EditorManager } from './editor-manager';
 import { CommandContribution, CommandRegistry, Command, ResourceProvider, MessageService, nls } from '@theia/core';
 import { LanguageService } from '@theia/core/lib/browser/language-service';
-import { SUPPORTED_ENCODINGS } from '@theia/core/lib/browser/supported-encodings';
+import { SUPPORTED_ENCODINGS } from '@theia/core/lib/common/supported-encodings';
 import { EncodingMode } from './editor';
 import { EditorLanguageQuickPickService } from './editor-language-quick-pick-service';
+import { PreferenceService } from '@theia/core/lib/common/preferences';
 
 export namespace EditorCommands {
 
@@ -208,6 +209,7 @@ export class EditorCommandContribution implements CommandContribution {
 
     static readonly AUTOSAVE_PREFERENCE: string = 'files.autoSave';
     static readonly AUTOSAVE_DELAY_PREFERENCE: string = 'files.autoSaveDelay';
+    static readonly AUTOSAVE_WHEN_NO_ERRORS_PREFERENCE: string = 'files.autoSaveWhenNoErrors';
 
     @inject(ApplicationShell)
     protected readonly shell: ApplicationShell;
@@ -244,12 +246,15 @@ export class EditorCommandContribution implements CommandContribution {
         this.preferencesService.ready.then(() => {
             this.saveResourceService.autoSave = this.preferencesService.get(EditorCommandContribution.AUTOSAVE_PREFERENCE) ?? 'off';
             this.saveResourceService.autoSaveDelay = this.preferencesService.get(EditorCommandContribution.AUTOSAVE_DELAY_PREFERENCE) ?? 1000;
+            this.saveResourceService.autoSaveWhenNoErrors = this.preferencesService.get(EditorCommandContribution.AUTOSAVE_WHEN_NO_ERRORS_PREFERENCE) ?? false;
         });
         this.preferencesService.onPreferenceChanged(e => {
             if (e.preferenceName === EditorCommandContribution.AUTOSAVE_PREFERENCE) {
                 this.saveResourceService.autoSave = this.preferencesService.get(EditorCommandContribution.AUTOSAVE_PREFERENCE) ?? 'off';
             } else if (e.preferenceName === EditorCommandContribution.AUTOSAVE_DELAY_PREFERENCE) {
                 this.saveResourceService.autoSaveDelay = this.preferencesService.get(EditorCommandContribution.AUTOSAVE_DELAY_PREFERENCE) ?? 1000;
+            } else if (e.preferenceName === EditorCommandContribution.AUTOSAVE_WHEN_NO_ERRORS_PREFERENCE) {
+                this.saveResourceService.autoSaveWhenNoErrors = this.preferencesService.get(EditorCommandContribution.AUTOSAVE_WHEN_NO_ERRORS_PREFERENCE) ?? false;
             }
         });
     }

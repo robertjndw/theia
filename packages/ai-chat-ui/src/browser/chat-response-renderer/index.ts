@@ -13,11 +13,23 @@
 //
 // SPDX-License-Identifier: EPL-2.0 OR GPL-2.0-only WITH Classpath-exception-2.0
 // *****************************************************************************
-export * from './ai-editor-manager';
+export * from './ai-selection-resolver';
 export * from './code-part-renderer';
 export * from './command-part-renderer';
 export * from './error-part-renderer';
 export * from './horizontal-layout-part-renderer';
 export * from './markdown-part-renderer';
+export * from './mcp-app-frame';
+export * from './mermaid-part-renderer';
+export * from './mermaid-rendering';
+export * from './spinner';
 export * from './text-part-renderer';
 export * from './toolcall-part-renderer';
+export * from './server-toolcall-part-renderer';
+export * from './not-available-toolcall-renderer';
+export * from './thinking-part-renderer';
+export * from './compaction-part-renderer';
+export * from './progress-part-renderer';
+export * from './tool-confirmation';
+export * from './delegation-tool-renderer';
+export * from './tool-call-rendering';

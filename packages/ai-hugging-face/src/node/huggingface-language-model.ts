@@ -17,35 +17,68 @@
 import {
     LanguageModel,
     LanguageModelRequest,
-    LanguageModelRequestMessage,
+    LanguageModelMessage,
     LanguageModelResponse,
     LanguageModelStreamResponsePart,
     LanguageModelTextResponse,
-    MessageActor
+    MessageActor,
+    LanguageModelStatus
 } from '@theia/ai-core';
 import { CancellationToken } from '@theia/core';
-import { HfInference } from '@huggingface/inference';
+import { InferenceClient } from '@huggingface/inference';
+import { createProxyFetch } from '@theia/ai-core/lib/node';
 
 export const HuggingFaceModelIdentifier = Symbol('HuggingFaceModelIdentifier');
 
-function toHuggingFacePrompt(messages: LanguageModelRequestMessage[]): string {
-    if (messages.length === 1) {
-        return messages[0].query;
-    }
-    return messages.map(message => `${toRoleLabel(message.actor)}: ${message.query}`).join('\n');
-}
-
-function toRoleLabel(actor: MessageActor): string {
+function toRole(actor: MessageActor): 'user' | 'assistant' | 'system' {
     switch (actor) {
         case 'user':
-            return 'User';
+            return 'user';
         case 'ai':
-            return 'Assistant';
+            return 'assistant';
         case 'system':
-            return 'System';
+            return 'system';
         default:
-            return '';
+            return 'user';
     }
+}
+
+// eslint-disable-next-line @typescript-eslint/consistent-type-definitions
+type HuggingFaceChatMessage = { role: 'user' | 'assistant' | 'system'; content: string };
+
+function toChatMessages(messages: LanguageModelMessage[]): HuggingFaceChatMessage[] {
+    const chatMessages = messages
+        .filter(LanguageModelMessage.isTextMessage)
+        .map(message => ({
+            role: toRole(message.actor),
+            content: message.text
+        }));
+    return mergeConsecutiveAssistantMessages(chatMessages);
+}
+
+function mergeConsecutiveAssistantMessages(messages: HuggingFaceChatMessage[]): HuggingFaceChatMessage[] {
+    const result: HuggingFaceChatMessage[] = [];
+    for (const message of messages) {
+        const previous = result[result.length - 1];
+        if (previous?.role === 'assistant' && message.role === 'assistant') {
+            const merged: HuggingFaceChatMessage = { ...previous, role: 'assistant' };
+
+            const previousContent = previous.content;
+            const nextContent = message.content;
+            if (previousContent && nextContent) {
+                merged.content = `${previousContent}\n${nextContent}`;
+            } else if (nextContent) {
+                merged.content = nextContent;
+            } else if (previousContent) {
+                merged.content = previousContent;
+            }
+
+            result[result.length - 1] = merged;
+        } else {
+            result.push(message);
+        }
+    }
+    return result;
 }
 
 export class HuggingFaceModel implements LanguageModel {
@@ -58,6 +91,7 @@ export class HuggingFaceModel implements LanguageModel {
     constructor(
         public readonly id: string,
         public model: string,
+        public status: LanguageModelStatus,
         public apiKey: () => string | undefined,
         public readonly name?: string,
         public readonly vendor?: string,
@@ -65,11 +99,11 @@ export class HuggingFaceModel implements LanguageModel {
         public readonly family?: string,
         public readonly maxInputTokens?: number,
         public readonly maxOutputTokens?: number,
-        public defaultRequestSettings?: Record<string, unknown>
+        public proxy?: string
     ) { }
 
     async request(request: LanguageModelRequest, cancellationToken?: CancellationToken): Promise<LanguageModelResponse> {
-        const hfInference = this.initializeHfInference();
+        const hfInference = this.initializeInferenceClient();
         if (this.isStreamingSupported(this.model)) {
             return this.handleStreamingRequest(hfInference, request, cancellationToken);
         } else {
@@ -78,68 +112,47 @@ export class HuggingFaceModel implements LanguageModel {
     }
 
     protected getSettings(request: LanguageModelRequest): Record<string, unknown> {
-        const settings = request.settings ? request.settings : this.defaultRequestSettings;
-        if (!settings) {
-            return {};
-        }
-        return settings;
+        return request.settings ?? {};
     }
 
-    protected async handleNonStreamingRequest(hfInference: HfInference, request: LanguageModelRequest): Promise<LanguageModelTextResponse> {
+    protected async handleNonStreamingRequest(hfInference: InferenceClient, request: LanguageModelRequest): Promise<LanguageModelTextResponse> {
         const settings = this.getSettings(request);
 
-        const response = await hfInference.textGeneration({
+        const response = await hfInference.chatCompletion({
             model: this.model,
-            inputs: toHuggingFacePrompt(request.messages),
-            parameters: {
-                ...settings
-            }
+            messages: toChatMessages(request.messages),
+            ...settings
         });
 
-        const stopWords = Array.isArray(settings.stop) ? settings.stop : [];
-        let cleanText = response.generated_text;
-
-        stopWords.forEach(stopWord => {
-            if (cleanText.endsWith(stopWord)) {
-                cleanText = cleanText.slice(0, -stopWord.length).trim();
-            }
-        });
+        const text = response.choices[0]?.message?.content ?? '';
 
         return {
-            text: cleanText
+            text
         };
     }
 
     protected async handleStreamingRequest(
-        hfInference: HfInference,
+        hfInference: InferenceClient,
         request: LanguageModelRequest,
         cancellationToken?: CancellationToken
     ): Promise<LanguageModelResponse> {
 
         const settings = this.getSettings(request);
 
-        const stream = hfInference.textGenerationStream({
+        const stream = hfInference.chatCompletionStream({
             model: this.model,
-            inputs: toHuggingFacePrompt(request.messages),
-            parameters: {
-                ...settings
-            }
+            messages: toChatMessages(request.messages),
+            ...settings
         });
-
-        const stopWords = Array.isArray(settings.stop) ? settings.stop : [];
 
         const asyncIterator = {
             async *[Symbol.asyncIterator](): AsyncIterator<LanguageModelStreamResponsePart> {
                 for await (const chunk of stream) {
-                    let content = chunk.token.text;
+                    const content = chunk.choices[0]?.delta?.content;
 
-                    stopWords.forEach(stopWord => {
-                        if (content.endsWith(stopWord)) {
-                            content = content.slice(0, -stopWord.length).trim();
-                        }
-                    });
-
-                    yield { content };
+                    if (content !== undefined) {
+                        yield { content };
+                    }
 
                     if (cancellationToken?.isCancellationRequested) {
                         break;
@@ -156,11 +169,11 @@ export class HuggingFaceModel implements LanguageModel {
         return true;
     }
 
-    private initializeHfInference(): HfInference {
+    private initializeInferenceClient(): InferenceClient {
         const token = this.apiKey();
         if (!token) {
             throw new Error('Please provide a Hugging Face API token.');
         }
-        return new HfInference(token);
+        return new InferenceClient(token, { fetch: createProxyFetch(this.proxy) });
     }
 }

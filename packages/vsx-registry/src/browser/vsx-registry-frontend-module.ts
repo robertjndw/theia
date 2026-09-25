@@ -17,30 +17,40 @@
 import '../../src/browser/style/index.css';
 
 import { ContainerModule } from '@theia/core/shared/inversify';
+import { CommandContribution, MenuContribution } from '@theia/core/lib/common';
 import {
     WidgetFactory, bindViewContribution, FrontendApplicationContribution, ViewContainerIdentifier, OpenHandler, WidgetManager, WebSocketConnectionProvider,
     WidgetStatusBarContribution,
     noopWidgetStatusBarContribution
 } from '@theia/core/lib/browser';
+import { ServiceConnectionProvider } from '@theia/core/lib/browser/messaging/service-connection-provider';
+import { VSXExtensionsFilterContribution } from './vsx-extensions-filter-contribution';
 import { VSXExtensionsViewContainer } from './vsx-extensions-view-container';
 import { VSXExtensionsContribution } from './vsx-extensions-contribution';
 import { VSXExtensionsSearchBar } from './vsx-extensions-search-bar';
 import { VSXExtensionsModel } from './vsx-extensions-model';
 import { ColorContribution } from '@theia/core/lib/browser/color-application-contribution';
+import { bindRootContributionProvider } from '@theia/core/lib/common/contribution-provider';
+import { FuzzySearch } from '@theia/core/lib/common/fuzzy-search';
+import { ExtensionsSourceContribution } from './extensions-source-contribution';
+import { VSXExtensionsContributionAdapter } from './vsx-extensions-contribution-adapter';
 import { VSXExtensionsWidget, VSXExtensionsWidgetOptions } from './vsx-extensions-widget';
 import { VSXExtensionFactory, VSXExtension, VSXExtensionOptions } from './vsx-extension';
 import { VSXExtensionEditor } from './vsx-extension-editor';
 import { VSXExtensionEditorManager } from './vsx-extension-editor-manager';
 import { VSXExtensionsSourceOptions } from './vsx-extensions-source';
 import { VSXExtensionsSearchModel } from './vsx-extensions-search-model';
-import { bindExtensionPreferences } from './recommended-extensions/recommended-extensions-preference-contribution';
+import { bindExtensionPreferences } from '../common/recommended-extensions-preference-contribution';
 import { bindPreferenceProviderOverrides } from './recommended-extensions/preference-provider-overrides';
 import { bindVsxExtensionsPreferences } from './vsx-extensions-preferences';
 import { VSXEnvironment, VSX_ENVIRONMENT_PATH } from '../common/vsx-environment';
+import { VSXRegistryService, VSX_REGISTRY_SERVICE_PATH } from '../common/vsx-registry-service';
 import { LanguageQuickPickService } from '@theia/core/lib/browser/i18n/language-quick-pick-service';
 import { VSXLanguageQuickPickService } from './vsx-language-quick-pick-service';
 import { VsxExtensionArgumentProcessor } from './vsx-extension-argument-processor';
 import { ArgumentProcessorContribution } from '@theia/plugin-ext/lib/main/browser/command-registry-main';
+import { ExtensionSchemaContribution } from './recommended-extensions/recommended-extensions-json-schema';
+import { JsonSchemaContribution } from '@theia/core/lib/browser/json-schema-store';
 
 export default new ContainerModule((bind, unbind, isBound, rebind) => {
     bind(VSXEnvironment)
@@ -53,6 +63,10 @@ export default new ContainerModule((bind, unbind, isBound, rebind) => {
         return child.get(VSXExtension);
     });
     bind(VSXExtensionsModel).toSelf().inSingletonScope();
+
+    bind(VSXRegistryService)
+        .toDynamicValue(ctx => ServiceConnectionProvider.createProxy<VSXRegistryService>(ctx.container, VSX_REGISTRY_SERVICE_PATH))
+        .inSingletonScope();
 
     bind(VSXExtensionEditor).toSelf();
     bind(WidgetFactory).toDynamicValue(ctx => ({
@@ -101,11 +115,26 @@ export default new ContainerModule((bind, unbind, isBound, rebind) => {
 
     bind(VSXExtensionsSearchModel).toSelf().inSingletonScope();
 
+    bind(VSXExtensionsFilterContribution).toSelf().inSingletonScope();
+    bind(CommandContribution).toService(VSXExtensionsFilterContribution);
+    bind(MenuContribution).toService(VSXExtensionsFilterContribution);
+
     rebind(LanguageQuickPickService).to(VSXLanguageQuickPickService).inSingletonScope();
 
     bindViewContribution(bind, VSXExtensionsContribution);
     bind(FrontendApplicationContribution).toService(VSXExtensionsContribution);
     bind(ColorContribution).toService(VSXExtensionsContribution);
+
+    // Extensions view contribution provider: any package can bind an `ExtensionsSourceContribution`
+    // to surface its artifact type (extensions, MCP servers, future skills, ...) in this view.
+    bindRootContributionProvider(bind, ExtensionsSourceContribution);
+    bind(VSXExtensionsContributionAdapter).toSelf().inSingletonScope();
+    bind(ExtensionsSourceContribution).toService(VSXExtensionsContributionAdapter);
+    // FuzzySearch is not bound globally by core - bind it here so the extensions
+    // source can use it to merge search results across contributions.
+    if (!isBound(FuzzySearch)) {
+        bind(FuzzySearch).toSelf().inSingletonScope();
+    }
 
     bindExtensionPreferences(bind);
     bindPreferenceProviderOverrides(bind, unbind);
@@ -113,4 +142,7 @@ export default new ContainerModule((bind, unbind, isBound, rebind) => {
 
     bind(VsxExtensionArgumentProcessor).toSelf().inSingletonScope();
     bind(ArgumentProcessorContribution).toService(VsxExtensionArgumentProcessor);
+
+    bind(ExtensionSchemaContribution).toSelf().inSingletonScope();
+    bind(JsonSchemaContribution).toService(ExtensionSchemaContribution);
 });

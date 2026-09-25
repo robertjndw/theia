@@ -14,8 +14,29 @@
 // SPDX-License-Identifier: EPL-2.0 OR GPL-2.0-only WITH Classpath-exception-2.0
 // *****************************************************************************
 
+import { Event } from '../../common';
 import { ApplicationShell } from '../shell';
-import { ExtractableWidget } from '../widgets';
+import { TheiaDockPanel } from '../shell/theia-dock-panel';
+import { ExtractableWidget, TabBar, Widget } from '../widgets';
+
+export abstract class SecondaryWindowRootWidget extends Widget {
+    secondaryWindow: Window | SecondaryWindow;
+    defaultRestoreArea?: ApplicationShell.Area;
+    abstract widgets: ReadonlyArray<Widget>;
+    abstract addWidget(widget: Widget, disposeCallback: () => void, options?: TheiaDockPanel.AddOptions): void;
+    getTabBar?(widget: Widget): TabBar<Widget> | undefined;
+}
+
+export interface SecondaryWindow extends Window {
+    rootWidget: SecondaryWindowRootWidget | undefined;
+}
+
+export function isSecondaryWindow(window: unknown): window is SecondaryWindow {
+    if (!window) {
+        return false;
+    }
+    return typeof window === 'object' && 'rootWidget' in window;
+}
 
 export const SecondaryWindowService = Symbol('SecondaryWindowService');
 
@@ -32,8 +53,19 @@ export interface SecondaryWindowService {
      * @param onClose optional callback that is invoked when the secondary window is closed
      * @returns the created window or `undefined` if it could not be created
      */
-    createSecondaryWindow(widget: ExtractableWidget, shell: ApplicationShell): Window | undefined;
+    createSecondaryWindow(widget: ExtractableWidget, shell: ApplicationShell): SecondaryWindow | Window | undefined;
+    readonly onWindowOpened: Event<Window>;
+    /**
+     * Emitted once a secondary window's final document has finished loading. Listeners can safely
+     * modify the window's document, unlike with {@link onWindowOpened}: at that point the window
+     * still shows the initial `about:blank` document, and anything added to it is discarded when
+     * the final document replaces it.
+     */
+    readonly onWindowLoaded: Event<Window>;
+    readonly onWindowClosed: Event<Window>;
+    readonly beforeWidgetRestore: Event<[Widget, Window]>;
 
     /** Handles focussing the given secondary window in the browser and on Electron. */
     focus(win: Window): void;
+    getWindows(): Window[];
 }

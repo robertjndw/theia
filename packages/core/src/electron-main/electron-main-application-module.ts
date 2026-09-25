@@ -15,12 +15,15 @@
 // *****************************************************************************
 
 import { ContainerModule } from 'inversify';
+import { performance } from 'perf_hooks';
 import { generateUuid } from '../common/uuid';
-import { bindContributionProvider } from '../common/contribution-provider';
+import { bindRootContributionProvider } from '../common/contribution-provider';
+import { Stopwatch, SimpleStopwatch } from '../common/performance';
 import { RpcConnectionHandler } from '../common/messaging/proxy-factory';
 import { ElectronSecurityToken } from '../electron-common/electron-token';
 import { ElectronMainWindowService, electronMainWindowServicePath } from '../electron-common/electron-main-window-service';
 import { ElectronMainApplication, ElectronMainApplicationContribution, ElectronMainProcessArgv } from './electron-main-application';
+import { LaunchArgsStore } from './launch-args-store';
 import { ElectronMainWindowServiceImpl } from './electron-main-window-service-impl';
 import { TheiaBrowserWindowOptions, TheiaElectronWindow, TheiaElectronWindowFactory, WindowApplicationConfig } from './theia-electron-window';
 import { TheiaMainApi } from './electron-api-main';
@@ -34,15 +37,17 @@ const electronSecurityToken: ElectronSecurityToken = { value: generateUuid() };
 (global as any)[ElectronSecurityToken] = electronSecurityToken;
 
 export default new ContainerModule(bind => {
+    bind(Stopwatch).toConstantValue(new SimpleStopwatch('electron main', () => performance.now()));
+    bind(LaunchArgsStore).toSelf().inSingletonScope();
     bind(ElectronMainApplication).toSelf().inSingletonScope();
     bind(ElectronMessagingContribution).toSelf().inSingletonScope();
     bind(ElectronMainApplicationContribution).toService(ElectronMessagingContribution);
     bind(ElectronSecurityToken).toConstantValue(electronSecurityToken);
     bind(ElectronSecurityTokenService).toSelf().inSingletonScope();
 
-    bindContributionProvider(bind, ElectronConnectionHandler);
-    bindContributionProvider(bind, ElectronMessagingService.Contribution);
-    bindContributionProvider(bind, ElectronMainApplicationContribution);
+    bindRootContributionProvider(bind, ElectronConnectionHandler);
+    bindRootContributionProvider(bind, ElectronMessagingService.Contribution);
+    bindRootContributionProvider(bind, ElectronMainApplicationContribution);
 
     bind(TheiaMainApi).toSelf().inSingletonScope();
     bind(ElectronMainApplicationContribution).toService(TheiaMainApi);

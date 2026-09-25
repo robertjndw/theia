@@ -16,6 +16,7 @@
 
 import { interfaces } from '@theia/core/shared/inversify';
 import * as monaco from '@theia/monaco-editor-core';
+import { type ILineChange } from '@theia/monaco-editor-core/esm/vs/editor/common/diff/legacyLinesDiffComputer';
 import { RPCProtocol } from '../../common/rpc-protocol';
 import {
     MAIN_RPC_CONTEXT,
@@ -32,10 +33,12 @@ import { MonacoEditor } from '@theia/monaco/lib/browser/monaco-editor';
 import { TextEditorMain } from './text-editor-main';
 import { DisposableCollection, Emitter, URI } from '@theia/core';
 import { EditorManager, EditorWidget } from '@theia/editor/lib/browser';
+import { ApplicationShell, NavigatableWidget, Saveable, Widget } from '@theia/core/lib/browser';
 import { SaveableService } from '@theia/core/lib/browser/saveable-service';
 import { TabsMainImpl } from './tabs/tabs-main';
 import { NotebookCellEditorService, NotebookEditorWidgetService } from '@theia/notebook/lib/browser';
 import { SimpleMonacoEditor } from '@theia/monaco/lib/browser/simple-monaco-editor';
+import { EncodingRegistry } from '@theia/core/lib/browser/encoding-registry';
 
 export class EditorsAndDocumentsMain implements Disposable {
 
@@ -46,7 +49,9 @@ export class EditorsAndDocumentsMain implements Disposable {
 
     private readonly modelService: EditorModelService;
     private readonly editorManager: EditorManager;
+    private readonly shell: ApplicationShell;
     private readonly saveResourceService: SaveableService;
+    private readonly encodingRegistry: EncodingRegistry;
 
     private readonly onTextEditorAddEmitter = new Emitter<TextEditorMain[]>();
     private readonly onTextEditorRemoveEmitter = new Emitter<string[]>();
@@ -66,8 +71,10 @@ export class EditorsAndDocumentsMain implements Disposable {
         this.proxy = rpc.getProxy(MAIN_RPC_CONTEXT.EDITORS_AND_DOCUMENTS_EXT);
 
         this.editorManager = container.get(EditorManager);
+        this.shell = container.get(ApplicationShell);
         this.modelService = container.get(EditorModelService);
         this.saveResourceService = container.get(SaveableService);
+        this.encodingRegistry = container.get(EncodingRegistry);
 
         this.stateComputer = new EditorAndDocumentStateComputer(d => this.onDelta(d),
             this.editorManager,
@@ -152,7 +159,8 @@ export class EditorsAndDocumentsMain implements Disposable {
             languageId: model.getLanguageId(),
             EOL: model.textEditorModel.getEOL(),
             modeId: model.languageId,
-            isDirty: model.dirty
+            isDirty: model.dirty,
+            encoding: this.encodingRegistry.getEncodingForResource(URI.fromComponents(model.textEditorModel.uri), model.getEncoding())
         };
     }
 
@@ -178,22 +186,31 @@ export class EditorsAndDocumentsMain implements Disposable {
     }
 
     async save(uri: URI): Promise<URI | undefined> {
-        const editor = await this.editorManager.getByUri(uri);
-        if (!editor) {
+        const widget = await this.getSaveTarget(uri);
+        if (!widget) {
             return undefined;
         }
-        return this.saveResourceService.save(editor);
+        return this.saveResourceService.save(widget);
     }
 
     async saveAs(uri: URI): Promise<URI | undefined> {
-        const editor = await this.editorManager.getByUri(uri);
-        if (!editor) {
+        const widget = await this.getSaveTarget(uri);
+        if (!widget) {
             return undefined;
         }
-        if (!this.saveResourceService.canSaveAs(editor)) {
+        if (!this.saveResourceService.canSaveAs(widget)) {
             return undefined;
         }
-        return this.saveResourceService.saveAs(editor);
+        return this.saveResourceService.saveAs(widget);
+    }
+
+    /**
+     * Resolve the widget holding `uri`, preferring a text editor. Custom editors and notebooks
+     * are not opened by the `EditorManager`, so they are only reachable through the shell.
+     */
+    protected async getSaveTarget(uri: URI): Promise<Widget | undefined> {
+        return await this.editorManager.getByUri(uri)
+            ?? this.shell.widgets.find(widget => Saveable.get(widget) && NavigatableWidget.getUri(widget)?.isEqual(uri));
     }
 
     saveAll(includeUntitled?: boolean): Promise<boolean> {
@@ -211,6 +228,11 @@ export class EditorsAndDocumentsMain implements Disposable {
             }
         }
         return Promise.resolve();
+    }
+
+    getDiffInformation(id: string): ILineChange[] {
+        const editor = this.getEditor(id);
+        return editor?.diffInformation || [];
     }
 }
 
@@ -289,6 +311,9 @@ class EditorAndDocumentStateComputer implements Disposable {
     }
 
     private onTextEditorAdd(widget: EditorWidget): void {
+        if (widget.isDisposed) {
+            return;
+        }
         const editor = MonacoEditor.get(widget);
         if (!editor) {
             return;

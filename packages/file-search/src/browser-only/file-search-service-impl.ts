@@ -1,5 +1,5 @@
 // *****************************************************************************
-// Copyright (C) 2024 robertjndw
+// Copyright (C) 2025 Maksim Kachurin and others.
 //
 // This program and the accompanying materials are made available under the
 // terms of the Eclipse Public License v. 2.0 which is available at
@@ -14,31 +14,36 @@
 // SPDX-License-Identifier: EPL-2.0 OR GPL-2.0-only WITH Classpath-exception-2.0
 // *****************************************************************************
 
-import { injectable, inject } from '@theia/core/shared/inversify';
+import { injectable, inject, named } from '@theia/core/shared/inversify';
 import { FileSearchService, WHITESPACE_QUERY_SEPARATOR } from '../common/file-search-service';
-import { FileSystemProvider, FileType } from '@theia/filesystem/lib/common/files';
+import { FileService } from '@theia/filesystem/lib/browser/file-service';
+import * as fuzzy from '@theia/core/shared/fuzzy';
 import { CancellationTokenSource, CancellationToken, ILogger, URI } from '@theia/core';
-import { minimatch } from 'minimatch';
+import { matchesPattern, createIgnoreMatcher, getIgnorePatterns } from '@theia/filesystem/lib/browser-only/file-search';
 
 @injectable()
 export class FileSearchServiceImpl implements FileSearchService {
-    constructor(
-        @inject(ILogger) protected readonly logger: ILogger,
-        @inject(FileSystemProvider)
-        protected readonly fileSystemProvider: FileSystemProvider
-    ) { }
+    @inject(ILogger) @named('file-search:FileSearchServiceImpl')
+    protected readonly logger: ILogger;
 
-    async find(
-        searchPattern: string,
-        options: FileSearchService.Options,
-        clientToken?: CancellationToken
-    ): Promise<string[]> {
+    @inject(FileService)
+    protected readonly fs: FileService;
+
+    /**
+     * Searches for files matching the given pattern.
+     * @param searchPattern - The pattern to search for
+     * @param options - Search options including root URIs and filters
+     * @param clientToken - Optional cancellation token
+     * @returns Promise resolving to array of matching file URIs
+     */
+    async find(searchPattern: string, options: FileSearchService.Options, clientToken?: CancellationToken): Promise<string[]> {
         const cancellationSource = new CancellationTokenSource();
+
         if (clientToken) {
             clientToken.onCancellationRequested(() => cancellationSource.cancel());
         }
-        const token = cancellationSource.token;
 
+        const token = cancellationSource.token;
         const opts = {
             fuzzyMatch: true,
             limit: Number.MAX_SAFE_INTEGER,
@@ -46,6 +51,7 @@ export class FileSearchServiceImpl implements FileSearchService {
             ...options
         };
 
+        // Merge root-specific options with global options
         const roots: FileSearchService.RootOptions = options.rootOptions || {};
         if (options.rootUris) {
             for (const rootUri of options.rootUris) {
@@ -54,104 +60,173 @@ export class FileSearchServiceImpl implements FileSearchService {
                 }
             }
         }
+        // eslint-disable-next-line guard-for-in
+        for (const rootUri in roots) {
+            const rootOptions = roots[rootUri];
+            if (opts.includePatterns) {
+                const includePatterns = rootOptions.includePatterns || [];
+                rootOptions.includePatterns = [...includePatterns, ...opts.includePatterns];
+            }
+            if (opts.excludePatterns) {
+                const excludePatterns = rootOptions.excludePatterns || [];
+                rootOptions.excludePatterns = [...excludePatterns, ...opts.excludePatterns];
+            }
+            if (rootOptions.useGitIgnore === undefined) {
+                rootOptions.useGitIgnore = opts.useGitIgnore;
+            }
+        }
 
         const exactMatches = new Set<string>();
         const fuzzyMatches = new Set<string>();
 
-        const patterns = searchPattern.toLowerCase().trim().split(WHITESPACE_QUERY_SEPARATOR);
+        // Split search pattern into individual terms for matching
+        const patterns = searchPattern.toLowerCase().split(WHITESPACE_QUERY_SEPARATOR).map(pattern => pattern.trim()).filter(Boolean);
 
-        await Promise.all(
-            Object.keys(roots).map(async root => {
-                try {
-                    const rootUri = new URI(root);
-                    await this.doFind(rootUri, opts, candidate => {
-                        const candidatePattern = candidate.toLowerCase();
-                        const patternExists = patterns.every(pattern => candidatePattern.includes(pattern));
+        await Promise.all(Object.keys(roots).map(async root => {
+            try {
+                const rootUri = new URI(root);
+                const rootOptions = roots[root];
 
-                        // Add exact or fuzzy matches
-                        if (!searchPattern || searchPattern === '*') {
-                            exactMatches.add(candidate);
-                        } else if (patternExists) {
-                            exactMatches.add(candidate);
-                        } else if (opts.fuzzyMatch && this.isFuzzyMatch(patterns, candidatePattern)) {
-                            fuzzyMatches.add(candidate);
+                await this.doFind(rootUri, rootOptions, (fileUri: string) => {
+
+                    // Skip already matched files
+                    if (exactMatches.has(fileUri) || fuzzyMatches.has(fileUri)) {
+                        return;
+                    }
+
+                    // Check for exact pattern matches
+                    const candidatePattern = fileUri.toLowerCase();
+                    const patternExists = patterns.every(pattern => candidatePattern.includes(pattern));
+
+                    if (patternExists) {
+                        exactMatches.add(fileUri);
+                    } else if (!searchPattern || searchPattern === '*') {
+                        exactMatches.add(fileUri);
+                    } else {
+                        // Check for fuzzy matches if enabled
+                        const fuzzyPatternExists = patterns.every(pattern => fuzzy.test(pattern, candidatePattern));
+
+                        if (opts.fuzzyMatch && fuzzyPatternExists) {
+                            fuzzyMatches.add(fileUri);
                         }
+                    }
 
-                        // Stop early if we hit the limit
-                        if (exactMatches.size >= opts.limit) {
-                            cancellationSource.cancel();
-                        }
-                    }, token);
-                } catch (e) {
-                    this.logger.error('Failed to search:', root, e);
-                }
-            })
-        );
+                    // Cancel search if limit reached
+                    if ((exactMatches.size + fuzzyMatches.size) >= opts.limit) {
+                        cancellationSource.cancel();
+                    }
+                }, token);
+            } catch (e) {
+                this.logger.error('Failed to search:', root, e);
+            }
+        }));
 
         if (clientToken?.isCancellationRequested) {
             return [];
         }
+
+        // Return results up to the specified limit
         return [...exactMatches, ...fuzzyMatches].slice(0, opts.limit);
     }
 
+    /**
+     * Performs the actual file search within a root directory.
+     * @param rootUri - The root URI to search in
+     * @param options - Search options for this root
+     * @param accept - Callback function for each matching file
+     * @param token - Cancellation token
+     */
     protected async doFind(
         rootUri: URI,
         options: FileSearchService.BaseOptions,
         accept: (fileUri: string) => void,
         token: CancellationToken
     ): Promise<void> {
-        try {
-            const queue: URI[] = [rootUri];
+        const matcher = createIgnoreMatcher();
+        const queue: URI[] = [rootUri];
+        let queueIndex = 0;
 
-            while (queue.length > 0) {
-                if (token.isCancellationRequested) return;
+        while (queueIndex < queue.length) {
+            if (token.isCancellationRequested) {
+                return;
+            }
 
-                const currentUri = queue.shift()!;
-                try {
-                    const entries = await this.fileSystemProvider.readdir(currentUri);
+            const currentUri = queue[queueIndex++];
 
-                    for (const [name, type] of entries) {
-                        if (token.isCancellationRequested) return;
+            try {
+                // Skip excluded paths
+                if (this.shouldExcludePath(currentUri, options.excludePatterns)) {
+                    continue;
+                }
 
-                        const entryUri = currentUri.resolve(name);
-                        if (type === FileType.Directory) {
-                            queue.push(entryUri); // Add directories for recursive search
-                        } else {
-                            if (this.matchesFilters(entryUri, options)) {
-                                accept(entryUri.toString());
-                            }
-                        }
+                const stat = await this.fs.resolve(currentUri);
+                const relPath = currentUri.path.toString().replace(/^\/|^\.\//, '');
+
+                // Skip paths ignored by gitignore patterns
+                if (options.useGitIgnore && relPath && matcher.ignores(relPath)) {
+                    continue;
+                }
+
+                // Accept file if it matches include patterns
+                if (stat.isFile && this.shouldIncludePath(currentUri, options.includePatterns)) {
+                    accept(currentUri.toString());
+                } else if (stat.isDirectory && Array.isArray(stat.children)) {
+                    // Process ignore files in directory
+                    if (options.useGitIgnore) {
+                        const patterns = await getIgnorePatterns(
+                            currentUri,
+                            uri => this.fs.read(uri).then(content => content.value)
+                        );
+
+                        matcher.add(patterns);
                     }
-                } catch (e) {
-                    this.logger.error(`Error reading directory: ${currentUri.toString()}`, e);
+
+                    // Add children to search queue
+                    for (const child of stat.children) {
+                        queue.push(child.resource);
+                    }
                 }
+            } catch (e) {
+                this.logger.error(`Error reading directory: ${currentUri.toString()}`, e);
             }
-        } catch (e) {
-            this.logger.error(`Error searching in: ${rootUri.toString()}`, e);
         }
     }
 
-    private matchesFilters(uri: URI, options: FileSearchService.BaseOptions): boolean {
+    /**
+     * Checks if a path should be excluded based on exclude patterns.
+     * @param uri - The URI to check
+     * @param excludePatterns - Array of exclude patterns
+     * @returns True if the path should be excluded
+     */
+    private shouldExcludePath(uri: URI, excludePatterns: string[] | undefined): boolean {
+        if (!excludePatterns?.length) {
+            return false;
+        }
+
         const path = uri.path.toString();
-
-        // Check exclude patterns
-        if (options.excludePatterns) {
-            for (const exclude of options.excludePatterns) {
-                if (minimatch(path, exclude)) {
-                    return false; // Exclude matches -> Ignore this file
-                }
-            }
-        }
-
-        // Check include patterns
-        if (options.includePatterns && options.includePatterns.length > 0) {
-            return options.includePatterns.some(include => minimatch(path, include));
-        }
-
-        return true; // If no include patterns, assume all files are valid
+        return matchesPattern(path, excludePatterns, {
+            dot: true,
+            matchBase: true,
+            nocase: true
+        });
     }
 
-    private isFuzzyMatch(patterns: string[], text: string): boolean {
-        return patterns.every(pattern => minimatch(text, `*${pattern}*`, { nocase: true }));
+    /**
+     * Checks if a path should be included based on include patterns.
+     * @param uri - The URI to check
+     * @param includePatterns - Array of include patterns
+     * @returns True if the path should be included
+     */
+    private shouldIncludePath(uri: URI, includePatterns: string[] | undefined): boolean {
+        if (!includePatterns?.length) {
+            return true;
+        }
+
+        const path = uri.path.toString();
+        return matchesPattern(path, includePatterns, {
+            dot: true,
+            matchBase: true,
+            nocase: true
+        });
     }
 }

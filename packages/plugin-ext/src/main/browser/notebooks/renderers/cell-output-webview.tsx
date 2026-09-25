@@ -19,7 +19,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import * as React from '@theia/core/shared/react';
-import { inject, injectable, interfaces } from '@theia/core/shared/inversify';
+import { inject, injectable, interfaces, named } from '@theia/core/shared/inversify';
 import { generateUuid } from '@theia/core/lib/common/uuid';
 import {
     NotebookRendererMessagingService, CellOutputWebview, NotebookRendererRegistry,
@@ -36,13 +36,15 @@ import {
     CellOutputChange, CellsChangedMessage, CellsMoved, CellsSpliced,
     ChangePreferredMimetypeMessage, FromWebviewMessage, Output, OutputChangedMessage
 } from './webview-communication';
-import { Disposable, DisposableCollection, Emitter, QuickPickService, nls } from '@theia/core';
+import { Disposable, DisposableCollection, Emitter, ILogger, QuickPickService, nls } from '@theia/core';
 import { NotebookModel } from '@theia/notebook/lib/browser/view-model/notebook-model';
 import { NotebookOptionsService, NotebookOutputOptions } from '@theia/notebook/lib/browser/service/notebook-options';
 import { NotebookCellModel } from '@theia/notebook/lib/browser/view-model/notebook-cell-model';
 import { CellOutput, NotebookCellsChangeType } from '@theia/notebook/lib/common';
 import { NotebookCellOutputModel } from '@theia/notebook/lib/browser/view-model/notebook-cell-output-model';
 import { Deferred } from '@theia/core/lib/common/promise-util';
+import { ContextKeyService } from '@theia/core/lib/browser/context-key-service';
+import { NOTEBOOK_OUTPUT_FOCUSED } from '@theia/notebook/lib/browser/contributions/notebook-context-keys';
 
 export const AdditionalNotebookCellOutputCss = Symbol('AdditionalNotebookCellOutputCss');
 
@@ -222,11 +224,17 @@ export class CellOutputWebviewImpl implements CellOutputWebview, Disposable {
     @inject(QuickPickService)
     protected readonly quickPickService: QuickPickService;
 
+    @inject(ILogger) @named('plugin-ext:CellOutputWebviewImpl')
+    protected readonly logger: ILogger;
+
     @inject(AdditionalNotebookCellOutputCss)
     protected readonly additionalOutputCss: string;
 
     @inject(NotebookOptionsService)
     protected readonly notebookOptionsService: NotebookOptionsService;
+
+    @inject(ContextKeyService)
+    protected readonly contextKeyService: ContextKeyService;
 
     // returns the output Height
     protected readonly onDidRenderOutputEmitter = new Emitter<OutputRenderEvent>();
@@ -336,17 +344,18 @@ export class CellOutputWebviewImpl implements CellOutputWebview, Disposable {
     }
 
     render(): React.JSX.Element {
-        return <div className='theia-notebook-cell-output-webview' ref={async element => {
+        return <div className='theia-notebook-cell-output-webview' ref={element => {
+            this.element = element ?? undefined;
             if (element) {
-                this.element = element;
-                await this.webviewWidgetInitialized.promise;
-                this.attachWebview();
+                this.webviewWidgetInitialized.promise
+                    .then(() => this.attachWebview())
+                    .catch(error => this.logger.error('Failed to attach notebook output webview.', error));
             }
         }}></div>;
     }
 
     protected attachWebview(): void {
-        if (this.element) {
+        if (this.element && !this.isAttached()) {
             this.webviewWidget.processMessage(new Message('before-attach'));
             this.element.appendChild(this.webviewWidget.node);
             this.webviewWidget.processMessage(new Message('after-attach'));
@@ -521,8 +530,14 @@ export class CellOutputWebviewImpl implements CellOutputWebview, Disposable {
             case 'cellFocusChanged':
                 const selectedCell = this.notebook.getCellByHandle(message.cellHandle);
                 if (selectedCell) {
-                    this.notebook.setSelectedCell(selectedCell);
+                    this.editor.viewModel.setSelectedCell(selectedCell);
                 }
+                break;
+            case 'webviewFocusChanged':
+                if (message.focused) {
+                    window.getSelection()?.empty();
+                }
+                this.contextKeyService.setContext(NOTEBOOK_OUTPUT_FOCUSED, message.focused);
                 break;
             case 'cellHeightRequest':
                 const cellHeight = this.notebook.getCellByHandle(message.cellHandle)?.cellHeight ?? 0;

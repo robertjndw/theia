@@ -14,7 +14,9 @@
 // SPDX-License-Identifier: EPL-2.0 OR GPL-2.0-only WITH Classpath-exception-2.0
 // *****************************************************************************
 import { Event } from '@theia/core';
-import { LanguageModelRequirement } from './language-model';
+import { LanguageModelRequirement, ReasoningSettings } from './language-model';
+import { NotificationType } from './notification-types';
+import { GenericCapabilitySelections } from './capability-utils';
 
 export const AISettingsService = Symbol('AISettingsService');
 /**
@@ -31,8 +33,40 @@ export interface AgentSettings {
     languageModelRequirements?: LanguageModelRequirement[];
     enable?: boolean;
     /**
+     * Whether the agent should be shown in the chat UI.
+     * If undefined, defaults to true.
+     */
+    showInChat?: boolean;
+    /**
      * A mapping of main template IDs to their selected variant IDs.
      * If a main template is not present in this mapping, it means the main template is used.
      */
     selectedVariants?: Record<string, string>;
+    /**
+     * Configuration for completion notifications when the agent finishes a task.
+     * If undefined, defaults to 'off'.
+     */
+    completionNotification?: NotificationType;
+    /**
+     * User overrides for template-based capabilities.
+     * Keys are capability fragment IDs, values are enabled/disabled state.
+     * Only stores explicit user choices that differ from template defaults.
+     */
+    capabilityOverrides?: Record<string, boolean>;
+    /**
+     * User selections for generic capabilities (skills, functions, MCP tools, etc.).
+     * Stores selected IDs for each capability type.
+     */
+    genericCapabilitySelections?: GenericCapabilitySelections;
+    /**
+     * User selections for provider server tools, keyed by model vendor to preserve provider
+     * specificity. Each value holds the enabled server tool ids for that vendor.
+     */
+    serverToolSelections?: Record<string, string[]>;
+    /**
+     * Persisted reasoning selection for this agent. When set, the chat input's reasoning selector
+     * is initialized to this value at session start instead of falling back to the preference
+     * default or the model's declared default.
+     */
+    reasoning?: ReasoningSettings;
 }

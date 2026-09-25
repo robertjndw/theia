@@ -14,13 +14,15 @@
 // SPDX-License-Identifier: EPL-2.0 OR GPL-2.0-only WITH Classpath-exception-2.0
 // *****************************************************************************
 
-import { inject, injectable, postConstruct } from '@theia/core/shared/inversify';
-import { Minimatch } from 'minimatch';
-import { MaybePromise } from '@theia/core/lib/common/types';
+import { PreferenceChangeEvent } from '@theia/core';
 import { Event, Emitter } from '@theia/core/lib/common/event';
-import { PreferenceChangeEvent } from '@theia/core/lib/browser/preferences';
-import { FileSystemPreferences, FileSystemConfiguration } from '@theia/filesystem/lib/browser/filesystem-preferences';
-import { FileNavigatorPreferences, FileNavigatorConfiguration } from './navigator-preferences';
+import { MaybePromise } from '@theia/core/lib/common/types';
+import { inject, injectable, postConstruct } from '@theia/core/shared/inversify';
+import { FileStatNode } from '@theia/filesystem/lib/browser';
+import { FileSystemPreferences, FileSystemConfiguration } from '@theia/filesystem/lib/common/filesystem-preferences';
+import { WorkspaceService } from '@theia/workspace/lib/browser';
+import { Minimatch } from 'minimatch';
+import { FileNavigatorPreferences, FileNavigatorConfiguration } from '../common/navigator-preferences';
 
 /**
  * Filter for omitting elements from the navigator. For more details on the exclusion patterns,
@@ -35,6 +37,9 @@ export class FileNavigatorFilter {
 
     @inject(FileSystemPreferences)
     protected readonly filesPreferences: FileSystemPreferences;
+
+    @inject(WorkspaceService)
+    protected readonly workspaceService: WorkspaceService;
 
     constructor(
         @inject(FileNavigatorPreferences) protected readonly preferences: FileNavigatorPreferences
@@ -60,7 +65,12 @@ export class FileNavigatorFilter {
     }
 
     protected filterItem(item: { id: string }): boolean {
-        return this.filterPredicate.filter(item);
+        let relativePath: string | undefined;
+        if (FileStatNode.is(item)) {
+            const workspaceRoot = this.workspaceService.getWorkspaceRootUri(item.uri);
+            relativePath = workspaceRoot?.relative(item.uri)?.toString();
+        }
+        return this.filterPredicate.filter({ id: relativePath ?? item.id });
     }
 
     protected fireFilterChanged(): void {
@@ -68,9 +78,10 @@ export class FileNavigatorFilter {
     }
 
     protected onFilesPreferenceChanged(event: PreferenceChangeEvent<FileSystemConfiguration>): void {
-        const { preferenceName, newValue } = event;
+        const { preferenceName } = event;
         if (preferenceName === 'files.exclude') {
-            this.filterPredicate = this.createFilterPredicate(newValue as FileNavigatorFilter.Exclusions | undefined || {});
+            const filesExcludes = this.filesPreferences['files.exclude'];
+            this.filterPredicate = this.createFilterPredicate(filesExcludes);
             this.fireFilterChanged();
         }
     }
@@ -155,7 +166,7 @@ export class FileNavigatorFilterPredicate implements FileNavigatorFilter.Predica
     }
 
     protected createDelegate(pattern: string): FileNavigatorFilter.Predicate {
-        const delegate = new Minimatch(pattern, { matchBase: true });
+        const delegate = new Minimatch(pattern);
         return {
             filter: item => !delegate.match(item.id)
         };

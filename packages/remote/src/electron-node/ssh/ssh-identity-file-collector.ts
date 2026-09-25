@@ -20,7 +20,8 @@ import * as path from 'path';
 import * as crypto from 'crypto';
 import { ParsedKey } from 'ssh2';
 import * as ssh2 from 'ssh2';
-import { injectable } from '@theia/core/shared/inversify';
+import { injectable, inject, named } from '@theia/core/shared/inversify';
+import { ILogger } from '@theia/core';
 
 export interface SSHKey {
     filename: string;
@@ -32,6 +33,9 @@ export interface SSHKey {
 
 @injectable()
 export class SSHIdentityFileCollector {
+
+    @inject(ILogger) @named('remote:SSHIdentityFileCollector')
+    protected readonly logger: ILogger;
 
     protected getDefaultIdentityFiles(): string[] {
         const homeDir = os.homedir();
@@ -54,8 +58,8 @@ export class SSHIdentityFileCollector {
         ];
     }
 
-    async gatherIdentityFiles(sshAgentSock?: string): Promise<SSHKey[]> {
-        const identityFiles = this.getDefaultIdentityFiles();
+    async gatherIdentityFiles(sshAgentSock?: string, overrideIdentityFiles?: string[]): Promise<SSHKey[]> {
+        const identityFiles = overrideIdentityFiles || this.getDefaultIdentityFiles();
 
         const identityFileContentsResult = await Promise.allSettled(identityFiles.map(async keyPath => {
             keyPath = await fs.pathExists(keyPath + '.pub') ? keyPath + '.pub' : keyPath;
@@ -68,7 +72,7 @@ export class SSHIdentityFileCollector {
 
             const parsedResult = ssh2.utils.parseKey(result.value);
             if (parsedResult instanceof Error || !parsedResult) {
-                console.log(`Error while parsing SSH public key ${identityFiles[i]}:`, parsedResult);
+                this.logger.info(`Error while parsing SSH public key ${identityFiles[i]}:`, parsedResult);
                 return undefined;
             }
 

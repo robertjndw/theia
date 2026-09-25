@@ -32,7 +32,7 @@ export class TheiaOutputViewChannel extends TheiaPageObject {
 
     constructor(protected readonly data: TheiaOutputViewChannelData, protected readonly outputView: TheiaOutputView) {
         super(outputView.app);
-        this.monacoEditor = new TheiaMonacoEditor(this.viewSelector, outputView.app);
+        this.monacoEditor = new TheiaMonacoEditor(this.page.locator(this.viewSelector), outputView.app);
     }
 
     protected get viewSelector(): string {
@@ -66,7 +66,7 @@ export class TheiaOutputViewChannel extends TheiaPageObject {
 
     async maxSeverityOfLineByLineNumber(lineNumber: number): Promise<'error' | 'warning' | 'info'> {
         await this.waitForVisible();
-        const lineElement = await this.monacoEditor.lineByLineNumber(lineNumber);
+        const lineElement = await (await this.monacoEditor.line(lineNumber)).elementHandle();
         const contents = await lineElement?.$$('span > span.mtk1');
         if (!contents || contents.length < 1) {
             throw new Error(`Could not find contents of line number ${lineNumber}!`);
@@ -80,6 +80,20 @@ export class TheiaOutputViewChannel extends TheiaPageObject {
             return 'warning';
         }
         return 'info';
+    }
+
+    async ansiClassesOfLineByLineNumber(lineNumber: number): Promise<string[]> {
+        await this.waitForVisible();
+        const lineElement = await (await this.monacoEditor.line(lineNumber)).elementHandle();
+        const contents = await lineElement?.$$('span > span.mtk1');
+        if (!contents || contents.length < 1) {
+            return [];
+        }
+        const classNames = await Promise.all(contents.map(
+            async content => (await content.getAttribute('class')) ?? ''));
+        return classNames
+            .flatMap(c => c.split(' '))
+            .filter(c => c.startsWith('ansi-'));
     }
 
     async textContentOfLineByLineNumber(lineNumber: number): Promise<string | undefined> {
