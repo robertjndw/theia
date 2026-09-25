@@ -19,6 +19,7 @@ import { inject, injectable, interfaces } from '@theia/core/shared/inversify';
 import { EncodingService } from '@theia/core/lib/common/encoding-service';
 import { OPFSInitialization, DefaultOPFSInitialization } from '@theia/filesystem/lib/browser-only/opfs-filesystem-initialization';
 import { OPFSFileSystemProvider } from '@theia/filesystem/lib/browser-only/opfs-filesystem-provider';
+import { FileSystemProviderErrorCode, toFileSystemProviderErrorCode } from '@theia/filesystem/lib/common/files';
 import { exerciseFiles } from './example-exercise';
 import { solutionFiles } from './example-solution';
 
@@ -45,7 +46,15 @@ export class ExampleOPFSInitialization extends DefaultOPFSInitialization {
         }
         await provider.mkdir(directoryUri);
         for (const file of files) {
-            await provider.writeFile(directoryUri.resolve(file.name), this.encodingService.encode(file.content).buffer, { create: true, overwrite: false });
+            try {
+                await provider.writeFile(directoryUri.resolve(file.name), this.encodingService.encode(file.content).buffer, { create: true, overwrite: false });
+            } catch (error) {
+                // A second tab opened on the first visit races us through the exists check above.
+                // Rejecting here would leave the OPFS provider's `initialized` promise rejected for the whole session.
+                if (toFileSystemProviderErrorCode(error) !== FileSystemProviderErrorCode.FileExists) {
+                    throw error;
+                }
+            }
         }
     }
 }
